@@ -1,0 +1,25 @@
+name: ASYNC-RDMA-CI
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  soft-roce-env:
+    name: Env Test for soft-roce
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        env:
+          SHOW_WAVE: false
+        run: |
+          sudo apt-get install -y net-tools # for ifconfig
+          sudo apt-get install -y ibverbs-providers # for soft-roce, will install libibverbs1
+          sudo apt-get install -y rdmacm-utils # will install librdmacm1
+          sudo apt-get install -y ibverbs-utils
+          sudo apt-get install -y perftest # will install libibumad3
+          sudo apt-get install -y librdmacm-dev # will install libibverbs-dev
+          ./run.sh
+      - name: Setup tmate session
+        if: ${{ failure() }}
+        uses: mxschmitt/action-tmate@v3
+

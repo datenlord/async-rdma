@@ -5,12 +5,11 @@ on:
 
 jobs:
   soft-roce-env:
-    name: Env Test for soft-roce
+    name: Env test for softiwarp
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v2
       - name: Run
-        env:
-          SHOW_WAVE: false
         run: |
           sudo apt-get install -y net-tools # for ifconfig
           sudo apt-get install -y ibverbs-providers # for soft-roce, will install libibverbs1

@@ -3,21 +3,24 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  CI_RUST_TOOLCHAIN: 1.50.0
+
 jobs:
   soft-roce-env:
     name: Env test for soft-roce and softiwarp
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
+          override: true
       - name: Run
         run: |
-          sudo apt-get install -y net-tools # for ifconfig
-          sudo apt-get install -y ibverbs-providers # for soft-roce, will install libibverbs1
-          sudo apt-get install -y rdmacm-utils # will install librdmacm1
-          sudo apt-get install -y ibverbs-utils
-          sudo apt-get install -y perftest # will install libibumad3
-          sudo apt-get install -y librdmacm-dev # will install libibverbs-dev
-          ./run.sh
+          sudo apt-get install -y net-tools librdmacm-dev ibverbs-utils rdmacm-utils perftest
+          ./scripts/run.sh
       - name: Setup tmate session
         if: ${{ failure() }}
         uses: mxschmitt/action-tmate@v3

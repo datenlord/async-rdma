@@ -24,6 +24,11 @@ sudo modprobe rdma_ucm
 cd ./src/rxe
 make
 sudo insmod ./rdma_rxe.ko
+# Build and install softiwarp kernel module
+# The siw code is from Kernel 5.4.0
+cd ../siw
+make
+sudo insmod ./siw.ko
 
 # Setup soft-roce device
 sudo rdma link add $RXE_DEV type rxe netdev eth0
@@ -50,15 +55,17 @@ ucmatose &
 sleep 1
 ucmatose -s $HOST_IP
 
+# Cargo run async-rdma
+cd ../../
+cargo build
+timeout 3 cargo run $SRV_PORT &
+sleep 1
+cargo run $HOST_IP $SRV_PORT
+sleep 3
+
 # Remove soft-roce device
 sudo rdma link delete $RXE_DEV
 
-
-# Build and install softiwarp kernel module
-# The siw code is from Kernel 5.4.0
-cd ../siw
-make
-sudo insmod ./siw.ko
 
 # Setup softiwarp device
 sudo rdma link add siw_eth0 type siw netdev eth0
@@ -80,6 +87,12 @@ ucmatose -s $HOST_IP
 rdma_xserver -p $SRV_PORT -c r &
 sleep 1
 rdma_xclient -s $HOST_IP -p $SRV_PORT -c r
+
+# Cargo run async-rdma
+timeout 3 cargo run $SRV_PORT &
+sleep 1
+cargo run $HOST_IP $SRV_PORT
+sleep 3
 
 # Remove softiwarp device
 sudo rdma link delete siw_eth0

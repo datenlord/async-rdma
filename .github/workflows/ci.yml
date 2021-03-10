@@ -5,7 +5,7 @@ on:
 
 jobs:
   soft-roce-env:
-    name: Env test for softiwarp
+    name: Env test for soft-roce and softiwarp
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2

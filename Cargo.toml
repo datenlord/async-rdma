@@ -1,0 +1,18 @@
+[package]
+name = "async-rdma"
+version = "0.1.0"
+authors = ["Pu Wang <nicolas.weeks@gmail.com>"]
+edition = "2018"
+description = "Asynchronized Rust API for RDMA"
+repository = "https://github.com/datenlord/async-rdma"
+readme = "README.md"
+license = "GPL"
+keywords = ["RDMA"]
+categories = ["network"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[build-dependencies]
+cc = "1.0"

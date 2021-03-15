@@ -13,6 +13,12 @@ categories = ["network"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
+clap = "2.33"
+env_logger = "0.8"
+nix = "0.20"
+rdma-sys = { git = "https://github.com/pwang7/rdma-sys", rev = "59ace63" }
+utilities = { git = "https://github.com/pwang7/utilities", rev = "27e118f" }
 
 [build-dependencies]
 cc = "1.0"

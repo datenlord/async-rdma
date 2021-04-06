@@ -14,11 +14,14 @@ categories = ["network"]
 
 [dependencies]
 anyhow = "1.0"
+bincode = "1.3"
 clap = "2.33"
 env_logger = "0.8"
+libc = "0.2"
 nix = "0.20"
-rdma-sys = { git = "https://github.com/pwang7/rdma-sys", rev = "59ace63" }
-utilities = { git = "https://github.com/pwang7/utilities", rev = "27e118f" }
+rdma-sys = { git = "https://github.com/datenlord/rdma-sys" }
+serde = { version = "1.0", features = ["derive"] }
+utilities = { git = "https://github.com/pwang7/utilities", rev = "1503c27" }
 
 [build-dependencies]
 cc = "1.0"

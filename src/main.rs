@@ -6,7 +6,7 @@
     anonymous_parameters,
     bare_trait_objects,
     // box_pointers, // use box pointer to allocate on heap
-    elided_lifetimes_in_paths, // allow anonymous lifetime
+    // elided_lifetimes_in_paths, // allow anonymous lifetime
     missing_copy_implementations,
     missing_debug_implementations,
     missing_docs, // TODO: add documents
@@ -37,29 +37,33 @@
     clippy::module_name_repetitions, // repeation of module name in a struct name is not big deal
     clippy::multiple_crate_versions, // multi-version dependency crates is not able to fix
     clippy::panic, // allow debug_assert, panic in production code
+    clippy::panic_in_result_fn, // allow debug_assert
 )]
 
-use std::env;
-use std::ffi::CString;
-use std::os::raw::{c_char, c_int};
-use std::os::unix::ffi::OsStringExt;
-use utilities::Cast;
+// use std::env;
+// use std::ffi::CString;
+// use std::os::raw::{c_char, c_int};
+// use std::os::unix::ffi::OsStringExt;
+// use utilities::Cast;
 
 mod basic;
 
-#[cfg(target_os = "linux")]
-extern "C" {
-    fn server_main(argc: c_int, argv: *const *const c_char) -> c_int;
-    fn client_main(argc: c_int, argv: *const *const c_char) -> c_int;
-}
+// #[cfg(target_os = "linux")]
+// extern "C" {
+//     fn server_main(argc: c_int, argv: *const *const c_char) -> c_int;
+//     fn client_main(argc: c_int, argv: *const *const c_char) -> c_int;
+// }
 
+///
 const SERVER_PORT_ARG_NAME: &str = "server_port";
+///
+const SERVER_ADDR_ARG_NAME: &str = "server_addr";
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let matches = clap::App::new("DatenLord")
-        .about("Cloud Native Storage")
+    let matches = clap::App::new("async-rdma")
+        .about("Async RDMA API")
         .arg(
             clap::Arg::with_name(SERVER_PORT_ARG_NAME)
                 .short("p")
@@ -67,38 +71,80 @@ fn main() -> anyhow::Result<()> {
                 .value_name("SERVER_PORT")
                 .takes_value(true)
                 .required(true)
-                .help(
-                    "Set the RDMA server port, no default value",
-                ),
+                .help("Set the RDMA server port, no default value"),
+        )
+        .arg(
+            clap::Arg::with_name(SERVER_ADDR_ARG_NAME)
+                .short("s")
+                .long(SERVER_ADDR_ARG_NAME)
+                .value_name("SERVER_ADDR")
+                .takes_value(true)
+                .help("Set the RDMA server address, no default value"),
         )
         .get_matches();
     let server_port = match matches.value_of(SERVER_PORT_ARG_NAME) {
         Some(sp) => sp.parse::<u16>()?,
         None => panic!("No server port input"),
     };
+    let server_addr = matches.value_of(SERVER_ADDR_ARG_NAME).unwrap_or("");
 
-    let mut srv = unsafe { basic::server::Server::new(server_port) };
-    unsafe { srv.run() };
+    // run server or client
 
-    let v: Vec<CString> = env::args_os()
-        .map(|a| {
-            CString::new(a.into_vec()).unwrap_or_else(|err| {
-                panic!(
-                    "failed to convert os-string to c-string, the err is: {}",
-                    err,
-                )
-            })
-        })
-        .collect();
-    let a: Vec<*const c_char> = v.iter().map(|c| c.as_ptr()).collect();
-    #[allow(clippy::as_conversions)]
-    unsafe {
-        if a.len() > 2 {
-            client_main(a.len().cast(), a.as_ptr());
-        } else {
-            server_main(a.len().cast(), a.as_ptr());
-        }
+    let dev_name = ""; //"rxe_eth0";
+    let gid_idx = 0;
+    let ib_port = 1;
+    if server_addr.is_empty() {
+        basic::pure_ibv::run("", dev_name, gid_idx, ib_port, server_port);
+    } else {
+        basic::pure_ibv::run(server_addr, dev_name, gid_idx, ib_port, server_port);
+        // basic::util::check_errno(-1)?;
     }
+
+    if true {
+        #[allow(clippy::exit)]
+        std::process::exit(0);
+    }
+
+    if server_addr.is_empty() {
+        let server = basic::async_server::Server::new(server_port);
+        server.run();
+    } else {
+        let client = basic::async_server::Client::new(server_addr, server_port);
+        client.run();
+        // basic::util::check_errno(-1)?;
+    }
+
+    if true {
+        #[allow(clippy::exit)]
+        std::process::exit(0);
+    }
+
+    if server_addr.is_empty() {
+        basic::sync_server::server(server_port);
+    } else {
+        basic::sync_server::client(server_addr, server_port);
+        basic::util::check_errno(-1)?;
+    }
+
+    // let v: Vec<CString> = env::args_os()
+    //     .map(|a| {
+    //         CString::new(a.into_vec()).unwrap_or_else(|err| {
+    //             panic!(
+    //                 "failed to convert os-string to c-string, the err is: {}",
+    //                 err,
+    //             )
+    //         })
+    //     })
+    //     .collect();
+    // let a: Vec<*const c_char> = v.iter().map(|c| c.as_ptr()).collect();
+    // #[allow(clippy::as_conversions)]
+    // unsafe {
+    //     if a.len() > 2 {
+    //         client_main(a.len().cast(), a.as_ptr());
+    //     } else {
+    //         server_main(a.len().cast(), a.as_ptr());
+    //     }
+    // }
 
     Ok(())
 }

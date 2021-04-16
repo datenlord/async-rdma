@@ -76,10 +76,10 @@ pub const fn const_ptr_cast_mut<T: ?Sized, U>(ptr: *const T) -> *mut U {
     ptr as *const u8 as *mut u8 as *mut U
 }
 
-/// Cast a usize to a cosnt pointer
+// /// Cast a usize to a cosnt pointer
 // #[allow(clippy::as_conversions)]
 // #[inline]
-// pub const unsafe fn usize_to_const_ptr<T: Sized>(addr: usize) -> *const T {
+// pub const unsafe fn usize_to_ptr<T: Sized>(addr: usize) -> *const T {
 //     addr as *const T
 // }
 
@@ -90,12 +90,13 @@ pub const unsafe fn usize_to_mut_ptr<T: Sized>(addr: usize) -> *mut T {
     addr as *mut T
 }
 
-///
-pub fn vec_ptr_to_ref_vec<T: Sized>(vec_ptr: *mut *mut T, vec_size: usize) -> Vec<&'static T> {
-    (0..vec_size)
-        .map(|i| unsafe { &*((*vec_ptr).add(i)) })
-        .collect::<Vec<_>>()
-}
+// ///
+// pub fn vec_ptr_to_ref_vec<T: Sized>(vec_ptr: *mut *mut T, vec_size: usize) -> Vec<*mut T> {
+//     (0..vec_size)
+//         .map(|i| unsafe { (*vec_ptr).add(i) })
+//         .collect::<Vec<_>>()
+// }
+
 ///
 // pub fn ref_vec_to_vec_ptr<T: ?Sized>(ref_vec: &[&T]) -> *mut *mut T {
 //     if ref_vec.is_empty() {
@@ -119,10 +120,10 @@ pub fn is_null_mut_ptr<T: Sized>(ptr: *mut T) -> bool {
 }
 
 /// Get last error if any
-pub fn get_last_error() -> Result<(), nix::Error> {
+pub fn get_last_error() -> nix::Error {
     let last_err = nix::Error::last();
     println!("last error is: {}", last_err);
-    Err(last_err)
+    last_err
 }
 
 /// Convert C style error number to Rust style error result
@@ -130,6 +131,6 @@ pub fn check_errno(ret: std::os::raw::c_int) -> Result<(), nix::Error> {
     if ret == 0 {
         Ok(())
     } else {
-        get_last_error()
+        Err(get_last_error())
     }
 }

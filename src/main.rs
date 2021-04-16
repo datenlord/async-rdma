@@ -45,6 +45,7 @@
 // use std::os::raw::{c_char, c_int};
 // use std::os::unix::ffi::OsStringExt;
 // use utilities::Cast;
+// use std::os::raw::{c_char, c_int};
 
 mod basic;
 
@@ -89,21 +90,64 @@ fn main() -> anyhow::Result<()> {
     let server_addr = matches.value_of(SERVER_ADDR_ARG_NAME).unwrap_or("");
 
     // run server or client
-
     let dev_name = ""; //"rxe_eth0";
     let gid_idx = 0;
     let ib_port = 1;
+
+    if server_addr.is_empty() {
+        basic::ibv::run("", dev_name, gid_idx, ib_port, server_port);
+    } else {
+        basic::ibv::run(server_addr, dev_name, gid_idx, ib_port, server_port);
+        // basic::util::check_errno(-1)?;
+    }
+    if true {
+        #[allow(clippy::exit)]
+        std::process::exit(0);
+    }
+
     if server_addr.is_empty() {
         basic::pure_ibv::run("", dev_name, gid_idx, ib_port, server_port);
     } else {
         basic::pure_ibv::run(server_addr, dev_name, gid_idx, ib_port, server_port);
         // basic::util::check_errno(-1)?;
     }
-
     if true {
         #[allow(clippy::exit)]
         std::process::exit(0);
     }
+
+    // if server_addr.is_empty() {
+    //     basic::pingpong::run_server("", dev_name, gid_idx, ib_port, server_port);
+    // } else {
+    //     basic::pingpong::run_client(server_addr, dev_name, gid_idx, ib_port, server_port);
+    //     // basic::util::check_errno(-1)?;
+    // }
+    // if true {
+    //     #[allow(clippy::exit)]
+    //     std::process::exit(0);
+    // }
+
+    // if server_addr.is_empty() {
+    //     basic::srq::run(true, "");
+    // } else {
+    //     basic::srq::run(false, server_addr);
+    //     // basic::util::check_errno(-1)?;
+    // }
+    // if true {
+    //     #[allow(clippy::exit)]
+    //     std::process::exit(0);
+    // }
+
+    // if server_addr.is_empty() {
+    //     basic::ud_pingpong::run("", dev_name, gid_idx, ib_port, server_port);
+    // } else {
+    //     basic::ud_pingpong::run(server_addr, dev_name, gid_idx, ib_port, server_port);
+    //     // basic::util::check_errno(-1)?;
+    // }
+    // if true {
+    //     #[allow(clippy::exit)]
+    //     std::process::exit(0);
+    // }
 
     if server_addr.is_empty() {
         let server = basic::async_server::Server::new(server_port);
@@ -113,7 +157,6 @@ fn main() -> anyhow::Result<()> {
         client.run();
         // basic::util::check_errno(-1)?;
     }
-
     if true {
         #[allow(clippy::exit)]
         std::process::exit(0);
@@ -126,25 +169,22 @@ fn main() -> anyhow::Result<()> {
         basic::util::check_errno(-1)?;
     }
 
-    // let v: Vec<CString> = env::args_os()
-    //     .map(|a| {
-    //         CString::new(a.into_vec()).unwrap_or_else(|err| {
-    //             panic!(
-    //                 "failed to convert os-string to c-string, the err is: {}",
-    //                 err,
-    //             )
-    //         })
-    //     })
-    //     .collect();
-    // let a: Vec<*const c_char> = v.iter().map(|c| c.as_ptr()).collect();
-    // #[allow(clippy::as_conversions)]
-    // unsafe {
-    //     if a.len() > 2 {
-    //         client_main(a.len().cast(), a.as_ptr());
-    //     } else {
-    //         server_main(a.len().cast(), a.as_ptr());
-    //     }
-    // }
+    // let connections: c_int = 1;
+    // let message_size: c_int = 100;
+    // let message_count: c_int = 10;
+    // let is_sender: bool = true;
+    // let unmapped_addr: c_int = 1;
+    // let dst_addr: *mut c_char = std::ptr::null_mut();
+    // let src_addr: *mut c_char = std::ptr::null_mut();
+    // basic::mckey::run_main(
+    //     connections,
+    //     message_size,
+    //     message_count,
+    //     is_sender,
+    //     unmapped_addr,
+    //     dst_addr,
+    //     src_addr,
+    // );
 
     Ok(())
 }

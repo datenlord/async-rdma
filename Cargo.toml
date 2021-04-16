@@ -19,6 +19,7 @@ clap = "2.33"
 env_logger = "0.8"
 libc = "0.2"
 nix = "0.20"
+rand = "0.8"
 rdma-sys = { git = "https://github.com/datenlord/rdma-sys" }
 serde = { version = "1.0", features = ["derive"] }
 utilities = { git = "https://github.com/pwang7/utilities", rev = "1503c27" }

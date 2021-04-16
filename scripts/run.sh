@@ -20,10 +20,29 @@ set -o xtrace
 sudo rdma link add $RXE_DEV type rxe netdev $ETH_DEV
 rdma link | grep $RXE_DEV
 
+# Cargo run async-rdma
+cargo build
+timeout 3 target/debug/async-rdma -p 9527 &
+sleep 1
+target/debug/async-rdma -s $HOST_IP -p 9527
+sleep 1
+
 # Test soft-roce
 ibv_rc_pingpong -d $RXE_DEV -g 0 &
 sleep 1
 ibv_rc_pingpong -d $RXE_DEV -g 0 $HOST_IP
+
+ibv_uc_pingpong -d $RXE_DEV -g 0 &
+sleep 1
+ibv_uc_pingpong -d $RXE_DEV -g 0 $HOST_IP
+
+ibv_ud_pingpong -d $RXE_DEV -g 0 &
+sleep 1
+ibv_ud_pingpong -d $RXE_DEV -g 0 $HOST_IP
+
+ibv_srq_pingpong -d $RXE_DEV -g 0 &
+sleep 1
+ibv_srq_pingpong -d $RXE_DEV -g 0 $HOST_IP
 
 udaddy &
 sleep 1
@@ -41,12 +60,9 @@ ucmatose &
 sleep 1
 ucmatose -s $HOST_IP
 
-# Cargo run async-rdma
-cargo build
-timeout 3 target/debug/async-rdma -p 9527 &
-sleep 1
-target/debug/async-rdma -s $HOST_IP -p 9527
-sleep 1
+# ib_send_bw -d $RXE_DEV &
+# sleep 1
+# ib_send_bw -d $RXE_DEV $HOST_IP
 
 # Remove soft-roce device
 sudo rdma link delete $RXE_DEV

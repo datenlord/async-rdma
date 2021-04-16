@@ -363,7 +363,7 @@ fn client_poll_cb(link: &ClientLink, recv_buf: &[u8], wc: &ibv_wc) {
 ///
 pub struct Client {
     ///
-    dev_list: Vec<&'static ibv_device>,
+    dev_list: Vec<*mut ibv_device>,
     ///
     event_channel: &'static rdma_event_channel,
     ///
@@ -438,14 +438,16 @@ impl Client {
         unsafe { libc::freeaddrinfo(dst_addr) };
 
         let mut num_devices = 0;
-        let dev_list = unsafe { ibv_get_device_list(&mut num_devices) };
+        let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devices) };
         debug_assert!(
-            !util::is_null_mut_ptr(dev_list),
+            !util::is_null_mut_ptr(dev_list_ptr),
             "ibv_get_device_list failed"
         );
 
         Self {
-            dev_list: util::vec_ptr_to_ref_vec(dev_list, num_devices.cast()),
+            dev_list: unsafe {
+                std::slice::from_raw_parts(dev_list_ptr, num_devices.cast()).to_vec()
+            },
             event_channel: unsafe { &*event_channel },
             client_id: unsafe { &*conn },
         }
@@ -546,7 +548,7 @@ impl Client {
 ///
 pub struct Server {
     ///
-    dev_list: Vec<&'static ibv_device>,
+    dev_list: Vec<*mut ibv_device>,
     ///
     event_channel: &'static rdma_event_channel,
     ///
@@ -601,13 +603,15 @@ impl Server {
         println!("listening on port={}", bind_port);
 
         let mut num_devices = 0;
-        let dev_list = unsafe { ibv_get_device_list(&mut num_devices) };
+        let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devices) };
         debug_assert!(
-            !util::is_null_mut_ptr(dev_list),
+            !util::is_null_mut_ptr(dev_list_ptr),
             "ibv_get_device_list failed"
         );
         Self {
-            dev_list: util::vec_ptr_to_ref_vec(dev_list, num_devices.cast()),
+            dev_list: unsafe {
+                std::slice::from_raw_parts(dev_list_ptr, num_devices.cast()).to_vec()
+            },
             event_channel: unsafe { &*event_channel },
             server_id: unsafe { &*listener },
         }

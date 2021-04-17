@@ -1,10 +1,5 @@
 #! /bin/sh
 
-ETH_DEV=eth0
-#ETH_DEV=enp4s0
-HOST_IP=`ifconfig $ETH_DEV | grep 'inet ' | awk '{print $2}'`
-SRV_PORT=9527
-MSG_CNT=10
 RXE_DEV=rxe_eth0
 SIW_DEV=siw_eth0
 
@@ -16,15 +11,27 @@ set -o errexit
 set -o nounset
 set -o xtrace
 
+ETH_DEV=eth0
+if [ `ifconfig | grep -c $ETH_DEV` -eq 0 ]; then
+    echo "no eth0, try enp4s0"
+    ETH_DEV=enp4s0
+    echo "verify eth dev: $ETH_DEV"
+    ifconfig | grep $ETH_DEV
+fi
+
+HOST_IP=`ifconfig $ETH_DEV | grep 'inet ' | awk '{print $2}'`
+SRV_PORT=9527
+MSG_CNT=10
+
 # Setup soft-roce device
 sudo rdma link add $RXE_DEV type rxe netdev $ETH_DEV
 rdma link | grep $RXE_DEV
 
 # Cargo run async-rdma
 cargo build
-timeout 3 target/debug/async-rdma -p 9527 &
+timeout 3 target/debug/async-rdma -p $SRV_PORT &
 sleep 1
-target/debug/async-rdma -s $HOST_IP -p 9527
+target/debug/async-rdma -s $HOST_IP -p $SRV_PORT
 sleep 1
 
 # Test soft-roce
@@ -52,9 +59,9 @@ rping -s -C $MSG_CNT -v &
 sleep 1
 rping -c -a $HOST_IP -C $MSG_CNT -v
 
-rdma_server -s 0.0.0.0 -p $SRV_PORT &
-sleep 1
-rdma_client -s $HOST_IP -p $SRV_PORT
+# rdma_server -s 0.0.0.0 -p $SRV_PORT &
+# sleep 1
+# rdma_client -s $HOST_IP -p $SRV_PORT
 
 ucmatose &
 sleep 1
@@ -77,23 +84,17 @@ rping -s -C $MSG_CNT -v &
 sleep 1
 rping -c -a $HOST_IP -C $MSG_CNT -v
 
-rdma_server -s 0.0.0.0 -p $SRV_PORT &
-sleep 1
-rdma_client -s $HOST_IP -p $SRV_PORT
+# rdma_server -s 0.0.0.0 -p $SRV_PORT &
+# sleep 1
+# rdma_client -s $HOST_IP -p $SRV_PORT
 
 ucmatose &
 sleep 1
 ucmatose -s $HOST_IP
 
-rdma_xserver -p $SRV_PORT -c r &
-sleep 1
-rdma_xclient -s $HOST_IP -p $SRV_PORT -c r
-
-# Cargo run async-rdma
-#timeout 3 cargo run $SRV_PORT &
-#sleep 1
-#cargo run $HOST_IP $SRV_PORT
-#sleep 3
+# rdma_xserver -p $SRV_PORT -c r &
+# sleep 1
+# rdma_xclient -s $HOST_IP -p $SRV_PORT -c r
 
 # Remove softiwarp device
 sudo rdma link delete $SIW_DEV

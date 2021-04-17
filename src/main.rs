@@ -95,9 +95,9 @@ fn main() -> anyhow::Result<()> {
     let ib_port = 1;
 
     if server_addr.is_empty() {
-        basic::ibv::run("", dev_name, gid_idx, ib_port, server_port);
+        basic::ibv::run_server(dev_name, gid_idx, ib_port, server_port);
     } else {
-        basic::ibv::run(server_addr, dev_name, gid_idx, ib_port, server_port);
+        basic::ibv::run_client(server_addr, dev_name, gid_idx, ib_port, server_port);
         // basic::util::check_errno(-1)?;
     }
     if true {

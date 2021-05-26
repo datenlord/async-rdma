@@ -67,17 +67,13 @@ struct Resources {
 ///
 fn sock_connect(server_name: &str, port: u16) -> c_int {
     let server_addr_cstr = CString::new(server_name).unwrap_or_else(|err| {
-        panic!(format!(
+        panic!(
             "failed to build server address CString, the error is: {}",
             err,
-        ))
+        )
     });
-    let server_port_cstr = CString::new(port.to_string()).unwrap_or_else(|err| {
-        panic!(format!(
-            "failed to build port CString, the error is: {}",
-            err,
-        ))
-    });
+    let server_port_cstr = CString::new(port.to_string())
+        .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
     let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
     hints.ai_flags = libc::AI_PASSIVE;
     hints.ai_family = libc::AF_INET;
@@ -461,7 +457,7 @@ fn resources_create(
         let mut itr = dev_name_list.iter().zip(dev_list).filter(|&(dn, _dev)| {
             println!(
                 "filter device by name {:?} == {:?}",
-                dn, input_dev_name_cstr
+                dn, input_dev_name_cstr,
             );
             dn == &input_dev_name_cstr
         });

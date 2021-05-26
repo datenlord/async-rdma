@@ -28,16 +28,13 @@ pub fn client(server_addr: &str, server_port: u16) {
 
     let mut ret: c_int;
     let server_addr_cstr = CString::new(server_addr).unwrap_or_else(|err| {
-        panic!(format!(
+        panic!(
             "failed to build server address CString, the error is: {}",
             err,
-        ))
+        )
     });
     let server_port_cstr = CString::new(server_port.to_string()).unwrap_or_else(|err| {
-        panic!(format!(
-            "failed to build server port CString, the error is: {}",
-            err,
-        ))
+        panic!("failed to build server port CString, the error is: {}", err,)
     });
     ret = unsafe {
         libc::getaddrinfo(

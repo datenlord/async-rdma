@@ -5,7 +5,9 @@ use rdma_sys::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::io::prelude::*;
+use std::net::{TcpListener, TcpStream};
+use std::os::raw::{c_int, c_uint, c_void};
 use utilities::{Cast, OverflowArithmetic};
 
 use super::util;
@@ -73,6 +75,82 @@ impl std::fmt::Display for CmConData {
     }
 }
 
+pub enum TcpSock {
+    Listener(TcpListener),
+    Stream(TcpStream),
+}
+
+impl TcpSock {
+    ///
+    pub fn bind(port: u16) -> Self {
+        let sock_addr = format!("0.0.0.0:{}", port);
+        let tcp_listener = TcpListener::bind(&sock_addr)
+            .unwrap_or_else(|err| panic!("failed to bind to {}, the error is: {}", sock_addr, err));
+        Self::Listener(tcp_listener)
+    }
+
+    fn listener(&self) -> &TcpListener {
+        match self {
+            Self::Listener(srv) => srv,
+            Self::Stream(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
+        }
+    }
+
+    fn stream(&self) -> &TcpStream {
+        match self {
+            Self::Listener(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
+            Self::Stream(clnt) => clnt,
+        }
+    }
+
+    ///
+    pub fn accept(&self) -> Self {
+        match self.listener().accept() {
+            Ok((tcp_stream, addr)) => {
+                println!("new client: {:?}", addr);
+                Self::Stream(tcp_stream)
+            }
+            Err(e) => panic!("couldn't get client: {:?}", e),
+        }
+    }
+
+    ///
+    pub fn connect(server_name: &str, port: u16) -> Self {
+        let sock_addr = format!("{}:{}", server_name, port);
+        let tcp_stream = TcpStream::connect(&sock_addr).unwrap_or_else(|err| {
+            panic!("failed to connect to {}, the error is: {}", sock_addr, err)
+        });
+        Self::Stream(tcp_stream)
+    }
+
+    ///
+    fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
+        let xfer_size = std::mem::size_of::<T>();
+        let encoded: Vec<u8> = bincode::serialize(data)
+            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
+        let send_size = self
+            .stream()
+            .write(&encoded)
+            .unwrap_or_else(|err| panic!("failed to send data via socket, the error is: {}", err));
+        debug_assert_eq!(send_size, encoded.len(), "socket send data size not match");
+        let mut decode_buf = Vec::with_capacity(xfer_size);
+        unsafe {
+            decode_buf.set_len(xfer_size);
+        }
+        let recv_size = self.stream().read(&mut decode_buf).unwrap_or_else(|err| {
+            panic!("failed to receive data via socket, the error is:{}", err)
+        });
+        unsafe {
+            decode_buf.set_len(recv_size.cast());
+        }
+        debug_assert!(recv_size > 0, "failed to receive data from socket");
+
+        bincode::deserialize(&decode_buf)
+            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
+    }
+}
+
+/*
 /// Tcp socket wrapper
 pub struct TcpSocket {
     /// Socket handler
@@ -93,17 +171,13 @@ impl TcpSocket {
         resolved_addr: *mut *mut libc::addrinfo,
     ) -> c_int {
         let server_addr_cstr = CString::new(server_name).unwrap_or_else(|err| {
-            panic!(format!(
+            panic!(
                 "failed to build server address CString, the error is: {}",
                 err,
-            ))
+            )
         });
-        let server_port_cstr = CString::new(port.to_string()).unwrap_or_else(|err| {
-            panic!(format!(
-                "failed to build port CString, the error is: {}",
-                err,
-            ))
-        });
+        let server_port_cstr = CString::new(port.to_string())
+            .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
         let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
         hints.ai_flags = libc::AI_PASSIVE;
         hints.ai_family = libc::AF_INET;
@@ -229,6 +303,7 @@ impl TcpSocket {
             .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
     }
 }
+*/
 
 ///
 #[derive(Debug, Deserialize, Serialize)]
@@ -260,7 +335,7 @@ pub struct Resources {
     /// memory buffer pointer, used for RDMA and send ops
     buf: std::pin::Pin<Box<[u8; MSG_SIZE]>>,
     /// TCP socket to the remote peer of QP
-    sock: TcpSocket,
+    sock: TcpSock,
 }
 
 impl Drop for Resources {
@@ -418,7 +493,7 @@ impl Resources {
     }
 
     ///
-    pub fn new(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock: TcpSocket) -> Self {
+    pub fn new(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock: TcpSock) -> Self {
         let mut rc: c_int;
         // Searching for IB devices in host
         let ib_ctx = Self::open_ib_ctx(input_dev_name);
@@ -867,7 +942,7 @@ pub fn run_client(
 ) -> c_int {
     let mut rc: c_int;
     // client side
-    let client_sock = TcpSocket::connect(server_name, sock_port);
+    let client_sock = TcpSock::connect(server_name, sock_port);
 
     // Create resources before using them
     let mut res = Resources::new(input_dev_name, gid_idx, ib_port, client_sock);
@@ -959,7 +1034,7 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
     let mut rc: c_int;
 
     println!("waiting on port {} for TCP connection", sock_port);
-    let listen_sock = TcpSocket::bind(sock_port);
+    let listen_sock = TcpSock::bind(sock_port);
     let client_sock = listen_sock.accept();
 
     // Create resources

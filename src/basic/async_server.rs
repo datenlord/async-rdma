@@ -388,16 +388,13 @@ impl Client {
 
         let mut ret: c_int;
         let server_add_cstr = CString::new(server_addr).unwrap_or_else(|err| {
-            panic!(format!(
+            panic!(
                 "failed to build server address CString, the error is: {}",
                 err,
-            ))
+            )
         });
         let server_port_cstr = CString::new(server_port.to_string()).unwrap_or_else(|err| {
-            panic!(format!(
-                "failed to build server port CString, the error is: {}",
-                err,
-            ))
+            panic!("failed to build server port CString, the error is: {}", err,)
         });
         ret = unsafe {
             libc::getaddrinfo(
@@ -519,20 +516,19 @@ impl Client {
                 }
                 rdma_cm_event_type::RDMA_CM_EVENT_ROUTE_RESOLVED => {
                     let client_id = util::mut_ptr_to_usize(event_ref.id);
-                    let link = client_map.get(&client_id).unwrap_or_else(|| {
-                        panic!(format!("failed to find client ID={}", client_id))
-                    });
+                    let link = client_map
+                        .get(&client_id)
+                        .unwrap_or_else(|| panic!("failed to find client ID={}", client_id));
                     link.connect();
                 }
                 rdma_cm_event_type::RDMA_CM_EVENT_ESTABLISHED => {
                     let client_id = util::mut_ptr_to_usize(event_ref.id);
-                    let link = client_map.get(&client_id).unwrap_or_else(|| {
-                        panic!(format!("failed to find client ID={}", client_id))
-                    });
-                    let (ref send_region, ref _recv_region) =
-                        *mr_map.get(&client_id).unwrap_or_else(|| {
-                            panic!(format!("failed to find MR for client ID={}", client_id))
-                        });
+                    let link = client_map
+                        .get(&client_id)
+                        .unwrap_or_else(|| panic!("failed to find client ID={}", client_id));
+                    let (ref send_region, ref _recv_region) = *mr_map
+                        .get(&client_id)
+                        .unwrap_or_else(|| panic!("failed to find MR for client ID={}", client_id));
                     link.post_send(send_region);
                 }
                 rdma_cm_event_type::RDMA_CM_EVENT_DISCONNECTED => {
@@ -689,13 +685,12 @@ impl Server {
                 }
                 rdma_cm_event_type::RDMA_CM_EVENT_ESTABLISHED => {
                     let client_id = util::mut_ptr_to_usize(event_ref.id);
-                    let link = client_map.get(&client_id).unwrap_or_else(|| {
-                        panic!(format!("failed to find client ID={}", client_id))
-                    });
-                    let (ref send_region, ref _recv_region) =
-                        *mr_map.get(&client_id).unwrap_or_else(|| {
-                            panic!(format!("failed to find MR for client ID={}", client_id))
-                        });
+                    let link = client_map
+                        .get(&client_id)
+                        .unwrap_or_else(|| panic!("failed to find client ID={}", client_id));
+                    let (ref send_region, ref _recv_region) = *mr_map
+                        .get(&client_id)
+                        .unwrap_or_else(|| panic!("failed to find MR for client ID={}", client_id));
 
                     link.post_send(send_region);
                     //self.on_connection(event->id->context);

@@ -91,12 +91,8 @@ impl Drop for Tcp {
 impl Tcp {
     /// Build server TCP socket
     pub fn bind(port: u16) -> Self {
-        let server_port_cstr = CString::new(port.to_string()).unwrap_or_else(|err| {
-            panic!(format!(
-                "failed to build port CString, the error is: {}",
-                err,
-            ))
-        });
+        let server_port_cstr = CString::new(port.to_string())
+            .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
         let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
         hints.ai_flags = libc::AI_PASSIVE;
         hints.ai_family = libc::AF_INET;
@@ -166,17 +162,13 @@ impl Tcp {
     /// Build client TCP socket
     pub fn connect(server_name: &str, port: u16) -> Self {
         let server_addr_cstr = CString::new(server_name).unwrap_or_else(|err| {
-            panic!(format!(
+            panic!(
                 "failed to build server address CString, the error is: {}",
                 err,
-            ))
+            )
         });
-        let server_port_cstr = CString::new(port.to_string()).unwrap_or_else(|err| {
-            panic!(format!(
-                "failed to build port CString, the error is: {}",
-                err,
-            ))
-        });
+        let server_port_cstr = CString::new(port.to_string())
+            .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
         let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
         hints.ai_flags = libc::AI_PASSIVE;
         hints.ai_family = libc::AF_INET;

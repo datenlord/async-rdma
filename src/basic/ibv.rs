@@ -322,8 +322,10 @@ enum State {
 pub struct Resources {
     ///
     remote_props: CmConData,
-    /// device handle
+    /// Device handle
     ib_ctx: *mut ibv_context,
+    /// Event channel
+    event_channel: *mut ibv_comp_channel,
     /// PD handle
     pd: *mut ibv_pd,
     /// CQ handle
@@ -350,6 +352,8 @@ impl Drop for Resources {
         debug_assert_eq!(rc, 0, "failed to destroy CQ");
         rc = unsafe { ibv_dealloc_pd(self.pd) };
         debug_assert_eq!(rc, 0, "failed to deallocate PD");
+        rc = unsafe { ibv_destroy_comp_channel(self.event_channel) };
+        debug_assert_eq!(rc, 0, "failed to destroy event completion channel");
         rc = unsafe { ibv_close_device(self.ib_ctx) };
         debug_assert_eq!(rc, 0, "failed to close device context");
     }
@@ -367,16 +371,120 @@ impl Resources {
     }
 
     ///
-    pub fn poll_completion(&self) -> c_int {
+    pub fn async_poll_completion(&self) -> std::thread::JoinHandle<c_int> {
         let cq_addr = util::ptr_to_usize(self.cq);
-        Self::poll_completion_cb(cq_addr)
+        let channel_addr = util::ptr_to_usize(self.event_channel);
+
+        std::thread::spawn(move || Self::poll_completion_non_blocking(cq_addr, channel_addr))
     }
 
     ///
-    pub fn async_poll_completion(&self) -> std::thread::JoinHandle<c_int> {
-        let cq_addr = util::ptr_to_usize(self.cq);
+    fn req_cq_notify(&self) {
+        let solicited_only = 0;
+        let rc = unsafe { ibv_req_notify_cq(self.cq, solicited_only) };
+        if rc != 0 {
+            panic!("Couldn't request CQ notification");
+        }
+    }
 
-        std::thread::spawn(move || Self::poll_completion_cb(cq_addr))
+    ///
+    fn poll_completion_non_blocking(cq_addr: usize, channel_addr: usize) -> c_int {
+        let mut cq = unsafe { util::usize_to_mut_ptr::<ibv_cq>(cq_addr) };
+        let event_channel = unsafe { util::usize_to_mut_ptr::<ibv_comp_channel>(channel_addr) };
+
+        // let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
+        // let mut rc =
+        //     unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        // if rc < 0 {
+        //     panic!("Failed to change file descriptor of Completion Event Channel");
+        // }
+        
+        let mut pfd = unsafe { std::mem::zeroed::<libc::pollfd>() };
+        pfd.fd = unsafe { (*event_channel).fd };
+        pfd.events = libc::POLLIN; // Only monitor POLLIN event, which means new CQE arrived
+        pfd.revents = 0;
+        
+        println!("start poll...");
+        let nfds = 1;
+        let timeout_ms = 10;
+        let mut rc;
+        loop {
+            rc = unsafe { libc::poll(&mut pfd, nfds, timeout_ms) };
+            if rc != 0 {
+                println!("end poll");
+                break;
+            }
+        }
+        if rc < 0 {
+            panic!("poll failed");
+        }
+
+        let mut cq_context = std::ptr::null_mut::<c_void>();
+        let rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
+        if rc != 0 {
+            panic!("Failed to get cq_event");
+        }
+        unsafe { ibv_ack_cq_events(cq, 1) };
+        // rc = unsafe { ibv_req_notify_cq(cq, solicited_only) };
+        // if rc != 0 {
+        //     panic!("Couldn't request CQ notification");
+        // }
+
+        let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
+        let mut cur_time_msec: i64;
+        let mut cur_time = unsafe { std::mem::zeroed::<libc::timeval>() };
+        let mut poll_result: c_int;
+        // poll the completion for a while before giving up of doing it ..
+        let time_zone = std::ptr::null_mut();
+        unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+        let start_time_msec =
+            (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
+        println!("start ibv_poll_cq");
+        loop {
+            poll_result = unsafe { ibv_poll_cq(cq, 1, &mut wc) };
+            unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+            cur_time_msec = (cur_time.tv_sec.overflow_mul(1000))
+                .overflow_add(cur_time.tv_usec.overflow_div(1000));
+            if (poll_result != 0)
+                || ((cur_time_msec.overflow_sub(start_time_msec)) >= MAX_POLL_CQ_TIMEOUT)
+            {
+                println!("end ibv_poll_cq");
+                break;
+            }
+        }
+
+        match poll_result.cmp(&0) {
+            Ordering::Less => {
+                // poll CQ failed
+                // rc = 1;
+                panic!("poll CQ failed");
+            }
+            Ordering::Equal => {
+                // the CQ is empty
+                // rc = 1;
+                panic!("completion wasn't found in the CQ after timeout");
+            }
+            Ordering::Greater => {
+                // CQE found
+                println!("completion was found in CQ with status={}", wc.status);
+                // check the completion status (here we don't care about the completion opcode
+                debug_assert_eq!(
+                    wc.status,
+                    ibv_wc_status::IBV_WC_SUCCESS,
+                    "got bad completion with status={}, vendor syndrome={}, the error is: {:?}",
+                    wc.status,
+                    wc.vendor_err,
+                    unsafe { CStr::from_ptr(ibv_wc_status_str(wc.status)) },
+                );
+            }
+        }
+        0
+    }
+
+    ///
+    pub fn poll_completion(&self) -> c_int {
+        let cq_addr = util::ptr_to_usize(self.cq);
+        Self::poll_completion_cb(cq_addr)
     }
 
     ///
@@ -452,6 +560,8 @@ impl Resources {
             sr.wr.rdma.remote_addr = self.remote_props.addr;
             sr.wr.rdma.rkey = self.remote_props.rkey;
         }
+
+        self.req_cq_notify();
         // there is a Receive Request in the responder side, so we won't get any into RNR flow
         let rc = unsafe { ibv_post_send(self.qp, &mut sr, &mut bad_wr) };
         if rc == 0 {
@@ -523,9 +633,18 @@ impl Resources {
         // Each side will send only one WR, so Completion Queue with 1 entry is enough
         let cq_size = 1;
         let cq_context = std::ptr::null_mut::<c_void>();
-        let comp_channel = std::ptr::null_mut::<ibv_comp_channel>();
+        let event_channel = unsafe { ibv_create_comp_channel(ib_ctx) };
+        if util::is_null_mut_ptr(event_channel) {
+            panic!("failed to create event completion channel");
+        }
+        //let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
+        //rc = unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        //if rc < 0 {
+        //    panic!("Failed to change file descriptor of Completion Event Channel");
+        //}
+
         let comp_vector = 0;
-        let cq = unsafe { ibv_create_cq(ib_ctx, cq_size, cq_context, comp_channel, comp_vector) };
+        let cq = unsafe { ibv_create_cq(ib_ctx, cq_size, cq_context, event_channel, comp_vector) };
         if util::is_null_mut_ptr(cq) {
             // rc = 1;
             // goto resources_create_exit;
@@ -589,6 +708,7 @@ impl Resources {
         let res = Self {
             remote_props: remote_con_data,
             ib_ctx,
+            event_channel,
             pd,
             cq,
             qp,
@@ -1004,6 +1124,7 @@ pub fn run_client(
     // Next client write data to server's buffer
     copy_to_buf_pad(res.buf_slice_mut(), RDMAMSGW);
     println!("now to server with data: {}", RDMAMSGW);
+    //res.req_cq_notify();
     rc = res.post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE);
     debug_assert_eq!(rc, 0, "failed to post SR 3");
     // rc = res.poll_completion();

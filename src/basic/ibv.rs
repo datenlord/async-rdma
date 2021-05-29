@@ -1,6 +1,7 @@
 // The network byte order is defined to always be big-endian.
 // X86 is little-endian.
 
+use nix::sys::epoll;
 use rdma_sys::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -75,8 +76,11 @@ impl std::fmt::Display for CmConData {
     }
 }
 
+///
 pub enum TcpSock {
+    ///
     Listener(TcpListener),
+    ///
     Stream(TcpStream),
 }
 
@@ -89,17 +93,19 @@ impl TcpSock {
         Self::Listener(tcp_listener)
     }
 
+    ///
     fn listener(&self) -> &TcpListener {
-        match self {
-            Self::Listener(srv) => srv,
+        match *self {
+            Self::Listener(ref srv) => srv,
             Self::Stream(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
         }
     }
 
+    ///
     fn stream(&self) -> &TcpStream {
-        match self {
+        match *self {
             Self::Listener(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
-            Self::Stream(clnt) => clnt,
+            Self::Stream(ref clnt) => clnt,
         }
     }
 
@@ -392,35 +398,71 @@ impl Resources {
         let mut cq = unsafe { util::usize_to_mut_ptr::<ibv_cq>(cq_addr) };
         let event_channel = unsafe { util::usize_to_mut_ptr::<ibv_comp_channel>(channel_addr) };
 
-        // let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
-        // let mut rc =
-        //     unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        // if rc < 0 {
-        //     panic!("Failed to change file descriptor of Completion Event Channel");
-        // }
-        
-        let mut pfd = unsafe { std::mem::zeroed::<libc::pollfd>() };
-        pfd.fd = unsafe { (*event_channel).fd };
-        pfd.events = libc::POLLIN; // Only monitor POLLIN event, which means new CQE arrived
-        pfd.revents = 0;
-        
-        println!("start poll...");
-        let nfds = 1;
+        let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
+        let mut rc =
+            unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if rc < 0 {
+            panic!("Failed to change file descriptor of Completion Event Channel");
+        }
+
+        let epoll_fd = epoll::epoll_create()
+            .unwrap_or_else(|err| panic!("epoll_create failed, the error is: {}", err));
+        let channel_fd = unsafe { (*event_channel).fd };
+        let mut epoll_ev = epoll::EpollEvent::new(
+            epoll::EpollFlags::EPOLLIN | epoll::EpollFlags::EPOLLET,
+            channel_fd.cast(),
+        );
+        epoll::epoll_ctl(
+            epoll_fd,
+            epoll::EpollOp::EpollCtlAdd,
+            channel_fd,
+            &mut epoll_ev,
+        )
+        .unwrap_or_else(|err| panic!("epoll_ctl failed, the error is: {}", err));
+
+        // let epoll_size = 1;
+        // let mut epoll_ev = unsafe { std::mem::zeroed::<libc::epoll_event>() };
+        // epoll_ev.u64 = channel_fd.cast();
+        // println!("EPOLLIN={:x}, EPOLLET={:x}", libc::EPOLLIN, libc::EPOLLET);
+        // epoll_ev.events = (libc::EPOLLIN | libc::EPOLLET).cast();
+        // unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, channel_fd, &mut epoll_ev) };
+
+        println!("start epoll...");
         let timeout_ms = 10;
-        let mut rc;
+        let mut event_list = [epoll_ev];
+        let mut nfds: usize;
         loop {
-            rc = unsafe { libc::poll(&mut pfd, nfds, timeout_ms) };
-            if rc != 0 {
-                println!("end poll");
+            nfds = epoll::epoll_wait(epoll_fd, &mut event_list, timeout_ms)
+                .unwrap_or_else(|err| panic!("epoll_wait failed, the error is: {}", err));
+            if nfds > 0 {
+                println!("end epoll");
                 break;
             }
         }
-        if rc < 0 {
-            panic!("poll failed");
-        }
+        unsafe { libc::close(epoll_fd) };
+        /*
+            let mut pfd = unsafe { std::mem::zeroed::<libc::pollfd>() };
+            pfd.fd = unsafe { (*event_channel).fd };
+            pfd.events = libc::POLLIN; // Only monitor POLLIN event, which means new CQE arrived
+            pfd.revents = 0;
 
+            println!("start poll...");
+            let nfds = 1;
+            let timeout_ms = 10;
+            let mut rc;
+            loop {
+                rc = unsafe { libc::poll(&mut pfd, nfds, timeout_ms) };
+                if rc != 0 {
+                    println!("end poll");
+                    break;
+                }
+            }
+            if rc < 0 {
+                panic!("poll failed");
+            }
+        */
         let mut cq_context = std::ptr::null_mut::<c_void>();
-        let rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
+        rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
         if rc != 0 {
             panic!("Failed to get cq_event");
         }
@@ -555,7 +597,7 @@ impl Resources {
         sr.sg_list = &mut sge;
         sr.num_sge = 1;
         sr.opcode = opcode;
-        sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+        sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
         if opcode != ibv_wr_opcode::IBV_WR_SEND {
             sr.wr.rdma.remote_addr = self.remote_props.addr;
             sr.wr.rdma.rkey = self.remote_props.rkey;
@@ -679,7 +721,7 @@ impl Resources {
         // Create the Queue Pair
         let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
         qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
-        qp_init_attr.sq_sig_all = 1;
+        qp_init_attr.sq_sig_all = 1; // TODO: set to 0 to avoid CQE for every SR
         qp_init_attr.send_cq = cq;
         qp_init_attr.recv_cq = cq;
         qp_init_attr.cap.max_send_wr = 1;

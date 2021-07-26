@@ -3,8 +3,8 @@
 use serde::{de::DeserializeOwned, Serialize};
 // use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
-use std::net::ToSocketAddrs;
-use std::net::UdpSocket;
+use std::io::prelude::*;
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::raw::{c_char, c_int};
 use std::os::unix::io::RawFd;
 use utilities::Cast; //, OverflowArithmetic};
@@ -15,14 +15,67 @@ use super::util;
 pub struct Udp {
     /// UDP socket
     sock: UdpSocket,
+    /// Peer socket address
+    peer_addr: SocketAddr,
 }
 
 impl Udp {
     /// Constructor
-    pub fn bind(addr: impl ToSocketAddrs) -> Self {
-        let sock = UdpSocket::bind(addr)
-            .unwrap_or_else(|err| panic!("couldn't bind to address, the error is: {}", err));
-        Self { sock }
+    pub fn bind(port: u16) -> Self {
+        let sock = UdpSocket::bind(format!("0.0.0.0:{}", port))
+            .unwrap_or_else(|err| panic!("failed to bind to address, the error is: {}", err));
+        let peer_addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+            port,
+        );
+        Self { sock, peer_addr }
+    }
+
+    /// Accept
+    pub fn accept(&self) -> Self {
+        let (_, clt_addr) = self.recv_from::<u8>(1);
+        println!("accept: {}", clt_addr);
+        let clt_sock = UdpSocket::bind("0.0.0.0:0")
+            .unwrap_or_else(|err| panic!("failed to bind to address, the error is: {}", err));
+
+        clt_sock.send_to(&[2_u8], &clt_addr).unwrap_or_else(|err| {
+            panic!(
+                "failed to send connect data to client, the error is: {}",
+                err
+            )
+        });
+        Self {
+            sock: clt_sock,
+            peer_addr: clt_addr,
+        }
+    }
+
+    /// Connect
+    pub fn connect(addr: impl ToSocketAddrs) -> Self {
+        let sock = UdpSocket::bind("0.0.0.0:0")
+            .unwrap_or_else(|err| panic!("failed to bind to address, the error is: {}", err));
+        let mut addr_iter = addr
+            .to_socket_addrs()
+            .unwrap_or_else(|err| panic!("failed to convert to SocketAddr, the error is:{}", err));
+        let srv_addr = addr_iter
+            .next()
+            .unwrap_or_else(|| panic!("failed to get SocketAddr from iterator"));
+
+        let mut buf = [1_u8];
+        sock.send_to(&buf, &srv_addr).unwrap_or_else(|err| {
+            panic!(
+                "failed to send connect data to server, the error is: {}",
+                err
+            )
+        });
+        let (_, peer_addr) = sock.recv_from(&mut buf).unwrap_or_else(|err| {
+            panic!(
+                "failed to receive connect data from server, the error is: {}",
+                err
+            )
+        });
+        println!("srv addr: {}, peer addr: {}", srv_addr, peer_addr);
+        Self { sock, peer_addr }
     }
 
     /// Send data
@@ -36,7 +89,7 @@ impl Udp {
     }
 
     /// Receive data
-    pub fn recv_from<T: DeserializeOwned>(&self, buf_size: usize) -> (T, std::net::SocketAddr) {
+    pub fn recv_from<T: DeserializeOwned>(&self, buf_size: usize) -> (T, SocketAddr) {
         // println!("socket buf size: {}", buf_size);
         let mut buf = Vec::with_capacity(buf_size);
         unsafe { buf.set_len(buf.capacity()) };
@@ -53,6 +106,44 @@ impl Udp {
             .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err));
         (decode, src_addr)
     }
+
+    ///
+    pub fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
+        let xfer_size = std::mem::size_of::<T>() + 8;
+        let encoded: Vec<u8> = bincode::serialize(data)
+            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
+        let send_size = self
+            .sock
+            .send_to(&encoded, self.peer_addr)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to send data to {}, the error is: {}",
+                    self.peer_addr, err
+                )
+            });
+        debug_assert_eq!(send_size, encoded.len(), "socket send data size not match");
+        // println!("send to: {}", self.peer_addr);
+        let mut decode_buf = Vec::with_capacity(xfer_size);
+        unsafe {
+            decode_buf.set_len(xfer_size);
+        }
+        let (recv_size, recv_addr) = self.sock.recv_from(&mut decode_buf).unwrap_or_else(|err| {
+            panic!(
+                "failed to receive data from {}, the error is:{}",
+                self.peer_addr, err
+            )
+        });
+        // println!("recv from: {}", recv_addr);
+        debug_assert_eq!(recv_addr, self.peer_addr, "receive address not match");
+        unsafe {
+            decode_buf.set_len(recv_size.cast());
+        }
+        debug_assert!(recv_size > 0, "failed to receive data from socket");
+
+        bincode::deserialize(&decode_buf)
+            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
+    }
+
     /*
         ///
         fn recv(&self, mut buffer: &mut [u8]) -> usize {
@@ -257,6 +348,241 @@ impl Tcp {
     }
 }
 
+///
+pub enum TcpSock {
+    ///
+    Listener(TcpListener),
+    ///
+    Stream(TcpStream),
+}
+
+impl TcpSock {
+    ///
+    pub fn bind(port: u16) -> Self {
+        let sock_addr = format!("0.0.0.0:{}", port);
+        let tcp_listener = TcpListener::bind(&sock_addr)
+            .unwrap_or_else(|err| panic!("failed to bind to {}, the error is: {}", sock_addr, err));
+        Self::Listener(tcp_listener)
+    }
+
+    ///
+    fn listener(&self) -> &TcpListener {
+        match *self {
+            Self::Listener(ref srv) => srv,
+            Self::Stream(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
+        }
+    }
+
+    ///
+    fn stream(&self) -> &TcpStream {
+        match *self {
+            Self::Listener(_) => panic!("cannot return TcpListener from TcpSock::CLIENT"),
+            Self::Stream(ref clnt) => clnt,
+        }
+    }
+
+    ///
+    pub fn accept(&self) -> Self {
+        match self.listener().accept() {
+            Ok((tcp_stream, addr)) => {
+                println!("new client: {:?}", addr);
+                Self::Stream(tcp_stream)
+            }
+            Err(e) => panic!("couldn't get client: {:?}", e),
+        }
+    }
+
+    ///
+    pub fn connect(server_name: &str, port: u16) -> Self {
+        let sock_addr = format!("{}:{}", server_name, port);
+        let tcp_stream = TcpStream::connect(&sock_addr).unwrap_or_else(|err| {
+            panic!("failed to connect to {}, the error is: {}", sock_addr, err)
+        });
+        Self::Stream(tcp_stream)
+    }
+
+    ///
+    fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
+        let xfer_size = std::mem::size_of::<T>();
+        let encoded: Vec<u8> = bincode::serialize(data)
+            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
+        let send_size = self
+            .stream()
+            .write(&encoded)
+            .unwrap_or_else(|err| panic!("failed to send data via socket, the error is: {}", err));
+        debug_assert_eq!(send_size, encoded.len(), "socket send data size not match");
+        let mut decode_buf = Vec::with_capacity(xfer_size);
+        unsafe {
+            decode_buf.set_len(xfer_size);
+        }
+        let recv_size = self.stream().read(&mut decode_buf).unwrap_or_else(|err| {
+            panic!("failed to receive data via socket, the error is:{}", err)
+        });
+        unsafe {
+            decode_buf.set_len(recv_size.cast());
+        }
+        debug_assert!(recv_size > 0, "failed to receive data from socket");
+
+        bincode::deserialize(&decode_buf)
+            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
+    }
+}
+
+/*
+/// Tcp socket wrapper
+pub struct TcpSocket {
+    /// Socket handler
+    sock: std::os::unix::io::RawFd,
+}
+
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.sock) };
+    }
+}
+
+impl TcpSocket {
+    ///
+    fn resolve_addr(
+        server_name: &str,
+        port: u16,
+        resolved_addr: *mut *mut libc::addrinfo,
+    ) -> c_int {
+        let server_addr_cstr = CString::new(server_name).unwrap_or_else(|err| {
+            panic!(
+                "failed to build server address CString, the error is: {}",
+                err,
+            )
+        });
+        let server_port_cstr = CString::new(port.to_string())
+            .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
+        let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
+        hints.ai_flags = libc::AI_PASSIVE;
+        hints.ai_family = libc::AF_INET;
+        hints.ai_socktype = libc::SOCK_STREAM;
+
+        // Resolve DNS address
+        let rc = unsafe {
+            libc::getaddrinfo(
+                if server_name.is_empty() {
+                    std::ptr::null::<c_char>()
+                } else {
+                    server_addr_cstr.as_ptr()
+                },
+                server_port_cstr.as_ptr(),
+                &hints,
+                resolved_addr,
+            )
+        };
+        debug_assert_eq!(rc, 0, "getaddrinfo failed, the error is: {:?}", unsafe {
+            CStr::from_ptr(libc::gai_strerror(rc))
+        });
+        rc
+    }
+
+    ///
+    pub fn connect(server_name: &str, port: u16) -> Self {
+        let mut rc: c_int;
+        let mut resolved_addr = std::ptr::null_mut::<libc::addrinfo>();
+        rc = Self::resolve_addr(server_name, port, &mut resolved_addr);
+        debug_assert_eq!(rc, 0, "resolve_addr failed");
+
+        // Search through results and find the one we want
+        let mut iterator = resolved_addr;
+        let mut sockfd = -1;
+        while !util::is_null_mut_ptr(iterator) {
+            let addr = unsafe { &*iterator };
+            sockfd = unsafe { libc::socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol) };
+            if sockfd >= 0 {
+                // Client mode. Initiate connection to remote
+                rc = unsafe { libc::connect(sockfd, addr.ai_addr, addr.ai_addrlen) };
+                debug_assert_eq!(rc, 0, "socket connect failed");
+            }
+
+            iterator = addr.ai_next;
+        }
+        if !util::is_null_mut_ptr(resolved_addr) {
+            unsafe { libc::freeaddrinfo(resolved_addr) };
+        }
+        Self { sock: sockfd }
+    }
+
+    ///
+    pub fn bind(port: u16) -> Self {
+        let mut rc: c_int;
+        let mut resolved_addr = std::ptr::null_mut::<libc::addrinfo>();
+        let empty_server_name = "";
+        rc = Self::resolve_addr(empty_server_name, port, &mut resolved_addr);
+        debug_assert_eq!(rc, 0, "resolve_addr failed");
+
+        // Search through results and find the one we want
+        let mut iterator = resolved_addr;
+        let mut listenfd = -1;
+        while !util::is_null_mut_ptr(iterator) {
+            let addr = unsafe { &*iterator };
+            listenfd = unsafe { libc::socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol) };
+            if listenfd >= 0 {
+                // Server mode. Set up listening socket an accept a connection
+                rc = unsafe { libc::bind(listenfd, addr.ai_addr, addr.ai_addrlen) };
+                debug_assert_eq!(rc, 0, "socket bind failed");
+            }
+
+            iterator = addr.ai_next;
+        }
+        if !util::is_null_mut_ptr(resolved_addr) {
+            unsafe { libc::freeaddrinfo(resolved_addr) };
+        }
+        Self { sock: listenfd }
+    }
+
+    ///
+    pub fn accept(&self) -> Self {
+        let backlog = 1;
+        let rc = unsafe { libc::listen(self.sock, backlog) };
+        if rc != 0 {
+            panic!("socket listen failed");
+        }
+        let client_addr = std::ptr::null_mut::<libc::sockaddr>();
+        let mut addr_len = 0;
+        let rmt_sockfd = unsafe { libc::accept(self.sock, client_addr, &mut addr_len) };
+        if rmt_sockfd < 0 {
+            panic!("socket accept failed");
+        }
+        Self { sock: rmt_sockfd }
+    }
+
+    /// TODO: use system approach for state sync
+    fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
+        let xfer_size = std::mem::size_of::<T>();
+        let mut encoded: Vec<u8> = bincode::serialize(data)
+            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
+        let mut decode_buf = Vec::with_capacity(xfer_size);
+        let rc = unsafe {
+            libc::write(
+                self.sock,
+                util::mut_ptr_cast(encoded.as_mut_ptr()),
+                encoded.len(),
+            )
+        };
+        debug_assert_eq!(rc, encoded.len().cast(), "failed to send data via socket",);
+        let recv_size = unsafe {
+            libc::read(
+                self.sock,
+                util::mut_ptr_cast(decode_buf.as_mut_ptr()),
+                decode_buf.capacity(),
+            )
+        };
+        unsafe {
+            decode_buf.set_len(recv_size.cast());
+        }
+        debug_assert!(recv_size > 0, "failed to receive data from socket");
+
+        bincode::deserialize(&decode_buf)
+            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
+    }
+}
+*/
+
 /// Unit test
 mod test {
     use super::*;
@@ -271,6 +597,11 @@ mod test {
         msg: String,
     }
 
+    ///
+    const SRV_MSG: &str = "HELLO FROM SERVER";
+    ///
+    const CLT_MSG: &str = "HELLO FROM CLIENT";
+
     #[test]
     fn test_udp() {
         let num = 64;
@@ -278,26 +609,48 @@ mod test {
             .take(1000)
             .collect::<String>();
         let buf_size = std::mem::size_of::<TestStruct>() + msg.len();
-        let srv_addr = "0.0.0.0:54321";
-        let clt_addr = "0.0.0.0:23456";
+        let srv_port = 54321;
 
         let msg_clone = msg.clone();
         let srv_handle = std::thread::spawn(move || {
-            let srv_sock = Udp::bind(srv_addr);
+            let srv_sock = Udp::bind(srv_port);
             let wait_secs = std::time::Duration::new(5, 0);
             srv_sock
                 .sock
                 .set_read_timeout(Some(wait_secs))
                 .unwrap_or_else(|err| panic!("failed to set read timeout, the error is: {}", err));
+
+            let srv_data = TestStruct {
+                num: 1,
+                msg: SRV_MSG.into(),
+            };
+            let clt_sock = srv_sock.accept();
+            let clt_data: TestStruct = clt_sock.exchange_data(&srv_data);
+            assert_eq!(clt_data.msg, CLT_MSG);
+
             let (recv_data, _) = srv_sock.recv_from::<TestStruct>(buf_size);
             assert_eq!(recv_data.num, num);
             assert_eq!(recv_data.msg, msg_clone);
         });
 
+        let srv_addr = format!("127.0.0.1:{}", srv_port);
         let clt_handle = std::thread::spawn(move || {
-            let clt_sock = Udp::bind(clt_addr);
+            let clt_sock = Udp::connect(&srv_addr);
+            let wait_secs = std::time::Duration::new(5, 0);
+            clt_sock
+                .sock
+                .set_read_timeout(Some(wait_secs))
+                .unwrap_or_else(|err| panic!("failed to set read timeout, the error is: {}", err));
+
+            let clt_data = TestStruct {
+                num: 2,
+                msg: CLT_MSG.into(),
+            };
+            let srv_data: TestStruct = clt_sock.exchange_data(&clt_data);
+            assert_eq!(srv_data.msg, SRV_MSG);
+
             let send_data = TestStruct { num, msg };
-            clt_sock.send_to(&send_data, "127.0.0.1:54321");
+            clt_sock.send_to(&send_data, &srv_addr);
         });
         let srv_res = srv_handle.join();
         let clt_res = clt_handle.join();

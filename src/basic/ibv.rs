@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_int, c_uint, c_void};
+use std::thread::{self, JoinHandle};
 use utilities::{Cast, OverflowArithmetic};
 
 use super::socket::Udp;
@@ -20,7 +21,7 @@ const RDMAMSGR: &str = "RDMA read operation";
 ///
 const RDMAMSGW: &str = "RDMA write operation";
 ///
-const MSG_SIZE: usize = 32;
+const MSG_SIZE: usize = 720;
 ///
 const MAX_POLL_CQ_TIMEOUT: i64 = 2000;
 ///
@@ -87,6 +88,14 @@ enum State {
     ReadSize(isize),
     ///
     WriteSize(isize),
+    ///
+    WriteImm,
+    ///
+    WriteDone,
+    ///
+    AtomicReady,
+    ///
+    AtomicDone,
 }
 
 /// RDMA resources
@@ -142,11 +151,30 @@ impl Resources {
     }
 
     ///
-    pub fn async_poll_completion(&self) -> std::thread::JoinHandle<c_int> {
+    pub fn async_poll_completion(&self) -> JoinHandle<c_int> {
         let cq_addr = util::ptr_to_usize(self.cq);
         let channel_addr = util::ptr_to_usize(self.event_channel);
 
-        std::thread::spawn(move || Self::poll_completion_non_blocking(cq_addr, channel_addr))
+        thread::spawn(move || Self::poll_completion_non_blocking(cq_addr, channel_addr))
+    }
+
+    ///
+    pub fn poll_async_event_non_blocking(&self) -> JoinHandle<c_int> {
+        let ctx_addr = util::ptr_to_usize(self.ib_ctx);
+
+        thread::spawn(move || {
+            let ctx = unsafe { util::usize_to_mut_ptr::<ibv_context>(ctx_addr) };
+            let mut event = unsafe { std::mem::zeroed::<ibv_async_event>() };
+            let mut rc: c_int;
+            loop {
+                rc = unsafe { ibv_get_async_event(ctx, &mut event) };
+                if rc != 0 {
+                    panic!("Failed to get async event");
+                }
+                println!("get async event type={}", event.event_type);
+                unsafe { ibv_ack_async_event(&mut event) };
+            }
+        })
     }
 
     ///
@@ -154,7 +182,7 @@ impl Resources {
         let solicited_only = 0;
         let rc = unsafe { ibv_req_notify_cq(self.cq, solicited_only) };
         if rc != 0 {
-            panic!("Couldn't request CQ notification");
+            panic!("Failed to request CQ notification");
         }
     }
 
@@ -291,12 +319,9 @@ impl Resources {
     ///
     pub fn poll_completion(&self) -> c_int {
         let cq_addr = util::ptr_to_usize(self.cq);
-        Self::poll_completion_cb(cq_addr)
-    }
-
-    ///
-    fn poll_completion_cb(cq_addr: usize) -> c_int {
         let cq = unsafe { util::usize_to_mut_ptr::<ibv_cq>(cq_addr) };
+        // let qp_addr = util::ptr_to_usize(self.qp);
+        // let qp = unsafe { util::usize_to_mut_ptr::<ibv_qp>(qp_addr) };
         let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
         // let start_time_msec: u64;
         let mut cur_time_msec: i64;
@@ -328,6 +353,8 @@ impl Resources {
             Ordering::Equal => {
                 // the CQ is empty
                 // rc = 1;
+                // println!("completion wasn't found in the CQ after timeout");
+                // Self::query_qp_cb(qp);
                 panic!("completion wasn't found in the CQ after timeout");
             }
             Ordering::Greater => {
@@ -348,13 +375,39 @@ impl Resources {
     }
 
     ///
+    pub fn post_write_imm(&self) -> c_int {
+        let opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM;
+        let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+        let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+        // prepare the send work request
+        sr.next = std::ptr::null_mut();
+        sr.wr_id = 0;
+        sr.sg_list = std::ptr::null_mut(); //&mut sge;
+        sr.num_sge = 0;
+        sr.opcode = opcode;
+        sr.imm_data_invalidated_rkey_union.imm_data = 0x1234;
+        sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+        sr.wr.rdma.remote_addr = self.remote_props.addr;
+        sr.wr.rdma.rkey = self.remote_props.rkey;
+
+        self.req_cq_notify();
+        // there is a Receive Request in the responder side, so we won't get any into RNR flow
+        let rc = unsafe { ibv_post_send(self.qp, &mut sr, &mut bad_wr) };
+        if rc == 0 {
+            println!("RDMA write with imm request was posted");
+        }
+        rc
+    }
+
+    ///
     pub fn post_send(&self, opcode: c_uint) -> c_int {
         let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
         let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         // prepare the scatter/gather entry
         sge.addr = util::ptr_to_usize(self.buf.as_ptr()).cast();
-        sge.length = MSG_SIZE.cast();
+        sge.length = self.buf_slice().len().cast();
         sge.lkey = unsafe { (*self.mr).lkey };
         // prepare the send work request
         sr.next = std::ptr::null_mut();
@@ -362,10 +415,29 @@ impl Resources {
         sr.sg_list = &mut sge;
         sr.num_sge = 1;
         sr.opcode = opcode;
+        sr.imm_data_invalidated_rkey_union.imm_data = 0x1234;
         sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
-        if opcode != ibv_wr_opcode::IBV_WR_SEND {
-            sr.wr.rdma.remote_addr = self.remote_props.addr;
-            sr.wr.rdma.rkey = self.remote_props.rkey;
+
+        match opcode {
+            ibv_wr_opcode::IBV_WR_RDMA_READ
+            | ibv_wr_opcode::IBV_WR_RDMA_WRITE
+            | ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => {
+                sr.wr.rdma.remote_addr = self.remote_props.addr;
+                sr.wr.rdma.rkey = self.remote_props.rkey;
+            }
+            ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => {
+                let aligned_remote_addr = ((self.remote_props.addr + 7) >> 3) << 3;
+                println!(
+                    "remote addr={:x}, aligned remote addr={:x}",
+                    self.remote_props.addr, aligned_remote_addr
+                );
+                //println!("remote addr={:x}", self.remote_props.addr);
+                sr.wr.atomic.remote_addr = aligned_remote_addr;
+                sr.wr.atomic.rkey = self.remote_props.rkey;
+                sr.wr.atomic.compare_add = 0;
+                sr.wr.atomic.swap = 1;
+            }
+            _ => (),
         }
 
         self.req_cq_notify();
@@ -373,13 +445,20 @@ impl Resources {
         let rc = unsafe { ibv_post_send(self.qp, &mut sr, &mut bad_wr) };
         if rc == 0 {
             match opcode {
-                ibv_wr_opcode::IBV_WR_SEND => println!("RDMA send request was posted"),
-                ibv_wr_opcode::IBV_WR_RDMA_READ => println!("RDMA read Request was posted"),
-                ibv_wr_opcode::IBV_WR_RDMA_WRITE => println!("RDMA write Request was posted"),
+                ibv_wr_opcode::IBV_WR_SEND | ibv_wr_opcode::IBV_WR_SEND_WITH_IMM => {
+                    println!("RDMA send request was posted")
+                }
+                ibv_wr_opcode::IBV_WR_RDMA_READ => println!("RDMA read request was posted"),
+                ibv_wr_opcode::IBV_WR_RDMA_WRITE | ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => {
+                    println!("RDMA write request was posted")
+                }
+                ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => {
+                    println!("RDMA atomic request was posted")
+                }
                 _ => println!("Unknown Request was posted"),
             }
         } else {
-            panic!("failed to post SR");
+            panic!("failed to post SR, the error code is:{}", rc);
         }
         rc
     }
@@ -392,7 +471,7 @@ impl Resources {
 
         // prepare the scatter/gather entry
         sge.addr = util::ptr_to_usize(self.buf.as_ptr()).cast();
-        sge.length = MSG_SIZE.cast();
+        sge.length = self.buf_slice().len().cast();
         sge.lkey = unsafe { (*self.mr).lkey };
         // prepare the receive work request
         rr.next = std::ptr::null_mut();
@@ -438,7 +517,7 @@ impl Resources {
             panic!("ibv_alloc_pd failed");
         }
         // Each side will send only one WR, so Completion Queue with 1 entry is enough
-        let cq_size = 1;
+        let cq_size = 10;
         let cq_context = std::ptr::null_mut::<c_void>();
         let event_channel = unsafe { ibv_create_comp_channel(ib_ctx) };
         if util::is_null_mut_ptr(event_channel) {
@@ -463,13 +542,14 @@ impl Resources {
         // Register the memory buffer
         let mr_flags = (ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE)
+            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
+            | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC)
             .0;
         let mr = unsafe {
             ibv_reg_mr(
                 pd,
                 util::mut_ptr_cast(buf.as_mut_ptr()),
-                MSG_SIZE,
+                buf.len(),
                 mr_flags.cast(),
             )
         };
@@ -486,13 +566,13 @@ impl Resources {
         // Create the Queue Pair
         let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
         qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
-        qp_init_attr.sq_sig_all = 1; // TODO: set to 0 to avoid CQE for every SR
+        qp_init_attr.sq_sig_all = 0; // set to 0 to avoid CQE for every SR
         qp_init_attr.send_cq = cq;
         qp_init_attr.recv_cq = cq;
-        qp_init_attr.cap.max_send_wr = 1;
-        qp_init_attr.cap.max_recv_wr = 1;
-        qp_init_attr.cap.max_send_sge = 1;
-        qp_init_attr.cap.max_recv_sge = 1;
+        qp_init_attr.cap.max_send_wr = 10;
+        qp_init_attr.cap.max_recv_wr = 10;
+        qp_init_attr.cap.max_send_sge = 10;
+        qp_init_attr.cap.max_recv_sge = 10;
         let qp = unsafe { ibv_create_qp(pd, &mut qp_init_attr) };
         if util::is_null_mut_ptr(qp) {
             panic!("failed to create QP");
@@ -624,17 +704,46 @@ impl Resources {
     }
 
     ///
+    fn query_qp(&self) {
+        Self::query_qp_cb(self.qp)
+    }
+
+    ///
+    fn query_qp_cb(qp: *mut ibv_qp) {
+        let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
+        let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+
+        let rc = unsafe {
+            ibv_query_qp(
+                qp,
+                &mut attr,
+                ibv_qp_attr_mask::IBV_QP_STATE.0.cast(),
+                &mut init_attr,
+            )
+        };
+        println!(
+            "QP state: {}, cur state: {}",
+            attr.qp_state, attr.cur_qp_state
+        );
+        if rc != 0 {
+            panic!("failed to query QP state");
+        }
+    }
+
+    ///
     fn modify_qp_to_init(&self, ib_port: u8) -> c_int {
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
-        attr.qp_state = ibv_qp_state::IBV_QPS_INIT;
-        attr.port_num = ib_port;
+        //attr.path_mtu = ibv_mtu::IBV_MTU_256;
         attr.pkey_index = 0;
+        attr.port_num = ib_port;
+        attr.qp_state = ibv_qp_state::IBV_QPS_INIT;
         attr.qp_access_flags = (ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE)
+            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
+            | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC)
             .0;
-        let flags = ibv_qp_attr_mask::IBV_QP_STATE
-            | ibv_qp_attr_mask::IBV_QP_PKEY_INDEX
+        let flags = ibv_qp_attr_mask::IBV_QP_PKEY_INDEX
+            | ibv_qp_attr_mask::IBV_QP_STATE
             | ibv_qp_attr_mask::IBV_QP_PORT
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
         let rc = unsafe { ibv_modify_qp(self.qp, &mut attr, flags.0.cast()) };
@@ -778,7 +887,7 @@ pub fn run(
         // res.buf_slice_mut().copy_from_slice(
         //     RDMAMSGR
         //         .as_bytes()
-        //         .get(0..MSG_SIZE)
+        //         .get(0..res.buf_slice())
         //         .unwrap_or_else(|| panic!("failed to slicing")),
         // );
     } else {
@@ -826,7 +935,7 @@ pub fn run(
         // res.buf_slice_mut().copy_from_slice(
         //     RDMAMSGW
         //         .as_bytes()
-        //         .get(0..MSG_SIZE)
+        //         .get(0..res.buf_slice())
         //         .unwrap_or_else(|| panic!("failed to slicing")),
         // );
         println!("now replacing it with: {}", RDMAMSGW);
@@ -860,6 +969,7 @@ pub fn run(
 }
 */
 ///
+#[allow(clippy::too_many_lines)]
 pub fn run_client(
     server_name: &str,
     input_dev_name: &str,
@@ -874,6 +984,8 @@ pub fn run_client(
 
     // Create resources before using them
     let mut res = Resources::new(input_dev_name, gid_idx, ib_port, client_sock);
+    res.poll_async_event_non_blocking();
+
     // Client post RR to be prepared for incoming messages
     rc = res.post_receive();
     debug_assert_eq!(rc, 0, "failed to post RR");
@@ -884,18 +996,22 @@ pub fn run_client(
     } else {
         panic!("failed to receive ready");
     }
-    // Both sides expect to get a completion
-    rc = res.poll_completion();
-    debug_assert_eq!(rc, 0, "poll completion failed");
+    // Exchange send size with server
     let resp_send_size: State = res.sock.exchange_data(&State::SendSize(INVALID_SIZE));
     let send_size = if let State::SendSize(send_size) = resp_send_size {
         println!("receive send size from server: {}", send_size);
         send_size
     } else {
-        panic!("failed to receive send size")
+        panic!(
+            "failed to receive send size, the state is: {:?}",
+            resp_send_size
+        )
     };
+    // Both sides expect to get a completion
+    rc = res.poll_completion();
+    debug_assert_eq!(rc, 0, "poll completion failed");
 
-    // after polling the completion we have the message in the client buffer too
+    // After polling the completion we have the message in the client buffer too
     let recv_msg = std::str::from_utf8(
         res.buf_slice()
             .get(0..(send_size.cast()))
@@ -910,7 +1026,10 @@ pub fn run_client(
         println!("receive read size from server: {}", read_size);
         read_size
     } else {
-        panic!("failed to receive read size")
+        panic!(
+            "failed to receive read size, the state is: {:?}",
+            resp_read_size
+        )
     };
 
     // Now the client performs an RDMA read and then write on server.
@@ -929,36 +1048,116 @@ pub fn run_client(
     .unwrap_or_else(|err| panic!("failed to build str from bytes, the error is: {}", err));
     println!("client read server buffer: {}", read_msg);
 
+    // Sync with server the size of write data
+    let resp_write_size: State = res
+        .sock
+        .exchange_data(&State::WriteSize(res.buf_slice().len().cast()));
+    if let State::WriteSize(write_size) = resp_write_size {
+        println!("receive write size from server: {}", write_size);
+    } else {
+        panic!(
+            "failed to receive write size, the state is: {:?}",
+            resp_write_size
+        );
+    }
     // Next client write data to server's buffer
     copy_to_buf_pad(res.buf_slice_mut(), RDMAMSGW);
-    println!("now to server with data: {}", RDMAMSGW);
-    //res.req_cq_notify();
+    println!("write to server with data: {}", RDMAMSGW);
     rc = res.post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE);
     debug_assert_eq!(rc, 0, "failed to post SR 3");
     // rc = res.poll_completion();
     // debug_assert_eq!(rc, 0, "poll completion failed 3");
     let poll_handler = res.async_poll_completion();
-
-    // Sync with server the size of write data
-    let resp_write_size: State = res
-        .sock
-        .exchange_data(&State::WriteSize(RDMAMSGW.len().cast()));
-    if let State::WriteSize(write_size) = resp_write_size {
-        println!("receive write size from server: {}", write_size);
-    } else {
-        panic!("failed to receive write size");
-    }
-
     let poll_res = poll_handler.join();
     if let Err(err) = poll_res {
         panic!("async poll completion failed, the error is: {:?}", err);
     }
 
+    // Prepare to receive write with imm
+    res.post_receive();
+    // Sync with server about write with imm
+    let resp_write_imm: State = res.sock.exchange_data(&State::WriteImm);
+    if let State::WriteImm = resp_write_imm {
+        println!("receive write with imm from server");
+    } else {
+        panic!(
+            "failed to receive write with imm, the state is: {:?}",
+            resp_write_imm
+        );
+    }
+    // Sync with server about write done
+    let resp_write_done: State = res.sock.exchange_data(&State::WriteDone);
+    if let State::WriteDone = resp_write_done {
+        println!("receive write done from server");
+    } else {
+        panic!(
+            "failed to receive write done, the state is: {:?}",
+            resp_write_done
+        );
+    }
+
+    // Notify server for atomic operation
+    copy_to_buf_pad(res.buf_slice_mut(), "");
+    let pre_atomic_msg = std::str::from_utf8(
+        res.buf_slice()
+            .get(0..(res.buf_slice().len()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to read atomic buf with size {}",
+                    res.buf_slice().len()
+                )
+            }),
+    )
+    .unwrap_or_else(|err| panic!("failed to build str from bytes, the error is: {}", err));
+    println!(
+        "client atomic data before server atomic operation: {:?}",
+        pre_atomic_msg
+    );
+    println!(
+        "client atomic mr begin addr={:x}, end addr={:x}",
+        util::ptr_to_usize(res.buf_slice().as_ptr()),
+        util::ptr_to_usize(res.buf_slice().as_ptr()) + res.buf_slice().len()
+    );
+    // Pre atomic operation
+    let resp_atomic_ready: State = res.sock.exchange_data(&State::AtomicReady);
+    if let State::AtomicReady = resp_atomic_ready {
+        println!("atomic ready: {:?}", resp_atomic_ready);
+    } else {
+        panic!("failed to atomic ready");
+    }
+    // let two_secs = std::time::Duration::from_millis(2000);
+    // thread::sleep(two_secs);
+    res.query_qp();
+    // Post atomic operation
+    let resp_atomic_done: State = res.sock.exchange_data(&State::AtomicDone);
+    if let State::AtomicDone = resp_atomic_done {
+        println!("atomic done: {:?}", resp_atomic_done);
+    } else {
+        panic!("failed to atomic done");
+    }
+    let post_atomic_msg = std::str::from_utf8(
+        res.buf_slice()
+            .get(0..(res.buf_slice().len()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to read atomic buf with size {}",
+                    res.buf_slice().len()
+                )
+            }),
+    )
+    .unwrap_or_else(|err| panic!("failed to build str from bytes, the error is: {}", err));
+    println!(
+        "client atomic data after server atomic operation: {:?}",
+        post_atomic_msg
+    );
+
+    res.query_qp();
     println!("\ntest result is: {}", rc);
     rc
 }
 
 ///
+#[allow(clippy::too_many_lines)]
 pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: u16) -> c_int {
     let mut rc: c_int;
 
@@ -970,6 +1169,7 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
 
     // Create resources
     let mut res = Resources::new(input_dev_name, gid_idx, ib_port, client_sock);
+
     // Only in the server side put the message in the memory buffer
     copy_to_buf_pad(res.buf_slice_mut(), MSG);
     // Sync with client before send
@@ -979,30 +1179,39 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
     } else {
         panic!("failed to receive ready");
     }
-    println!("going to send the message: \"{}\"", MSG);
-    rc = res.post_send(ibv_wr_opcode::IBV_WR_SEND);
-    debug_assert_eq!(rc, 0, "failed to post sr");
-
-    // Both sides expect to get a completion
-    rc = res.poll_completion();
-    debug_assert_eq!(rc, 0, "poll completion failed");
-    let resp_send_size: State = res.sock.exchange_data(&State::SendSize(MSG.len().cast()));
+    // Exchange send size with client
+    let resp_send_size: State = res
+        .sock
+        .exchange_data(&State::SendSize(res.buf_slice().len().cast()));
     if let State::SendSize(send_size) = resp_send_size {
         println!("receive send size from client: {}", send_size);
     } else {
-        panic!("failed to receive send size");
+        panic!(
+            "failed to receive send size, the state is:{:?}",
+            resp_send_size
+        );
     }
+    // Post send request
+    println!("going to send the message: \"{}\"", MSG);
+    rc = res.post_send(ibv_wr_opcode::IBV_WR_SEND_WITH_IMM);
+    debug_assert_eq!(rc, 0, "failed to post send");
+    // Both sides expect to get a completion
+    rc = res.poll_completion();
+    debug_assert_eq!(rc, 0, "poll completion failed");
 
     // Setup server buffer with read message
     copy_to_buf_pad(res.buf_slice_mut(), RDMAMSGR);
     // Sync with client the size of read data from server
     let resp_read_size: State = res
         .sock
-        .exchange_data(&State::ReadSize(RDMAMSGR.len().cast()));
+        .exchange_data(&State::ReadSize(res.buf_slice().len().cast()));
     if let State::ReadSize(read_size) = resp_read_size {
         println!("receive read size from client: {}", read_size);
     } else {
-        panic!("failed to receive read size");
+        panic!(
+            "failed to receive read size, the code is: {:?}",
+            resp_read_size
+        );
     }
 
     // Sync with client the size of write data to server
@@ -1011,7 +1220,36 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
         println!("receive write size from client: {}", write_size);
         write_size
     } else {
-        panic!("failed to receive write size")
+        panic!(
+            "failed to receive write size, the state is: {:?}",
+            resp_write_size
+        )
+    };
+
+    // Sync with client about write with imm
+    let resp_write_imm: State = res.sock.exchange_data(&State::WriteImm);
+    if let State::WriteImm = resp_write_imm {
+        println!("receive write with imm from server");
+    } else {
+        panic!(
+            "failed to receive write with imm, the state is: {:?}",
+            resp_write_imm
+        );
+    }
+    // Send write with imm
+    println!("going to post write with imm");
+    res.post_write_imm();
+    rc = res.poll_completion();
+    debug_assert_eq!(rc, 0, "poll completion failed");
+    // Sync with client about write done
+    let resp_write_done: State = res.sock.exchange_data(&State::WriteDone);
+    if let State::WriteDone = resp_write_done {
+        println!("receive write done from client");
+    } else {
+        panic!(
+            "failed to receive write done, the state is: {:?}",
+            resp_write_done
+        )
     };
     let write_msg = std::str::from_utf8(
         res.buf_slice()
@@ -1021,6 +1259,34 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
     .unwrap_or_else(|err| panic!("failed to build str from bytes, the error is: {}", err));
     println!("client write data to server buffer: {:?}", write_msg);
 
+    // Sync with client before atomic
+    let resp_atomic_ready: State = res.sock.exchange_data(&State::AtomicReady);
+    if let State::AtomicReady = resp_atomic_ready {
+        println!("atomic ready: {:?}", resp_atomic_ready);
+    } else {
+        panic!(
+            "failed to atomic ready, the state is: {:?}",
+            resp_atomic_ready
+        );
+    }
+    // Atomic opteration
+    println!("going to request atomic operation");
+    rc = res.post_send(ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP);
+    debug_assert_eq!(rc, 0, "failed to post atomic");
+    rc = res.poll_completion();
+    debug_assert_eq!(rc, 0, "poll completion failed");
+    // Sync with client after atomic
+    let resp_atomic_done: State = res.sock.exchange_data(&State::AtomicDone);
+    if let State::AtomicDone = resp_atomic_done {
+        println!("atomic done: {:?}", resp_atomic_done);
+    } else {
+        panic!(
+            "failed to atomic done, the state is: {:?}",
+            resp_atomic_done
+        );
+    }
+
+    res.query_qp();
     println!("\ntest result is: {}", rc);
     rc
 }

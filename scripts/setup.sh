@@ -10,17 +10,37 @@ set -o errexit
 set -o nounset
 set -o xtrace
 
-# Load required IB and RDMA kernel modules
-sudo modprobe ib_core
-sudo modprobe rdma_ucm
+HAS_RXE_MOD=`modprobe -c | grep rxe | cat`
 
-# Build and install soft-roce kernel module
-# The rxe code is from Kernel 5.5.0
-cd ./src/rxe
-make
-sudo insmod ./rdma_rxe.ko
-# Build and install softiwarp kernel module
-# The siw code is from Kernel 5.4.0
-cd ../siw
-make
-sudo insmod ./siw.ko
+if [ -z $HAS_RXE_MOD ]; then
+    # Load required IB and RDMA kernel modules
+    sudo modprobe ib_core
+    sudo modprobe rdma_ucm
+
+    export KERNEL_VERSION=5.8.18
+    export KERNEL_MAJOR_VERSION=`echo $KERNEL_VERSION | cut -d '.' -f 1`
+    wget --timestamping https://cdn.kernel.org/pub/linux/kernel/v$KERNEL_MAJOR_VERSION.x/linux-$KERNEL_VERSION.tar.xz
+    rm -rf linux-*/ rxe/ siw/ || echo "no kernel code directory"
+    tar xf linux-$KERNEL_VERSION.tar.xz
+
+    cp -r linux-$KERNEL_VERSION/drivers/infiniband/sw/rxe/ .
+    cp src/rxe/Makefile rxe/
+    cp -r linux-$KERNEL_VERSION/drivers/infiniband/sw/siw/ .
+    cp src/siw/Makefile siw/
+
+    # Build and install soft-roce kernel module
+    cd ./rxe
+    cp ../src/rxe/Kbuild .
+    mv Makefile Makefile.orig
+    cp ../src/rxe/Makefile .
+    make
+    sudo insmod ./rdma_rxe.ko
+
+    # Build and install softiwarp kernel module
+    cd ../siw
+    cp ../src/siw/Kbuild .
+    mv Makefile Makefile.orig
+    cp ../src/siw/Makefile .
+    make
+    sudo insmod ./siw.ko
+fi

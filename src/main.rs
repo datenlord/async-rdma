@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
 
     // run server or client
     let dev_name = ""; //"rxe_eth0";
-    let gid_idx = 0;
+    let gid_idx = 1; // 0: IPv6, 1: IPv4
     let ib_port = 1;
 
     if server_addr.is_empty() {

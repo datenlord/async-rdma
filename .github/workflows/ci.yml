@@ -2,6 +2,7 @@ name: ASYNC-RDMA-CI
 on:
   pull_request:
     branches: [master]
+  schedule: [cron: "0 */24 * * *"]
 
 env:
   CI_RUST_TOOLCHAIN: 1.50.0

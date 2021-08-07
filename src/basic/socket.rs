@@ -82,10 +82,14 @@ impl Udp {
     pub fn send_to<T: Serialize>(&self, data: &T, addr: impl ToSocketAddrs) {
         let encoded: Vec<u8> = bincode::serialize(data)
             .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
-        self.sock
+        let send_size = self.sock
             .send_to(&encoded, addr)
             .unwrap_or_else(|err| panic!("couldn't send data, the error is: {}", err));
         // println!("sent {} bytes", encoded.len());
+
+        if send_size != encoded.len() {
+            panic!("send data size not match, expect: {}, send: {}", encoded.len(), send_size);
+        }
     }
 
     /// Receive data
@@ -107,64 +111,14 @@ impl Udp {
         (decode, src_addr)
     }
 
-    ///
+    /// Exchange data, send and receive the same type data with a peer
     pub fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
-        let xfer_size = std::mem::size_of::<T>() + 8;
-        let encoded: Vec<u8> = bincode::serialize(data)
-            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
-        let send_size = self
-            .sock
-            .send_to(&encoded, self.peer_addr)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "failed to send data to {}, the error is: {}",
-                    self.peer_addr, err
-                )
-            });
-        debug_assert_eq!(send_size, encoded.len(), "socket send data size not match");
+        let xfer_size = std::mem::size_of::<T>() + 8; // where does the magic number 8 come from?
+        self.send_to(data, self.peer_addr);
         // println!("send to: {}", self.peer_addr);
-        let mut decode_buf = Vec::with_capacity(xfer_size);
-        unsafe {
-            decode_buf.set_len(xfer_size);
-        }
-        let (recv_size, recv_addr) = self.sock.recv_from(&mut decode_buf).unwrap_or_else(|err| {
-            panic!(
-                "failed to receive data from {}, the error is:{}",
-                self.peer_addr, err
-            )
-        });
-        // println!("recv from: {}", recv_addr);
-        debug_assert_eq!(recv_addr, self.peer_addr, "receive address not match");
-        unsafe {
-            decode_buf.set_len(recv_size.cast());
-        }
-        debug_assert!(recv_size > 0, "failed to receive data from socket");
-
-        bincode::deserialize(&decode_buf)
-            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
+        let (decoded, _) = self.recv_from::<U>(xfer_size);
+        decoded
     }
-
-    /*
-        ///
-        fn recv(&self, mut buffer: &mut [u8]) -> usize {
-            println!("listening...");
-            let (number_of_bytes, src_addr) = self
-                .sock
-                .recv_from(&mut buffer)
-                .unwrap_or_else(|err| panic!("no data received, the error is: {}", err));
-            println!("{:?}", number_of_bytes);
-            println!("{:?}", src_addr);
-            number_of_bytes
-        }
-
-        ///
-        fn send(&self, msg: &[u8], receiver: &str) -> usize {
-            println!("sending data");
-            self.sock
-                .send_to(msg, receiver)
-                .unwrap_or_else(|err| panic!("failed to send message, the error is: {}", err))
-        }
-    */
 }
 
 /// TCP socket wrapper struct
@@ -427,161 +381,6 @@ impl TcpSock {
             .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
     }
 }
-
-/*
-/// Tcp socket wrapper
-pub struct TcpSocket {
-    /// Socket handler
-    sock: std::os::unix::io::RawFd,
-}
-
-impl Drop for TcpSocket {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.sock) };
-    }
-}
-
-impl TcpSocket {
-    ///
-    fn resolve_addr(
-        server_name: &str,
-        port: u16,
-        resolved_addr: *mut *mut libc::addrinfo,
-    ) -> c_int {
-        let server_addr_cstr = CString::new(server_name).unwrap_or_else(|err| {
-            panic!(
-                "failed to build server address CString, the error is: {}",
-                err,
-            )
-        });
-        let server_port_cstr = CString::new(port.to_string())
-            .unwrap_or_else(|err| panic!("failed to build port CString, the error is: {}", err,));
-        let mut hints = unsafe { std::mem::zeroed::<libc::addrinfo>() };
-        hints.ai_flags = libc::AI_PASSIVE;
-        hints.ai_family = libc::AF_INET;
-        hints.ai_socktype = libc::SOCK_STREAM;
-
-        // Resolve DNS address
-        let rc = unsafe {
-            libc::getaddrinfo(
-                if server_name.is_empty() {
-                    std::ptr::null::<c_char>()
-                } else {
-                    server_addr_cstr.as_ptr()
-                },
-                server_port_cstr.as_ptr(),
-                &hints,
-                resolved_addr,
-            )
-        };
-        debug_assert_eq!(rc, 0, "getaddrinfo failed, the error is: {:?}", unsafe {
-            CStr::from_ptr(libc::gai_strerror(rc))
-        });
-        rc
-    }
-
-    ///
-    pub fn connect(server_name: &str, port: u16) -> Self {
-        let mut rc: c_int;
-        let mut resolved_addr = std::ptr::null_mut::<libc::addrinfo>();
-        rc = Self::resolve_addr(server_name, port, &mut resolved_addr);
-        debug_assert_eq!(rc, 0, "resolve_addr failed");
-
-        // Search through results and find the one we want
-        let mut iterator = resolved_addr;
-        let mut sockfd = -1;
-        while !util::is_null_mut_ptr(iterator) {
-            let addr = unsafe { &*iterator };
-            sockfd = unsafe { libc::socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol) };
-            if sockfd >= 0 {
-                // Client mode. Initiate connection to remote
-                rc = unsafe { libc::connect(sockfd, addr.ai_addr, addr.ai_addrlen) };
-                debug_assert_eq!(rc, 0, "socket connect failed");
-            }
-
-            iterator = addr.ai_next;
-        }
-        if !util::is_null_mut_ptr(resolved_addr) {
-            unsafe { libc::freeaddrinfo(resolved_addr) };
-        }
-        Self { sock: sockfd }
-    }
-
-    ///
-    pub fn bind(port: u16) -> Self {
-        let mut rc: c_int;
-        let mut resolved_addr = std::ptr::null_mut::<libc::addrinfo>();
-        let empty_server_name = "";
-        rc = Self::resolve_addr(empty_server_name, port, &mut resolved_addr);
-        debug_assert_eq!(rc, 0, "resolve_addr failed");
-
-        // Search through results and find the one we want
-        let mut iterator = resolved_addr;
-        let mut listenfd = -1;
-        while !util::is_null_mut_ptr(iterator) {
-            let addr = unsafe { &*iterator };
-            listenfd = unsafe { libc::socket(addr.ai_family, addr.ai_socktype, addr.ai_protocol) };
-            if listenfd >= 0 {
-                // Server mode. Set up listening socket an accept a connection
-                rc = unsafe { libc::bind(listenfd, addr.ai_addr, addr.ai_addrlen) };
-                debug_assert_eq!(rc, 0, "socket bind failed");
-            }
-
-            iterator = addr.ai_next;
-        }
-        if !util::is_null_mut_ptr(resolved_addr) {
-            unsafe { libc::freeaddrinfo(resolved_addr) };
-        }
-        Self { sock: listenfd }
-    }
-
-    ///
-    pub fn accept(&self) -> Self {
-        let backlog = 1;
-        let rc = unsafe { libc::listen(self.sock, backlog) };
-        if rc != 0 {
-            panic!("socket listen failed");
-        }
-        let client_addr = std::ptr::null_mut::<libc::sockaddr>();
-        let mut addr_len = 0;
-        let rmt_sockfd = unsafe { libc::accept(self.sock, client_addr, &mut addr_len) };
-        if rmt_sockfd < 0 {
-            panic!("socket accept failed");
-        }
-        Self { sock: rmt_sockfd }
-    }
-
-    /// TODO: use system approach for state sync
-    fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
-        let xfer_size = std::mem::size_of::<T>();
-        let mut encoded: Vec<u8> = bincode::serialize(data)
-            .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
-        let mut decode_buf = Vec::with_capacity(xfer_size);
-        let rc = unsafe {
-            libc::write(
-                self.sock,
-                util::mut_ptr_cast(encoded.as_mut_ptr()),
-                encoded.len(),
-            )
-        };
-        debug_assert_eq!(rc, encoded.len().cast(), "failed to send data via socket",);
-        let recv_size = unsafe {
-            libc::read(
-                self.sock,
-                util::mut_ptr_cast(decode_buf.as_mut_ptr()),
-                decode_buf.capacity(),
-            )
-        };
-        unsafe {
-            decode_buf.set_len(recv_size.cast());
-        }
-        debug_assert!(recv_size > 0, "failed to receive data from socket");
-
-        bincode::deserialize(&decode_buf)
-            .unwrap_or_else(|err| panic!("failed to decode, the error is: {}", err))
-    }
-}
-*/
 
 /// Unit test
 mod test {

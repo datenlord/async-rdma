@@ -1,5 +1,7 @@
 //! Utility function to manipulate pointers and handle error numbers
 
+use utilities::OverflowArithmetic;
+
 /// Scoped closure
 pub struct ScopedCB<F: FnOnce() + Copy> {
     ///
@@ -133,4 +135,22 @@ pub fn check_errno(ret: std::os::raw::c_int) -> Result<(), nix::Error> {
     } else {
         Err(get_last_error())
     }
+}
+
+///
+pub(crate) fn copy_to_buf_pad(dst: &mut [u8], src: &str) {
+    let src_str = if dst.len() <= src.len() {
+        format!(
+            "{}\0",
+            src.get(0..(dst.len().overflow_sub(1)))
+                .unwrap_or_else(|| panic!("failed to slice src: {}", src))
+        )
+    } else {
+        let padding = std::iter::repeat("\0")
+            .take(dst.len().overflow_sub(src.len()))
+            .collect::<String>();
+        format!("{}{}", src, padding)
+    };
+    debug_assert_eq!(dst.len(), src_str.len(), "src str size not match dst");
+    dst.copy_from_slice(src_str.as_bytes());
 }

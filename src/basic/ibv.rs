@@ -99,18 +99,44 @@ enum State {
     AtomicDone,
 }
 
+macro_rules! impl_send_sync {
+    ($t: ident) => {
+        unsafe impl Send for $t {}
+        unsafe impl Sync for $t {}
+    };
+}
+
+#[derive(Clone, Copy)]
+pub struct IbvCtx {
+    inner: *mut ibv_context,
+}
+
+#[derive(Clone, Copy)]
+pub struct IbvEventChannel {
+    inner: *mut ibv_comp_channel,
+}
+
+#[derive(Clone, Copy)]
+pub struct IbvCq {
+    inner: *mut ibv_cq,
+}
+
+impl_send_sync!(IbvCtx);
+impl_send_sync!(IbvEventChannel);
+impl_send_sync!(IbvCq);
+
 /// RDMA resources
 pub struct Resources {
     ///
     remote_props: CmConData,
     /// Device handle
-    ib_ctx: *mut ibv_context,
+    ib_ctx: IbvCtx,
     /// Event channel
-    event_channel: *mut ibv_comp_channel,
+    event_channel: IbvEventChannel,
     /// PD handle
     pd: *mut ibv_pd,
     /// CQ handle
-    cq: *mut ibv_cq,
+    cq: IbvCq,
     /// QP handle
     qp: *mut ibv_qp,
     /// MR handle for buf
@@ -129,13 +155,13 @@ impl Drop for Resources {
         rc = unsafe { ibv_dereg_mr(self.mr) };
         debug_assert_eq!(rc, 0, "failed to deregister MR");
 
-        rc = unsafe { ibv_destroy_cq(self.cq) };
+        rc = unsafe { ibv_destroy_cq(self.cq.inner) };
         debug_assert_eq!(rc, 0, "failed to destroy CQ");
         rc = unsafe { ibv_dealloc_pd(self.pd) };
         debug_assert_eq!(rc, 0, "failed to deallocate PD");
-        rc = unsafe { ibv_destroy_comp_channel(self.event_channel) };
+        rc = unsafe { ibv_destroy_comp_channel(self.event_channel.inner) };
         debug_assert_eq!(rc, 0, "failed to destroy event completion channel");
-        rc = unsafe { ibv_close_device(self.ib_ctx) };
+        rc = unsafe { ibv_close_device(self.ib_ctx.inner) };
         debug_assert_eq!(rc, 0, "failed to close device context");
     }
 }
@@ -153,22 +179,23 @@ impl Resources {
 
     ///
     pub fn async_poll_completion(&self) -> JoinHandle<c_int> {
-        let cq_addr = util::ptr_to_usize(self.cq);
-        let channel_addr = util::ptr_to_usize(self.event_channel);
+        //let cq_addr = util::ptr_to_usize(self.cq);
+        //let channel_addr = util::ptr_to_usize(self.event_channel);
+        let cq_addr = self.cq;
+        let channel_addr = self.event_channel;
 
         thread::spawn(move || Self::poll_completion_non_blocking(cq_addr, channel_addr))
     }
 
     ///
     pub fn poll_async_event_non_blocking(&self) -> JoinHandle<c_int> {
-        let ctx_addr = util::ptr_to_usize(self.ib_ctx);
+        let ib_ctx = self.ib_ctx;
 
         thread::spawn(move || {
-            let ctx = unsafe { util::usize_to_mut_ptr::<ibv_context>(ctx_addr) };
             let mut event = unsafe { std::mem::zeroed::<ibv_async_event>() };
             let mut rc: c_int;
             loop {
-                rc = unsafe { ibv_get_async_event(ctx, &mut event) };
+                rc = unsafe { ibv_get_async_event(ib_ctx.inner, &mut event) };
                 if rc != 0 {
                     panic!("Failed to get async event");
                 }
@@ -181,16 +208,16 @@ impl Resources {
     ///
     fn req_cq_notify(&self) {
         let solicited_only = 0;
-        let rc = unsafe { ibv_req_notify_cq(self.cq, solicited_only) };
+        let rc = unsafe { ibv_req_notify_cq(self.cq.inner, solicited_only) };
         if rc != 0 {
             panic!("Failed to request CQ notification");
         }
     }
 
     ///
-    fn poll_completion_non_blocking(cq_addr: usize, channel_addr: usize) -> c_int {
-        let mut cq = unsafe { util::usize_to_mut_ptr::<ibv_cq>(cq_addr) };
-        let event_channel = unsafe { util::usize_to_mut_ptr::<ibv_comp_channel>(channel_addr) };
+    fn poll_completion_non_blocking(cq_addr: IbvCq, channel_addr: IbvEventChannel) -> c_int {
+        let mut cq = cq_addr.inner;
+        let event_channel = channel_addr.inner;
 
         let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
         let mut rc =
@@ -319,8 +346,7 @@ impl Resources {
 
     ///
     pub fn poll_completion(&self) -> c_int {
-        let cq_addr = util::ptr_to_usize(self.cq);
-        let cq = unsafe { util::usize_to_mut_ptr::<ibv_cq>(cq_addr) };
+        let cq = self.cq.inner;
         // let qp_addr = util::ptr_to_usize(self.qp);
         // let qp = unsafe { util::usize_to_mut_ptr::<ibv_qp>(qp_addr) };
         let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
@@ -524,10 +550,12 @@ impl Resources {
 
         Self {
             remote_props: remote_con_data,
-            ib_ctx,
-            event_channel,
+            ib_ctx: IbvCtx { inner: ib_ctx },
+            event_channel: IbvEventChannel {
+                inner: event_channel,
+            },
             pd,
-            cq,
+            cq: IbvCq { inner: cq },
             qp,
             mr,
             buf,
@@ -587,11 +615,10 @@ impl Resources {
     fn query_qp(&self) {
         query_qp(self.qp);
     }
-
 }
 
 /// Get ib context based on the dev name, if the name is empty get the first one
-fn open_ib_ctx(dev_name: &str) -> *mut ibv_context {
+pub fn open_ib_ctx(dev_name: &str) -> *mut ibv_context {
     let mut num_devs: c_int = 0;
     let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
     // if there isn't any IB device in host
@@ -657,7 +684,7 @@ fn open_ib_ctx(dev_name: &str) -> *mut ibv_context {
 }
 
 /// Query port attribute based on the port number
-fn query_port(ib_ctx: *mut ibv_context, ib_port: u8) -> ibv_port_attr {
+pub fn query_port(ib_ctx: *mut ibv_context, ib_port: u8) -> ibv_port_attr {
     let mut port_attr = unsafe { std::mem::zeroed::<ibv_port_attr>() };
     let rc = unsafe { ___ibv_query_port(ib_ctx, ib_port, &mut port_attr) };
     debug_assert_eq!(rc, 0, "ibv_query_port on port {} failed", ib_port);
@@ -665,7 +692,7 @@ fn query_port(ib_ctx: *mut ibv_context, ib_port: u8) -> ibv_port_attr {
 }
 
 /// Query gid based on the gid index
-fn query_gid(ib_ctx: *mut ibv_context, ib_port: u8, gid_idx: c_int) -> ibv_gid {
+pub fn query_gid(ib_ctx: *mut ibv_context, ib_port: u8, gid_idx: c_int) -> ibv_gid {
     let mut my_gid = unsafe { std::mem::zeroed::<ibv_gid>() };
     if gid_idx >= 0 {
         let rc = unsafe { ibv_query_gid(ib_ctx, ib_port, gid_idx, &mut my_gid) };
@@ -679,7 +706,7 @@ fn query_gid(ib_ctx: *mut ibv_context, ib_port: u8, gid_idx: c_int) -> ibv_gid {
 }
 
 /// Create a new protect domain on a device
-fn create_pd(ib_ctx: *mut ibv_context) -> *mut ibv_pd {
+pub fn create_pd(ib_ctx: *mut ibv_context) -> *mut ibv_pd {
     let pd = unsafe { ibv_alloc_pd(ib_ctx) };
     if util::is_null_mut_ptr(pd) {
         panic!("ibv_alloc_pd failed");
@@ -688,7 +715,7 @@ fn create_pd(ib_ctx: *mut ibv_context) -> *mut ibv_pd {
 }
 
 /// Create a complete queue on a device
-fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut ibv_comp_channel) {
+pub fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut ibv_comp_channel) {
     let cq_context = std::ptr::null_mut::<c_void>();
     let event_channel = unsafe { ibv_create_comp_channel(ib_ctx) };
     if util::is_null_mut_ptr(event_channel) {
@@ -711,7 +738,7 @@ fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut ibv_c
     (cq, event_channel)
 }
 
-fn create_mr(
+pub fn create_mr(
     size: usize,
     pd: *mut ibv_pd,
     mr_flag: ibv_access_flags,
@@ -743,7 +770,7 @@ fn create_mr(
     (mr, buf)
 }
 
-fn create_qp(cq: *mut ibv_cq, pd: *mut ibv_pd) -> *mut ibv_qp {
+pub fn create_qp(cq: *mut ibv_cq, pd: *mut ibv_pd) -> *mut ibv_qp {
     let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
     qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 0; // set to 0 to avoid CQE for every SR
@@ -783,7 +810,7 @@ fn exchange_info(
     remote_con_data
 }
 
-fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: &ibv_access_flags) -> c_int {
+pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: &ibv_access_flags) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
 
     attr.pkey_index = 0;
@@ -803,7 +830,7 @@ fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: &ibv_access_flags) -> c
     rc
 }
 
-fn modify_qp_to_rtr(
+pub fn modify_qp_to_rtr(
     gid_idx: c_int,
     ib_port: u8,
     qp: *mut ibv_qp,
@@ -847,7 +874,7 @@ fn modify_qp_to_rtr(
 }
 
 ///
-fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
+pub fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
     attr.timeout = 0x12; // TODO: use input arg
@@ -869,7 +896,7 @@ fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
 }
 
 ///
-fn query_qp(qp: *mut ibv_qp) -> (ibv_qp_init_attr, ibv_qp_attr) {
+pub fn query_qp(qp: *mut ibv_qp) -> (ibv_qp_init_attr, ibv_qp_attr) {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
 

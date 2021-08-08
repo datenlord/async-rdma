@@ -1,4 +1,14 @@
-use rdma_sys::*;
+use rdma_sys::{
+    ibv_access_flags, ibv_ack_cq_events, ibv_alloc_pd, ibv_comp_channel, ibv_cq,
+    ibv_create_comp_channel, ibv_create_cq, ibv_get_cq_event, ibv_mr, ibv_pd, ibv_poll_cq,
+    ibv_post_recv, ibv_post_send, ibv_qp_cap, ibv_qp_init_attr, ibv_qp_type, ibv_recv_wr,
+    ibv_reg_mr, ibv_req_notify_cq, ibv_send_flags, ibv_send_wr, ibv_sge, ibv_srq, ibv_wc,
+    ibv_wc_opcode, ibv_wc_status, ibv_wr_opcode, rdma_accept, rdma_ack_cm_event, rdma_bind_addr,
+    rdma_cm_event, rdma_cm_event_type, rdma_cm_id, rdma_conn_param, rdma_connect,
+    rdma_create_event_channel, rdma_create_id, rdma_create_qp, rdma_get_cm_event,
+    rdma_get_src_port, rdma_listen, rdma_port_space, rdma_resolve_addr, rdma_resolve_route, rdma_t,
+    wr_t,
+};
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
 use utilities::Cast;
@@ -19,7 +29,11 @@ struct PData {
 }
 
 ///
-#[allow(clippy::too_many_lines, clippy::indexing_slicing)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::indexing_slicing,
+    clippy::cognitive_complexity
+)]
 pub fn client(server_addr: &str, server_port: u16) {
     // Set up RDMA CM structures
 
@@ -175,7 +189,7 @@ pub fn client(server_addr: &str, server_port: u16) {
     let mut buf_rkey = 0_u32;
     let server_pdata: *const PData =
         util::const_ptr_cast_mut(unsafe { event_ref.param.conn.private_data });
-    if server_pdata != std::ptr::null() {
+    if !server_pdata.is_null() {
         debug_assert_eq!(
             unsafe { event_ref.param.conn.private_data_len },
             std::mem::size_of::<PData>().cast(),
@@ -230,7 +244,7 @@ pub fn client(server_addr: &str, server_port: u16) {
     send_wr.wr_id = 1;
     send_wr.sg_list = &mut sgl;
     send_wr.num_sge = nsge;
-    if server_pdata == std::ptr::null() {
+    if server_pdata.is_null() {
         send_wr.opcode = ibv_wr_opcode::IBV_WR_SEND;
         send_wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
     } else {
@@ -287,7 +301,11 @@ pub fn client(server_addr: &str, server_port: u16) {
 }
 
 ///
-#[allow(clippy::too_many_lines, clippy::indexing_slicing)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::indexing_slicing,
+    clippy::cognitive_complexity
+)]
 pub fn server(server_port: u16) {
     // Set up RDMA CM structures
 

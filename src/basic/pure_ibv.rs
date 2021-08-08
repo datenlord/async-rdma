@@ -1,7 +1,15 @@
 // The network byte order is defined to always be big-endian.
 // X86 is little-endian.
 
-use rdma_sys::*;
+use rdma_sys::{
+    ___ibv_query_port, ibv_access_flags, ibv_alloc_pd, ibv_close_device, ibv_comp_channel,
+    ibv_context, ibv_cq, ibv_create_cq, ibv_create_qp, ibv_dealloc_pd, ibv_dereg_mr,
+    ibv_destroy_cq, ibv_destroy_qp, ibv_free_device_list, ibv_get_device_list, ibv_get_device_name,
+    ibv_gid, ibv_modify_qp, ibv_mr, ibv_mtu, ibv_open_device, ibv_pd, ibv_poll_cq, ibv_port_attr,
+    ibv_post_recv, ibv_post_send, ibv_qp, ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr,
+    ibv_qp_state, ibv_qp_type, ibv_query_gid, ibv_recv_wr, ibv_reg_mr, ibv_send_flags, ibv_send_wr,
+    ibv_sge, ibv_wc, ibv_wc_status, ibv_wr_opcode,
+};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::ffi::{CStr, CString};

@@ -2,7 +2,18 @@
 // X86 is little-endian.
 
 use nix::sys::epoll;
-use rdma_sys::*;
+use rdma_sys::{
+    ___ibv_query_port, ibv_access_flags, ibv_ack_async_event, ibv_ack_cq_events, ibv_alloc_pd,
+    ibv_async_event, ibv_close_device, ibv_comp_channel, ibv_context, ibv_cq,
+    ibv_create_comp_channel, ibv_create_cq, ibv_create_qp, ibv_dealloc_pd, ibv_dereg_mr,
+    ibv_destroy_comp_channel, ibv_destroy_cq, ibv_destroy_qp, ibv_free_device_list,
+    ibv_get_async_event, ibv_get_cq_event, ibv_get_device_list, ibv_get_device_name, ibv_gid,
+    ibv_modify_qp, ibv_mr, ibv_mtu, ibv_open_device, ibv_pd, ibv_poll_cq, ibv_port_attr,
+    ibv_post_recv, ibv_post_send, ibv_qp, ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr,
+    ibv_qp_state, ibv_qp_type, ibv_query_gid, ibv_query_qp, ibv_recv_wr, ibv_reg_mr,
+    ibv_req_notify_cq, ibv_send_flags, ibv_send_wr, ibv_sge, ibv_wc, ibv_wc_status,
+    ibv_wc_status_str, ibv_wr_opcode,
+};
 // use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -106,18 +117,24 @@ macro_rules! impl_send_sync {
     };
 }
 
+/// ibv context wrapper structure
 #[derive(Clone, Copy)]
 pub struct IbvCtx {
+    /// inner ibv_context pointer
     inner: *mut ibv_context,
 }
 
+/// ibv event channel wrapper structure
 #[derive(Clone, Copy)]
 pub struct IbvEventChannel {
+    /// inner ibv event channel pointer
     inner: *mut ibv_comp_channel,
 }
 
+/// ibv complete queue wrapper structure
 #[derive(Clone, Copy)]
 pub struct IbvCq {
+    /// inner ibv_cq pointer
     inner: *mut ibv_cq,
 }
 
@@ -169,18 +186,16 @@ impl Drop for Resources {
 impl Resources {
     ///
     pub fn buf_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.buf.as_ptr(), self.buf.len()) }
+        (*self.buf).as_ref()
     }
 
     ///
     pub fn buf_slice_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.buf.as_mut_ptr(), self.buf.len()) }
+        (*self.buf).as_mut()
     }
 
     ///
     pub fn async_poll_completion(&self) -> JoinHandle<c_int> {
-        //let cq_addr = util::ptr_to_usize(self.cq);
-        //let channel_addr = util::ptr_to_usize(self.event_channel);
         let cq_addr = self.cq;
         let channel_addr = self.event_channel;
 
@@ -261,37 +276,12 @@ impl Resources {
             }
         }
         unsafe { libc::close(epoll_fd) };
-        /*
-            let mut pfd = unsafe { std::mem::zeroed::<libc::pollfd>() };
-            pfd.fd = unsafe { (*event_channel).fd };
-            pfd.events = libc::POLLIN; // Only monitor POLLIN event, which means new CQE arrived
-            pfd.revents = 0;
-
-            println!("start poll...");
-            let nfds = 1;
-            let timeout_ms = 10;
-            let mut rc;
-            loop {
-                rc = unsafe { libc::poll(&mut pfd, nfds, timeout_ms) };
-                if rc != 0 {
-                    println!("end poll");
-                    break;
-                }
-            }
-            if rc < 0 {
-                panic!("poll failed");
-            }
-        */
         let mut cq_context = std::ptr::null_mut::<c_void>();
         rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
         if rc != 0 {
             panic!("Failed to get cq_event");
         }
         unsafe { ibv_ack_cq_events(cq, 1) };
-        // rc = unsafe { ibv_req_notify_cq(cq, solicited_only) };
-        // if rc != 0 {
-        //     panic!("Couldn't request CQ notification");
-        // }
 
         let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
         let mut cur_time_msec: i64;
@@ -453,7 +443,12 @@ impl Resources {
                 sr.wr.rdma.rkey = self.remote_props.rkey;
             }
             ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => {
-                let aligned_remote_addr = ((self.remote_props.addr + 7) >> 3) << 3;
+                let aligned_remote_addr = self
+                    .remote_props
+                    .addr
+                    .overflow_add(7)
+                    .overflow_shr(3)
+                    .overflow_shl(3);
                 println!(
                     "remote addr={:x}, aligned remote addr={:x}",
                     self.remote_props.addr, aligned_remote_addr
@@ -583,10 +578,10 @@ impl Resources {
         rc = modify_qp_to_init(
             ib_port,
             self.qp,
-            &(ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
+            ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
                 | ibv_access_flags::IBV_ACCESS_REMOTE_READ
                 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
-                | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC),
+                | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC,
         );
         if rc != 0 {
             panic!("change QP state to INIT failed");
@@ -738,6 +733,8 @@ pub fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut i
     (cq, event_channel)
 }
 
+/// create memory region for `pd` protect domain,
+/// the length of the region is `size` and the access flag is `mr_flag`.
 pub fn create_mr(
     size: usize,
     pd: *mut ibv_pd,
@@ -770,6 +767,7 @@ pub fn create_mr(
     (mr, buf)
 }
 
+/// create queue pair under `pd` protect domain, bind `cq` complete queue to the queue pair
 pub fn create_qp(cq: *mut ibv_cq, pd: *mut ibv_pd) -> *mut ibv_qp {
     let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
     qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
@@ -788,6 +786,7 @@ pub fn create_qp(cq: *mut ibv_cq, pd: *mut ibv_pd) -> *mut ibv_qp {
     qp
 }
 
+/// Exechange information between two peers
 fn exchange_info(
     buf: &Pin<Vec<u8>>,
     mr: *mut ibv_mr,
@@ -810,7 +809,8 @@ fn exchange_info(
     remote_con_data
 }
 
-pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: &ibv_access_flags) -> c_int {
+/// Modify the queue pair to init state
+pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: ibv_access_flags) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
 
     attr.pkey_index = 0;
@@ -830,13 +830,14 @@ pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: &ibv_access_flags) 
     rc
 }
 
+/// Modify the queue pair to rtr state
 pub fn modify_qp_to_rtr(
     gid_idx: c_int,
     ib_port: u8,
     qp: *mut ibv_qp,
     remote_qp_num: u32,
     remote_lid: u16,
-    remote_gid: u128,
+    remote_global_id: u128,
 ) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
@@ -853,7 +854,7 @@ pub fn modify_qp_to_rtr(
     if gid_idx >= 0 {
         attr.ah_attr.is_global = 1;
         attr.ah_attr.port_num = 1;
-        attr.ah_attr.grh.dgid.raw = remote_gid.to_be_bytes();
+        attr.ah_attr.grh.dgid.raw = remote_global_id.to_be_bytes();
         attr.ah_attr.grh.flow_label = 0;
         attr.ah_attr.grh.hop_limit = 1;
         attr.ah_attr.grh.sgid_index = gid_idx.cast();
@@ -873,7 +874,7 @@ pub fn modify_qp_to_rtr(
     rc
 }
 
-///
+/// modify queue pair to rts
 pub fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
@@ -1064,10 +1065,11 @@ pub fn run_client(
         "client atomic data before server atomic operation: {:?}",
         pre_atomic_msg
     );
+
     println!(
         "client atomic mr begin addr={:x}, end addr={:x}",
         util::ptr_to_usize(res.buf_slice().as_ptr()),
-        util::ptr_to_usize(res.buf_slice().as_ptr()) + res.buf_slice().len()
+        util::ptr_to_usize(res.buf_slice().as_ptr()).overflow_add(res.buf_slice().len())
     );
     // Pre atomic operation
     let resp_atomic_ready: State = res.sock.exchange_data(&State::AtomicReady);

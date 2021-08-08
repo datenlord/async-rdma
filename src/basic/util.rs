@@ -117,8 +117,10 @@ pub const unsafe fn usize_to_mut_ptr<T: Sized>(addr: usize) -> *mut T {
 // }
 
 ///
+#[allow(clippy::missing_const_for_fn)]
 pub fn is_null_mut_ptr<T: Sized>(ptr: *mut T) -> bool {
-    ptr == std::ptr::null_mut::<T>()
+    // is not stable as const function
+    ptr.is_null()
 }
 
 /// Get last error if any
@@ -138,7 +140,7 @@ pub fn check_errno(ret: std::os::raw::c_int) -> Result<(), nix::Error> {
 }
 
 ///
-pub(crate) fn copy_to_buf_pad(dst: &mut [u8], src: &str) {
+pub fn copy_to_buf_pad(dst: &mut [u8], src: &str) {
     let src_str = if dst.len() <= src.len() {
         format!(
             "{}\0",

@@ -1,5 +1,16 @@
 use super::util::{self, ScopedCB};
-use rdma_sys::*;
+use rdma_sys::{
+    ibv_access_flags, ibv_ack_cq_events, ibv_alloc_pd, ibv_comp_channel, ibv_cq,
+    ibv_create_comp_channel, ibv_create_cq, ibv_dealloc_pd, ibv_dereg_mr, ibv_destroy_comp_channel,
+    ibv_destroy_cq, ibv_device, ibv_get_cq_event, ibv_get_device_list, ibv_get_device_name, ibv_mr,
+    ibv_pd, ibv_poll_cq, ibv_post_recv, ibv_post_send, ibv_qp_cap, ibv_qp_init_attr, ibv_qp_type,
+    ibv_recv_wr, ibv_reg_mr, ibv_req_notify_cq, ibv_send_flags, ibv_send_wr, ibv_sge, ibv_srq,
+    ibv_wc, ibv_wc_opcode, ibv_wc_status, ibv_wr_opcode, rdma_accept, rdma_ack_cm_event,
+    rdma_bind_addr, rdma_cm_event, rdma_cm_event_type, rdma_cm_id, rdma_conn_param, rdma_connect,
+    rdma_create_event_channel, rdma_create_id, rdma_create_qp, rdma_destroy_event_channel,
+    rdma_destroy_id, rdma_destroy_qp, rdma_disconnect, rdma_event_channel, rdma_get_cm_event,
+    rdma_get_src_port, rdma_listen, rdma_port_space, rdma_resolve_addr, rdma_resolve_route,
+};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};

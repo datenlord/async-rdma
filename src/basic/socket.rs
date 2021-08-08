@@ -7,7 +7,7 @@ use std::io::prelude::*;
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::raw::{c_char, c_int};
 use std::os::unix::io::RawFd;
-use utilities::Cast; //, OverflowArithmetic};
+use utilities::{Cast, OverflowArithmetic}; //, OverflowArithmetic};
 
 use super::util;
 
@@ -82,13 +82,18 @@ impl Udp {
     pub fn send_to<T: Serialize>(&self, data: &T, addr: impl ToSocketAddrs) {
         let encoded: Vec<u8> = bincode::serialize(data)
             .unwrap_or_else(|err| panic!("failed to encode, the error is: {}", err));
-        let send_size = self.sock
+        let send_size = self
+            .sock
             .send_to(&encoded, addr)
             .unwrap_or_else(|err| panic!("couldn't send data, the error is: {}", err));
         // println!("sent {} bytes", encoded.len());
 
         if send_size != encoded.len() {
-            panic!("send data size not match, expect: {}, send: {}", encoded.len(), send_size);
+            panic!(
+                "send data size not match, expect: {}, send: {}",
+                encoded.len(),
+                send_size
+            );
         }
     }
 
@@ -113,7 +118,7 @@ impl Udp {
 
     /// Exchange data, send and receive the same type data with a peer
     pub fn exchange_data<T: Serialize, U: DeserializeOwned>(&self, data: &T) -> U {
-        let xfer_size = std::mem::size_of::<T>() + 8; // where does the magic number 8 come from?
+        let xfer_size = std::mem::size_of::<T>().overflow_add(8); // where does the magic number 8 come from?
         self.send_to(data, self.peer_addr);
         // println!("send to: {}", self.peer_addr);
         let (decoded, _) = self.recv_from::<U>(xfer_size);

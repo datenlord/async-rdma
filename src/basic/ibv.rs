@@ -121,26 +121,49 @@ macro_rules! impl_send_sync {
 #[derive(Clone, Copy)]
 pub struct IbvCtx {
     /// inner ibv_context pointer
-    inner: *mut ibv_context,
+    pub inner: *mut ibv_context,
 }
 
 /// ibv event channel wrapper structure
 #[derive(Clone, Copy)]
 pub struct IbvEventChannel {
     /// inner ibv event channel pointer
-    inner: *mut ibv_comp_channel,
+    pub inner: *mut ibv_comp_channel,
 }
 
 /// ibv complete queue wrapper structure
 #[derive(Clone, Copy)]
 pub struct IbvCq {
     /// inner ibv_cq pointer
-    inner: *mut ibv_cq,
+    pub inner: *mut ibv_cq,
+}
+
+/// ibv queue pair wrapper structure
+#[derive(Clone, Copy)]
+pub struct IbvQp {
+    /// inner ibv_qp pointer
+    pub inner: *mut ibv_qp,
+}
+
+/// ibv protect domain wrapper structure
+#[derive(Clone, Copy)]
+pub struct IbvPd {
+    /// inner ibv_qp pointer
+    pub inner: *mut ibv_pd,
+}
+
+/// ibv memory region wrapper structure
+#[derive(Clone, Copy)]
+pub struct IbvMr {
+    /// inner ibv_qp pointer
+    pub inner: *mut ibv_mr,
 }
 
 impl_send_sync!(IbvCtx);
 impl_send_sync!(IbvEventChannel);
 impl_send_sync!(IbvCq);
+impl_send_sync!(IbvQp);
+impl_send_sync!(IbvPd);
 
 /// RDMA resources
 pub struct Resources {
@@ -151,13 +174,13 @@ pub struct Resources {
     /// Event channel
     event_channel: IbvEventChannel,
     /// PD handle
-    pd: *mut ibv_pd,
+    pd: IbvPd,
     /// CQ handle
     cq: IbvCq,
     /// QP handle
-    qp: *mut ibv_qp,
+    qp: IbvQp,
     /// MR handle for buf
-    mr: *mut ibv_mr,
+    mr: IbvMr,
     /// memory buffer pointer, used for RDMA and send ops
     buf: Pin<Vec<u8>>,
     /// The socket to the remote peer of QP
@@ -167,14 +190,14 @@ pub struct Resources {
 impl Drop for Resources {
     fn drop(&mut self) {
         let mut rc: c_int;
-        rc = unsafe { ibv_destroy_qp(self.qp) };
+        rc = unsafe { ibv_destroy_qp(self.qp.inner) };
         debug_assert_eq!(rc, 0, "failed to destroy QP");
-        rc = unsafe { ibv_dereg_mr(self.mr) };
+        rc = unsafe { ibv_dereg_mr(self.mr.inner) };
         debug_assert_eq!(rc, 0, "failed to deregister MR");
 
         rc = unsafe { ibv_destroy_cq(self.cq.inner) };
         debug_assert_eq!(rc, 0, "failed to destroy CQ");
-        rc = unsafe { ibv_dealloc_pd(self.pd) };
+        rc = unsafe { ibv_dealloc_pd(self.pd.inner) };
         debug_assert_eq!(rc, 0, "failed to deallocate PD");
         rc = unsafe { ibv_destroy_comp_channel(self.event_channel.inner) };
         debug_assert_eq!(rc, 0, "failed to destroy event completion channel");
@@ -196,293 +219,78 @@ impl Resources {
 
     ///
     pub fn async_poll_completion(&self) -> JoinHandle<c_int> {
-        let cq_addr = self.cq;
-        let channel_addr = self.event_channel;
-
-        thread::spawn(move || Self::poll_completion_non_blocking(cq_addr, channel_addr))
+        async_poll_completion(self.cq, self.event_channel)
     }
 
     ///
     pub fn poll_async_event_non_blocking(&self) -> JoinHandle<c_int> {
-        let ib_ctx = self.ib_ctx;
-
-        thread::spawn(move || {
-            let mut event = unsafe { std::mem::zeroed::<ibv_async_event>() };
-            let mut rc: c_int;
-            loop {
-                rc = unsafe { ibv_get_async_event(ib_ctx.inner, &mut event) };
-                if rc != 0 {
-                    panic!("Failed to get async event");
-                }
-                println!("get async event type={}", event.event_type);
-                unsafe { ibv_ack_async_event(&mut event) };
-            }
-        })
-    }
-
-    ///
-    fn req_cq_notify(&self) {
-        let solicited_only = 0;
-        let rc = unsafe { ibv_req_notify_cq(self.cq.inner, solicited_only) };
-        if rc != 0 {
-            panic!("Failed to request CQ notification");
-        }
-    }
-
-    ///
-    fn poll_completion_non_blocking(cq_addr: IbvCq, channel_addr: IbvEventChannel) -> c_int {
-        let mut cq = cq_addr.inner;
-        let event_channel = channel_addr.inner;
-
-        let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
-        let mut rc =
-            unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        if rc < 0 {
-            panic!("Failed to change file descriptor of Completion Event Channel");
-        }
-
-        let epoll_fd = epoll::epoll_create()
-            .unwrap_or_else(|err| panic!("epoll_create failed, the error is: {}", err));
-        let channel_fd = unsafe { (*event_channel).fd };
-        let mut epoll_ev = epoll::EpollEvent::new(
-            epoll::EpollFlags::EPOLLIN | epoll::EpollFlags::EPOLLET,
-            channel_fd.cast(),
-        );
-        epoll::epoll_ctl(
-            epoll_fd,
-            epoll::EpollOp::EpollCtlAdd,
-            channel_fd,
-            &mut epoll_ev,
-        )
-        .unwrap_or_else(|err| panic!("epoll_ctl failed, the error is: {}", err));
-
-        // let epoll_size = 1;
-        // let mut epoll_ev = unsafe { std::mem::zeroed::<libc::epoll_event>() };
-        // epoll_ev.u64 = channel_fd.cast();
-        // println!("EPOLLIN={:x}, EPOLLET={:x}", libc::EPOLLIN, libc::EPOLLET);
-        // epoll_ev.events = (libc::EPOLLIN | libc::EPOLLET).cast();
-        // unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, channel_fd, &mut epoll_ev) };
-
-        println!("start epoll...");
-        let timeout_ms = 10;
-        let mut event_list = [epoll_ev];
-        let mut nfds: usize;
-        loop {
-            nfds = epoll::epoll_wait(epoll_fd, &mut event_list, timeout_ms)
-                .unwrap_or_else(|err| panic!("epoll_wait failed, the error is: {}", err));
-            if nfds > 0 {
-                println!("end epoll");
-                break;
-            }
-        }
-        unsafe { libc::close(epoll_fd) };
-        let mut cq_context = std::ptr::null_mut::<c_void>();
-        rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
-        if rc != 0 {
-            panic!("Failed to get cq_event");
-        }
-        unsafe { ibv_ack_cq_events(cq, 1) };
-
-        let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
-        let mut cur_time_msec: i64;
-        let mut cur_time = unsafe { std::mem::zeroed::<libc::timeval>() };
-        let mut poll_result: c_int;
-        // poll the completion for a while before giving up of doing it ..
-        let time_zone = std::ptr::null_mut();
-        unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
-        let start_time_msec =
-            (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
-        println!("start ibv_poll_cq");
-        loop {
-            poll_result = unsafe { ibv_poll_cq(cq, 1, &mut wc) };
-            unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
-            cur_time_msec = (cur_time.tv_sec.overflow_mul(1000))
-                .overflow_add(cur_time.tv_usec.overflow_div(1000));
-            if (poll_result != 0)
-                || ((cur_time_msec.overflow_sub(start_time_msec)) >= MAX_POLL_CQ_TIMEOUT)
-            {
-                println!("end ibv_poll_cq");
-                break;
-            }
-        }
-
-        match poll_result.cmp(&0) {
-            Ordering::Less => {
-                // poll CQ failed
-                // rc = 1;
-                panic!("poll CQ failed");
-            }
-            Ordering::Equal => {
-                // the CQ is empty
-                // rc = 1;
-                panic!("completion wasn't found in the CQ after timeout");
-            }
-            Ordering::Greater => {
-                // CQE found
-                println!("completion was found in CQ with status={}", wc.status);
-                // check the completion status (here we don't care about the completion opcode
-                debug_assert_eq!(
-                    wc.status,
-                    ibv_wc_status::IBV_WC_SUCCESS,
-                    "got bad completion with status={}, vendor syndrome={}, the error is: {:?}",
-                    wc.status,
-                    wc.vendor_err,
-                    unsafe { CStr::from_ptr(ibv_wc_status_str(wc.status)) },
-                );
-            }
-        }
-        0
+        poll_async_event_non_blocking(self.ib_ctx)
     }
 
     ///
     pub fn poll_completion(&self) -> c_int {
-        let cq = self.cq.inner;
-        // let qp_addr = util::ptr_to_usize(self.qp);
-        // let qp = unsafe { util::usize_to_mut_ptr::<ibv_qp>(qp_addr) };
-        let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
-        // let start_time_msec: u64;
-        let mut cur_time_msec: i64;
-        let mut cur_time = unsafe { std::mem::zeroed::<libc::timeval>() };
-        let mut poll_result: c_int;
-        // poll the completion for a while before giving up of doing it ..
-        let time_zone = std::ptr::null_mut();
-        unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
-        let start_time_msec =
-            (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
-        loop {
-            poll_result = unsafe { ibv_poll_cq(cq, 1, &mut wc) };
-            unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
-            cur_time_msec = (cur_time.tv_sec.overflow_mul(1000))
-                .overflow_add(cur_time.tv_usec.overflow_div(1000));
-            if (poll_result != 0)
-                || ((cur_time_msec.overflow_sub(start_time_msec)) >= MAX_POLL_CQ_TIMEOUT)
-            {
-                break;
-            }
-        }
-
-        match poll_result.cmp(&0) {
-            Ordering::Less => {
-                // poll CQ failed
-                // rc = 1;
-                panic!("poll CQ failed");
-            }
-            Ordering::Equal => {
-                // the CQ is empty
-                // rc = 1;
-                // println!("completion wasn't found in the CQ after timeout");
-                // Self::query_qp_cb(qp);
-                panic!("completion wasn't found in the CQ after timeout");
-            }
-            Ordering::Greater => {
-                // CQE found
-                println!("completion was found in CQ with status={}", wc.status);
-                // check the completion status (here we don't care about the completion opcode
-                debug_assert_eq!(
-                    wc.status,
-                    ibv_wc_status::IBV_WC_SUCCESS,
-                    "got bad completion with status={}, vendor syndrome={}, the error is: {:?}",
-                    wc.status,
-                    wc.vendor_err,
-                    unsafe { CStr::from_ptr(ibv_wc_status_str(wc.status)) },
-                );
-            }
-        }
-        0
+        poll_completion(self.cq)
     }
 
     ///
     pub fn post_write_imm(&self) -> c_int {
-        let opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM;
-        let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
-        let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-
-        // prepare the send work request
-        sr.next = std::ptr::null_mut();
-        sr.wr_id = 0;
-        sr.sg_list = std::ptr::null_mut(); //&mut sge;
-        sr.num_sge = 0;
-        sr.opcode = opcode;
-        sr.imm_data_invalidated_rkey_union.imm_data = 0x1234;
-        sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
-        sr.wr.rdma.remote_addr = self.remote_props.addr;
-        sr.wr.rdma.rkey = self.remote_props.rkey;
-
-        self.req_cq_notify();
-        // there is a Receive Request in the responder side, so we won't get any into RNR flow
-        let rc = unsafe { ibv_post_send(self.qp, &mut sr, &mut bad_wr) };
-        if rc == 0 {
-            println!("RDMA write with imm request was posted");
-        }
-        rc
+        remote_write_with_imm(
+            self.remote_props.addr,
+            self.remote_props.rkey,
+            0x1234,
+            self.qp,
+            self.cq,
+        )
     }
 
     ///
-    pub fn post_send(&self, opcode: c_uint) -> c_int {
-        let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
-        let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
-        let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        // prepare the scatter/gather entry
-        sge.addr = util::ptr_to_usize(self.buf.as_ptr()).cast();
-        sge.length = self.buf_slice().len().cast();
-        sge.lkey = unsafe { (*self.mr).lkey };
-        // prepare the send work request
-        sr.next = std::ptr::null_mut();
-        sr.wr_id = 0;
-        sr.sg_list = &mut sge;
-        sr.num_sge = 1;
-        sr.opcode = opcode;
-        sr.imm_data_invalidated_rkey_union.imm_data = 0x1234;
-        sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
-
+    pub fn post_send(&self, opcode: c_uint, len: u32) -> c_int {
         match opcode {
-            ibv_wr_opcode::IBV_WR_RDMA_READ
-            | ibv_wr_opcode::IBV_WR_RDMA_WRITE
-            | ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => {
-                sr.wr.rdma.remote_addr = self.remote_props.addr;
-                sr.wr.rdma.rkey = self.remote_props.rkey;
-            }
-            ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => {
-                let aligned_remote_addr = self
-                    .remote_props
-                    .addr
-                    .overflow_add(7)
-                    .overflow_shr(3)
-                    .overflow_shl(3);
-                println!(
-                    "remote addr={:x}, aligned remote addr={:x}",
-                    self.remote_props.addr, aligned_remote_addr
-                );
-                //println!("remote addr={:x}", self.remote_props.addr);
-                sr.wr.atomic.remote_addr = aligned_remote_addr;
-                sr.wr.atomic.rkey = self.remote_props.rkey;
-                sr.wr.atomic.compare_add = 0;
-                sr.wr.atomic.swap = 1;
-            }
-            _ => (),
+            ibv_wr_opcode::IBV_WR_RDMA_READ => remote_read(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                len,
+                unsafe { (*self.mr.inner).lkey },
+                self.remote_props.addr,
+                self.remote_props.rkey,
+                self.qp,
+                self.cq,
+            ),
+            ibv_wr_opcode::IBV_WR_RDMA_WRITE => remote_write(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                len,
+                unsafe { (*self.mr.inner).lkey },
+                self.remote_props.addr,
+                self.remote_props.rkey,
+                self.qp,
+                self.cq,
+            ),
+            ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => remote_write_with_imm(
+                self.remote_props.addr,
+                self.remote_props.rkey,
+                0x1234,
+                self.qp,
+                self.cq,
+            ),
+            ibv_wr_opcode::IBV_WR_SEND_WITH_IMM => remote_send_with_imm(
+                self.remote_props.addr,
+                self.remote_props.rkey,
+                0x1234,
+                self.qp,
+                self.cq,
+            ),
+            ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => remote_atomic_cas(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                8,
+                unsafe { (*self.mr.inner).lkey },
+                self.remote_props.addr,
+                self.remote_props.rkey,
+                0,
+                1,
+                self.qp,
+                self.cq,
+            ),
+            _ => -1,
         }
-
-        self.req_cq_notify();
-        // there is a Receive Request in the responder side, so we won't get any into RNR flow
-        let rc = unsafe { ibv_post_send(self.qp, &mut sr, &mut bad_wr) };
-        if rc == 0 {
-            match opcode {
-                ibv_wr_opcode::IBV_WR_SEND | ibv_wr_opcode::IBV_WR_SEND_WITH_IMM => {
-                    println!("RDMA send request was posted")
-                }
-                ibv_wr_opcode::IBV_WR_RDMA_READ => println!("RDMA read request was posted"),
-                ibv_wr_opcode::IBV_WR_RDMA_WRITE | ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => {
-                    println!("RDMA write request was posted")
-                }
-                ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => {
-                    println!("RDMA atomic request was posted")
-                }
-                _ => println!("Unknown Request was posted"),
-            }
-        } else {
-            panic!("failed to post SR, the error code is:{}", rc);
-        }
-        rc
     }
 
     ///
@@ -494,14 +302,14 @@ impl Resources {
         // prepare the scatter/gather entry
         sge.addr = util::ptr_to_usize(self.buf.as_ptr()).cast();
         sge.length = self.buf_slice().len().cast();
-        sge.lkey = unsafe { (*self.mr).lkey };
+        sge.lkey = unsafe { (*self.mr.inner).lkey };
         // prepare the receive work request
         rr.next = std::ptr::null_mut();
         rr.wr_id = 0;
         rr.sg_list = &mut sge;
         rr.num_sge = 1;
         // post the Receive Request to the RQ
-        let rc = unsafe { ibv_post_recv(self.qp, &mut rr, &mut bad_wr) };
+        let rc = unsafe { ibv_post_recv(self.qp.inner, &mut rr, &mut bad_wr) };
         if rc == 0 {
             println!("Receive Request was posted");
         } else {
@@ -513,7 +321,7 @@ impl Resources {
     ///
     pub fn new(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock: Udp) -> Self {
         // Searching for IB devices in host
-        let ib_ctx = open_ib_ctx(input_dev_name);
+        let (ib_ctx, _) = open_ib_ctx(input_dev_name);
 
         // Query port properties
         let port_attr = query_port(ib_ctx, ib_port);
@@ -545,12 +353,10 @@ impl Resources {
 
         Self {
             remote_props: remote_con_data,
-            ib_ctx: IbvCtx { inner: ib_ctx },
-            event_channel: IbvEventChannel {
-                inner: event_channel,
-            },
+            ib_ctx,
+            event_channel,
             pd,
-            cq: IbvCq { inner: cq },
+            cq,
             qp,
             mr,
             buf,
@@ -598,7 +404,7 @@ impl Resources {
         if rc != 0 {
             panic!("failed to modify QP state to RTR");
         }
-        rc = modify_qp_to_rts(self.qp);
+        rc = modify_qp_to_rts(self.qp, 0x12, 6, 0);
         if rc != 0 {
             panic!("failed to modify QP state to RTS");
         }
@@ -613,7 +419,7 @@ impl Resources {
 }
 
 /// Get ib context based on the dev name, if the name is empty get the first one
-pub fn open_ib_ctx(dev_name: &str) -> *mut ibv_context {
+pub fn open_ib_ctx(dev_name: &str) -> (IbvCtx, String) {
     let mut num_devs: c_int = 0;
     let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
     // if there isn't any IB device in host
@@ -675,22 +481,25 @@ pub fn open_ib_ctx(dev_name: &str) -> *mut ibv_context {
     );
     // We are now done with device list, free it
     unsafe { ibv_free_device_list(dev_list_ptr) };
-    ib_ctx
+    (
+        IbvCtx { inner: ib_ctx },
+        dev_name_cstr.to_str().unwrap_or_default().to_owned(),
+    )
 }
 
 /// Query port attribute based on the port number
-pub fn query_port(ib_ctx: *mut ibv_context, ib_port: u8) -> ibv_port_attr {
+pub fn query_port(ib_ctx: IbvCtx, ib_port: u8) -> ibv_port_attr {
     let mut port_attr = unsafe { std::mem::zeroed::<ibv_port_attr>() };
-    let rc = unsafe { ___ibv_query_port(ib_ctx, ib_port, &mut port_attr) };
+    let rc = unsafe { ___ibv_query_port(ib_ctx.inner, ib_port, &mut port_attr) };
     debug_assert_eq!(rc, 0, "ibv_query_port on port {} failed", ib_port);
     port_attr
 }
 
 /// Query gid based on the gid index
-pub fn query_gid(ib_ctx: *mut ibv_context, ib_port: u8, gid_idx: c_int) -> ibv_gid {
+pub fn query_gid(ib_ctx: IbvCtx, ib_port: u8, gid_idx: c_int) -> ibv_gid {
     let mut my_gid = unsafe { std::mem::zeroed::<ibv_gid>() };
     if gid_idx >= 0 {
-        let rc = unsafe { ibv_query_gid(ib_ctx, ib_port, gid_idx, &mut my_gid) };
+        let rc = unsafe { ibv_query_gid(ib_ctx.inner, ib_port, gid_idx, &mut my_gid) };
         debug_assert_eq!(
             rc, 0,
             "could not get gid for index={}, port={}",
@@ -701,18 +510,18 @@ pub fn query_gid(ib_ctx: *mut ibv_context, ib_port: u8, gid_idx: c_int) -> ibv_g
 }
 
 /// Create a new protect domain on a device
-pub fn create_pd(ib_ctx: *mut ibv_context) -> *mut ibv_pd {
-    let pd = unsafe { ibv_alloc_pd(ib_ctx) };
+pub fn create_pd(ib_ctx: IbvCtx) -> IbvPd {
+    let pd = unsafe { ibv_alloc_pd(ib_ctx.inner) };
     if util::is_null_mut_ptr(pd) {
         panic!("ibv_alloc_pd failed");
     }
-    pd
+    IbvPd { inner: pd }
 }
 
 /// Create a complete queue on a device
-pub fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut ibv_comp_channel) {
+pub fn create_cq(ib_ctx: IbvCtx, cq_size: u32) -> (IbvCq, IbvEventChannel) {
     let cq_context = std::ptr::null_mut::<c_void>();
-    let event_channel = unsafe { ibv_create_comp_channel(ib_ctx) };
+    let event_channel = unsafe { ibv_create_comp_channel(ib_ctx.inner) };
     if util::is_null_mut_ptr(event_channel) {
         panic!("failed to create event completion channel");
     }
@@ -720,7 +529,7 @@ pub fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut i
     let comp_vector = 0;
     let cq = unsafe {
         ibv_create_cq(
-            ib_ctx,
+            ib_ctx.inner,
             cq_size.cast(),
             cq_context,
             event_channel,
@@ -730,16 +539,17 @@ pub fn create_cq(ib_ctx: *mut ibv_context, cq_size: u32) -> (*mut ibv_cq, *mut i
     if util::is_null_mut_ptr(cq) {
         panic!("failed to create CQ with {} entries", cq_size);
     }
-    (cq, event_channel)
+    (
+        IbvCq { inner: cq },
+        IbvEventChannel {
+            inner: event_channel,
+        },
+    )
 }
 
 /// create memory region for `pd` protect domain,
 /// the length of the region is `size` and the access flag is `mr_flag`.
-pub fn create_mr(
-    size: usize,
-    pd: *mut ibv_pd,
-    mr_flag: ibv_access_flags,
-) -> (*mut ibv_mr, Pin<Vec<u8>>) {
+pub fn create_mr(size: usize, pd: IbvPd, mr_flag: ibv_access_flags) -> (IbvMr, Pin<Vec<u8>>) {
     // Allocate the memory buffer that will hold the data
     let mut buf = Pin::new(vec![0; size]);
 
@@ -747,7 +557,7 @@ pub fn create_mr(
     let mr_flags = mr_flag.0;
     let mr = unsafe {
         ibv_reg_mr(
-            pd,
+            pd.inner,
             util::mut_ptr_cast(buf.as_mut_ptr()),
             buf.len(),
             mr_flags.cast(),
@@ -764,41 +574,41 @@ pub fn create_mr(
         mr_flags
     );
 
-    (mr, buf)
+    (IbvMr { inner: mr }, buf)
 }
 
 /// create queue pair under `pd` protect domain, bind `cq` complete queue to the queue pair
-pub fn create_qp(cq: *mut ibv_cq, pd: *mut ibv_pd) -> *mut ibv_qp {
+pub fn create_qp(cq: IbvCq, pd: IbvPd) -> IbvQp {
     let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
     qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 0; // set to 0 to avoid CQE for every SR
-    qp_init_attr.send_cq = cq;
-    qp_init_attr.recv_cq = cq;
+    qp_init_attr.send_cq = cq.inner;
+    qp_init_attr.recv_cq = cq.inner;
     qp_init_attr.cap.max_send_wr = 10;
     qp_init_attr.cap.max_recv_wr = 10;
     qp_init_attr.cap.max_send_sge = 10;
     qp_init_attr.cap.max_recv_sge = 10;
-    let qp = unsafe { ibv_create_qp(pd, &mut qp_init_attr) };
+    let qp = unsafe { ibv_create_qp(pd.inner, &mut qp_init_attr) };
     if util::is_null_mut_ptr(qp) {
         panic!("failed to create QP");
     }
     println!("QP was created, QP number={:x}", unsafe { (*qp).qp_num });
-    qp
+    IbvQp { inner: qp }
 }
 
 /// Exechange information between two peers
 fn exchange_info(
     buf: &Pin<Vec<u8>>,
-    mr: *mut ibv_mr,
-    qp: *mut ibv_qp,
+    mr: IbvMr,
+    qp: IbvQp,
     port_attr: &ibv_port_attr,
     gid: &ibv_gid,
     sock: &Udp,
 ) -> CmConData {
     let mut local_con_data = unsafe { std::mem::zeroed::<CmConData>() };
     local_con_data.addr = util::ptr_to_usize(buf.as_ptr()).cast();
-    local_con_data.rkey = unsafe { (*mr).rkey };
-    local_con_data.qp_num = unsafe { (*qp).qp_num };
+    local_con_data.rkey = unsafe { (*mr.inner).rkey };
+    local_con_data.qp_num = unsafe { (*qp.inner).qp_num };
     local_con_data.lid = port_attr.lid;
     local_con_data.gid = u128::from_be_bytes(unsafe { gid.raw });
     println!("local connection data: {}", local_con_data);
@@ -810,7 +620,7 @@ fn exchange_info(
 }
 
 /// Modify the queue pair to init state
-pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: ibv_access_flags) -> c_int {
+pub fn modify_qp_to_init(ib_port: u8, qp: IbvQp, flag: ibv_access_flags) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
 
     attr.pkey_index = 0;
@@ -823,7 +633,7 @@ pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: ibv_access_flags) -
         | ibv_qp_attr_mask::IBV_QP_PORT
         | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
 
-    let rc = unsafe { ibv_modify_qp(qp, &mut attr, flags.0.cast()) };
+    let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
     if rc != 0 {
         panic!("failed to modify QP state to INIT");
     }
@@ -834,7 +644,7 @@ pub fn modify_qp_to_init(ib_port: u8, qp: *mut ibv_qp, flag: ibv_access_flags) -
 pub fn modify_qp_to_rtr(
     gid_idx: c_int,
     ib_port: u8,
-    qp: *mut ibv_qp,
+    qp: IbvQp,
     remote_qp_num: u32,
     remote_lid: u16,
     remote_global_id: u128,
@@ -867,7 +677,7 @@ pub fn modify_qp_to_rtr(
         | ibv_qp_attr_mask::IBV_QP_RQ_PSN
         | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC
         | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
-    let rc = unsafe { ibv_modify_qp(qp, &mut attr, flags.0.cast()) };
+    let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
     if rc != 0 {
         panic!("failed to modify QP state to RTR");
     }
@@ -875,12 +685,12 @@ pub fn modify_qp_to_rtr(
 }
 
 /// modify queue pair to rts
-pub fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
+pub fn modify_qp_to_rts(qp: IbvQp, timeout: u8, retry_cnt: u8, rnr_retry: u8) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
-    attr.timeout = 0x12; // TODO: use input arg
-    attr.retry_cnt = 6; // TODO: use input arg
-    attr.rnr_retry = 0; // TODO: use input arg
+    attr.timeout = timeout;
+    attr.retry_cnt = retry_cnt;
+    attr.rnr_retry = rnr_retry;
     attr.sq_psn = 0;
     attr.max_rd_atomic = 1;
     let flags = ibv_qp_attr_mask::IBV_QP_STATE
@@ -889,7 +699,7 @@ pub fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
         | ibv_qp_attr_mask::IBV_QP_RNR_RETRY
         | ibv_qp_attr_mask::IBV_QP_SQ_PSN
         | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
-    let rc = unsafe { ibv_modify_qp(qp, &mut attr, flags.0.cast()) };
+    let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
     if rc != 0 {
         panic!("failed to modify QP state to RTS");
     }
@@ -897,13 +707,13 @@ pub fn modify_qp_to_rts(qp: *mut ibv_qp) -> c_int {
 }
 
 ///
-pub fn query_qp(qp: *mut ibv_qp) -> (ibv_qp_init_attr, ibv_qp_attr) {
+pub fn query_qp(qp: IbvQp) -> (ibv_qp_init_attr, ibv_qp_attr) {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
 
     let rc = unsafe {
         ibv_query_qp(
-            qp,
+            qp.inner,
             &mut attr,
             ibv_qp_attr_mask::IBV_QP_STATE.0.cast(),
             &mut init_attr,
@@ -918,6 +728,416 @@ pub fn query_qp(qp: *mut ibv_qp) -> (ibv_qp_init_attr, ibv_qp_attr) {
     }
 
     (init_attr, attr)
+}
+
+///
+pub fn async_poll_completion(cq: IbvCq, channel: IbvEventChannel) -> JoinHandle<c_int> {
+    thread::spawn(move || poll_completion_non_blocking(cq, channel))
+}
+
+///
+pub fn poll_async_event_non_blocking(ibv_ctx: IbvCtx) -> JoinHandle<c_int> {
+    thread::spawn(move || {
+        let mut event = unsafe { std::mem::zeroed::<ibv_async_event>() };
+        let mut rc: c_int;
+        loop {
+            rc = unsafe { ibv_get_async_event(ibv_ctx.inner, &mut event) };
+            if rc != 0 {
+                panic!("Failed to get async event");
+            }
+            println!("get async event type={}", event.event_type);
+            unsafe { ibv_ack_async_event(&mut event) };
+        }
+    })
+}
+
+///
+fn poll_completion_non_blocking(cq_addr: IbvCq, channel_addr: IbvEventChannel) -> c_int {
+    let mut cq = cq_addr.inner;
+    let event_channel = channel_addr.inner;
+
+    let flags = unsafe { libc::fcntl((*event_channel).fd, libc::F_GETFL) };
+    let mut rc =
+        unsafe { libc::fcntl((*event_channel).fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc < 0 {
+        panic!("Failed to change file descriptor of Completion Event Channel");
+    }
+
+    let epoll_fd = epoll::epoll_create()
+        .unwrap_or_else(|err| panic!("epoll_create failed, the error is: {}", err));
+    let channel_fd = unsafe { (*event_channel).fd };
+    let mut epoll_ev = epoll::EpollEvent::new(
+        epoll::EpollFlags::EPOLLIN | epoll::EpollFlags::EPOLLET,
+        channel_fd.cast(),
+    );
+    epoll::epoll_ctl(
+        epoll_fd,
+        epoll::EpollOp::EpollCtlAdd,
+        channel_fd,
+        &mut epoll_ev,
+    )
+    .unwrap_or_else(|err| panic!("epoll_ctl failed, the error is: {}", err));
+
+    // let epoll_size = 1;
+    // let mut epoll_ev = unsafe { std::mem::zeroed::<libc::epoll_event>() };
+    // epoll_ev.u64 = channel_fd.cast();
+    // println!("EPOLLIN={:x}, EPOLLET={:x}", libc::EPOLLIN, libc::EPOLLET);
+    // epoll_ev.events = (libc::EPOLLIN | libc::EPOLLET).cast();
+    // unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, channel_fd, &mut epoll_ev) };
+
+    println!("start epoll...");
+    let timeout_ms = 10;
+    let mut event_list = [epoll_ev];
+    let mut nfds: usize;
+    loop {
+        nfds = epoll::epoll_wait(epoll_fd, &mut event_list, timeout_ms)
+            .unwrap_or_else(|err| panic!("epoll_wait failed, the error is: {}", err));
+        if nfds > 0 {
+            println!("end epoll");
+            break;
+        }
+    }
+    unsafe { libc::close(epoll_fd) };
+    let mut cq_context = std::ptr::null_mut::<c_void>();
+    rc = unsafe { ibv_get_cq_event(event_channel, &mut cq, &mut cq_context) };
+    if rc != 0 {
+        panic!("Failed to get cq_event");
+    }
+    unsafe { ibv_ack_cq_events(cq, 1) };
+
+    let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
+    let mut cur_time_msec: i64;
+    let mut cur_time = unsafe { std::mem::zeroed::<libc::timeval>() };
+    let mut poll_result: c_int;
+    // poll the completion for a while before giving up of doing it ..
+    let time_zone = std::ptr::null_mut();
+    unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+    let start_time_msec =
+        (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
+    println!("start ibv_poll_cq");
+    loop {
+        poll_result = unsafe { ibv_poll_cq(cq, 1, &mut wc) };
+        unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+        cur_time_msec =
+            (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
+        if (poll_result != 0)
+            || ((cur_time_msec.overflow_sub(start_time_msec)) >= MAX_POLL_CQ_TIMEOUT)
+        {
+            println!("end ibv_poll_cq");
+            break;
+        }
+    }
+
+    match poll_result.cmp(&0) {
+        Ordering::Less => {
+            // poll CQ failed
+            // rc = 1;
+            panic!("poll CQ failed");
+        }
+        Ordering::Equal => {
+            // the CQ is empty
+            // rc = 1;
+            panic!("completion wasn't found in the CQ after timeout");
+        }
+        Ordering::Greater => {
+            // CQE found
+            println!("completion was found in CQ with status={}", wc.status);
+            // check the completion status (here we don't care about the completion opcode
+            debug_assert_eq!(
+                wc.status,
+                ibv_wc_status::IBV_WC_SUCCESS,
+                "got bad completion with status={}, vendor syndrome={}, the error is: {:?}",
+                wc.status,
+                wc.vendor_err,
+                unsafe { CStr::from_ptr(ibv_wc_status_str(wc.status)) },
+            );
+        }
+    }
+    0
+}
+
+///
+pub fn poll_completion(cq: IbvCq) -> c_int {
+    // let qp_addr = util::ptr_to_usize(self.qp);
+    // let qp = unsafe { util::usize_to_mut_ptr::<ibv_qp>(qp_addr) };
+    let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
+    // let start_time_msec: u64;
+    let mut cur_time_msec: i64;
+    let mut cur_time = unsafe { std::mem::zeroed::<libc::timeval>() };
+    let mut poll_result: c_int;
+    // poll the completion for a while before giving up of doing it ..
+    let time_zone = std::ptr::null_mut();
+    unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+    let start_time_msec =
+        (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
+    loop {
+        poll_result = unsafe { ibv_poll_cq(cq.inner, 1, &mut wc) };
+        unsafe { libc::gettimeofday(&mut cur_time, time_zone) };
+        cur_time_msec =
+            (cur_time.tv_sec.overflow_mul(1000)).overflow_add(cur_time.tv_usec.overflow_div(1000));
+        if (poll_result != 0)
+            || ((cur_time_msec.overflow_sub(start_time_msec)) >= MAX_POLL_CQ_TIMEOUT)
+        {
+            break;
+        }
+    }
+
+    match poll_result.cmp(&0) {
+        Ordering::Less => {
+            // poll CQ failed
+            // rc = 1;
+            panic!("poll CQ failed");
+        }
+        Ordering::Equal => {
+            // the CQ is empty
+            // rc = 1;
+            // println!("completion wasn't found in the CQ after timeout");
+            // Self::query_qp_cb(qp);
+            panic!("completion wasn't found in the CQ after timeout");
+        }
+        Ordering::Greater => {
+            // CQE found
+            println!("completion was found in CQ with status={}", wc.status);
+            // check the completion status (here we don't care about the completion opcode
+            debug_assert_eq!(
+                wc.status,
+                ibv_wc_status::IBV_WC_SUCCESS,
+                "got bad completion with status={}, vendor syndrome={}, the error is: {:?}",
+                wc.status,
+                wc.vendor_err,
+                unsafe { CStr::from_ptr(ibv_wc_status_str(wc.status)) },
+            );
+        }
+    }
+    0
+}
+
+/// Read remote data
+pub fn remote_read(
+    addr: u64,
+    len: u32,
+    local_key: u32,
+    remote_addr: u64,
+    remote_key: u32,
+    qp: IbvQp,
+    cq: IbvCq,
+) -> c_int {
+    remote_read_write(
+        addr,
+        len,
+        local_key,
+        remote_addr,
+        remote_key,
+        cq,
+        qp,
+        ibv_wr_opcode::IBV_WR_RDMA_READ,
+    )
+}
+
+/// Write data to remote
+pub fn remote_write(
+    addr: u64,
+    len: u32,
+    local_key: u32,
+    remote_addr: u64,
+    remote_key: u32,
+    qp: IbvQp,
+    cq: IbvCq,
+) -> c_int {
+    remote_read_write(
+        addr,
+        len,
+        local_key,
+        remote_addr,
+        remote_key,
+        cq,
+        qp,
+        ibv_wr_opcode::IBV_WR_RDMA_WRITE,
+    )
+}
+
+/// Write data to remote or read data from remote, should not be used directly
+#[allow(clippy::too_many_arguments)]
+fn remote_read_write(
+    addr: u64,
+    len: u32,
+    local_key: u32,
+    remote_addr: u64,
+    remote_key: u32,
+    cq: IbvCq,
+    qp: IbvQp,
+    opcode: c_uint,
+) -> c_int {
+    let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+    let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
+    let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+    // prepare the scatter/gather entry
+    sge.addr = addr;
+    sge.length = len.cast();
+    sge.lkey = local_key;
+
+    // prepare the send work request
+    sr.next = std::ptr::null_mut();
+    sr.wr_id = 0;
+    sr.sg_list = &mut sge;
+    sr.num_sge = 1;
+    sr.opcode = opcode;
+    sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+    sr.wr.rdma.remote_addr = remote_addr;
+    sr.wr.rdma.rkey = remote_key;
+
+    req_cq_notify(cq);
+    // there is a Receive Request in the responder side, so we won't get any into RNR flow
+    let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
+    if rc == 0 {
+        match opcode {
+            ibv_wr_opcode::IBV_WR_RDMA_READ => println!("RDMA read request was posted"),
+            ibv_wr_opcode::IBV_WR_RDMA_WRITE => println!("RDMA write request was posted"),
+            _ => (),
+        }
+    } else {
+        panic!("failed to post SR, the error code is:{}", rc);
+    }
+    rc
+}
+
+/// Write to remote with immediate data
+pub fn remote_write_with_imm(
+    remote_addr: u64,
+    remote_key: u32,
+    imm_data: u32,
+    qp: IbvQp,
+    cq: IbvCq,
+) -> c_int {
+    remote_write_send_with_imm(
+        remote_addr,
+        remote_key,
+        imm_data,
+        qp,
+        cq,
+        ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM,
+    )
+}
+
+/// Send to remote with immediate data
+pub fn remote_send_with_imm(
+    remote_addr: u64,
+    remote_key: u32,
+    imm_data: u32,
+    qp: IbvQp,
+    cq: IbvCq,
+) -> c_int {
+    remote_write_send_with_imm(
+        remote_addr,
+        remote_key,
+        imm_data,
+        qp,
+        cq,
+        ibv_wr_opcode::IBV_WR_SEND_WITH_IMM,
+    )
+}
+
+/// Write to remote with immediate data
+fn remote_write_send_with_imm(
+    // We don't need the remote address and length in send operation
+    _remote_addr: u64,
+    _remote_key: u32,
+    imm_data: u32,
+    qp: IbvQp,
+    cq: IbvCq,
+    opcode: c_uint,
+) -> c_int {
+    let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+    let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+    // prepare the send work request
+    sr.next = std::ptr::null_mut();
+    sr.wr_id = 0;
+    sr.sg_list = std::ptr::null_mut();
+    sr.num_sge = 0;
+    sr.opcode = opcode;
+    sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+    sr.imm_data_invalidated_rkey_union.imm_data = imm_data;
+
+    req_cq_notify(cq);
+    // there is a Receive Request in the responder side, so we won't get any into RNR flow
+    let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
+    if rc == 0 {
+        match opcode {
+            ibv_wr_opcode::IBV_WR_SEND_WITH_IMM => {
+                println!("RDMA send with immediate request was posted")
+            }
+            ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => {
+                println!("RDMA write with immediate request was posted")
+            }
+            _ => (),
+        }
+    } else {
+        panic!("failed to post SR, the error code is:{}", rc);
+    }
+    rc
+}
+
+/// Operate compare and swap in remote addr
+#[allow(clippy::too_many_arguments)]
+pub fn remote_atomic_cas(
+    addr: u64,
+    len: u32,
+    local_key: u32,
+    remote_addr: u64,
+    remote_key: u32,
+    old_value: u64,
+    new_value: u64,
+    qp: IbvQp,
+    cq: IbvCq,
+) -> c_int {
+    let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+    let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
+    let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+    // prepare the scatter/gather entry
+    sge.addr = addr;
+    sge.length = len.cast();
+    sge.lkey = local_key;
+
+    // prepare the send work request
+    sr.next = std::ptr::null_mut();
+    sr.wr_id = 0;
+    sr.sg_list = &mut sge;
+    sr.num_sge = 1;
+    sr.opcode = ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP;
+    sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+    let aligned_remote_addr = remote_addr.overflow_add(7).overflow_shr(3).overflow_shl(3);
+    println!(
+        "remote addr={:x}, aligned remote addr={:x}",
+        remote_addr, aligned_remote_addr
+    );
+
+    //println!("remote addr={:x}", self.remote_props.addr);
+    sr.wr.atomic.remote_addr = aligned_remote_addr;
+    sr.wr.atomic.rkey = remote_key;
+    sr.wr.atomic.compare_add = old_value;
+    sr.wr.atomic.swap = new_value;
+
+    req_cq_notify(cq);
+    // there is a Receive Request in the responder side, so we won't get any into RNR flow
+    let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
+    if rc == 0 {
+        println!("RDMA atomic compare and swap was posted");
+    } else {
+        panic!("failed to post SR, the error code is:{}", rc);
+    }
+    rc
+}
+
+///
+fn req_cq_notify(cq: IbvCq) {
+    let solicited_only = 0;
+    let rc = unsafe { ibv_req_notify_cq(cq.inner, solicited_only) };
+    if rc != 0 {
+        panic!("Failed to request CQ notification");
+    }
 }
 
 ///
@@ -987,7 +1207,10 @@ pub fn run_client(
     // Now the client performs an RDMA read and then write on server.
     // Note that the server has no idea these events have occured
     // First client read contens of server's buffer
-    rc = res.post_send(ibv_wr_opcode::IBV_WR_RDMA_READ);
+    rc = res.post_send(
+        ibv_wr_opcode::IBV_WR_RDMA_READ,
+        res.buf_slice().len().cast(),
+    );
     debug_assert_eq!(rc, 0, "failed to post SR 2");
     rc = res.poll_completion();
     debug_assert_eq!(rc, 0, "poll completion failed 2");
@@ -999,6 +1222,12 @@ pub fn run_client(
     )
     .unwrap_or_else(|err| panic!("failed to build str from bytes, the error is: {}", err));
     println!("client read server buffer: {}", read_msg);
+
+    // client performs a zero sized rdma read
+    rc = res.post_send(ibv_wr_opcode::IBV_WR_RDMA_READ, 0);
+    debug_assert_eq!(rc, 0, "failed to post SR 2.5");
+    rc = res.poll_completion();
+    debug_assert_eq!(rc, 0, "poll completion failed 2.5");
 
     // Sync with server the size of write data
     let resp_write_size: State = res
@@ -1015,7 +1244,10 @@ pub fn run_client(
     // Next client write data to server's buffer
     util::copy_to_buf_pad(res.buf_slice_mut(), RDMAMSGW);
     println!("write to server with data: {}", RDMAMSGW);
-    rc = res.post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE);
+    rc = res.post_send(
+        ibv_wr_opcode::IBV_WR_RDMA_WRITE,
+        res.buf_slice().len().cast(),
+    );
     debug_assert_eq!(rc, 0, "failed to post SR 3");
     // rc = res.poll_completion();
     // debug_assert_eq!(rc, 0, "poll completion failed 3");
@@ -1146,7 +1378,7 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
     }
     // Post send request
     println!("going to send the message: \"{}\"", MSG);
-    rc = res.post_send(ibv_wr_opcode::IBV_WR_SEND_WITH_IMM);
+    rc = res.post_send(ibv_wr_opcode::IBV_WR_SEND_WITH_IMM, 0);
     debug_assert_eq!(rc, 0, "failed to post send");
     // Both sides expect to get a completion
     rc = res.poll_completion();
@@ -1224,7 +1456,7 @@ pub fn run_server(input_dev_name: &str, gid_idx: c_int, ib_port: u8, sock_port: 
     }
     // Atomic opteration
     println!("going to request atomic operation");
-    rc = res.post_send(ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP);
+    rc = res.post_send(ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP, 0);
     debug_assert_eq!(rc, 0, "failed to post atomic");
     rc = res.poll_completion();
     debug_assert_eq!(rc, 0, "poll completion failed");

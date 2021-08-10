@@ -12,7 +12,7 @@ set -o xtrace
 
 HAS_RXE_MOD=`modprobe -c | grep rxe | cat`
 
-if [ -z $HAS_RXE_MOD ]; then
+if [ -z "$HAS_RXE_MOD" ]; then
     # Load required IB and RDMA kernel modules
     sudo modprobe ib_core
     sudo modprobe rdma_ucm

@@ -20,6 +20,7 @@ jobs:
           override: true
       - name: Run
         run: |
+          /bin/false
           sudo apt-get install -y net-tools librdmacm-dev ibverbs-utils rdmacm-utils perftest
           ./scripts/setup.sh
           ./scripts/run.sh

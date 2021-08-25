@@ -278,6 +278,13 @@ impl Resources {
                 self.qp,
                 self.cq,
             ),
+            ibv_wr_opcode::IBV_WR_SEND => remote_send(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                len,
+                unsafe { (*self.mr.inner).lkey },
+                self.qp,
+                self.cq,
+            ),
             ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP => remote_atomic_cas(
                 util::ptr_to_usize(self.buf.as_ptr()).cast(),
                 8,
@@ -295,27 +302,12 @@ impl Resources {
 
     ///
     pub fn post_receive(&self) -> c_int {
-        let mut rr = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
-        let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
-        let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
-
-        // prepare the scatter/gather entry
-        sge.addr = util::ptr_to_usize(self.buf.as_ptr()).cast();
-        sge.length = self.buf_slice().len().cast();
-        sge.lkey = unsafe { (*self.mr.inner).lkey };
-        // prepare the receive work request
-        rr.next = std::ptr::null_mut();
-        rr.wr_id = 0;
-        rr.sg_list = &mut sge;
-        rr.num_sge = 1;
-        // post the Receive Request to the RQ
-        let rc = unsafe { ibv_post_recv(self.qp.inner, &mut rr, &mut bad_wr) };
-        if rc == 0 {
-            println!("Receive Request was posted");
-        } else {
-            panic!("failed to post RR");
-        }
-        rc
+        post_receive(
+            util::ptr_to_usize(self.buf.as_ptr()).cast(),
+            self.buf_slice().len().cast(),
+            unsafe { (*self.mr.inner).lkey },
+            self.qp,
+        )
     }
 
     ///
@@ -590,7 +582,7 @@ pub fn create_qp(cq: IbvCq, pd: IbvPd) -> IbvQp {
     qp_init_attr.cap.max_recv_sge = 10;
     let qp = unsafe { ibv_create_qp(pd.inner, &mut qp_init_attr) };
     if util::is_null_mut_ptr(qp) {
-        panic!("failed to create QP");
+        panic!("failed to create QP, errno {}", errno::errno());
     }
     println!("QP was created, QP number={:x}", unsafe { (*qp).qp_num });
     IbvQp { inner: qp }
@@ -679,7 +671,7 @@ pub fn modify_qp_to_rtr(
         | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
     let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
     if rc != 0 {
-        panic!("failed to modify QP state to RTR");
+        panic!("failed to modify QP state to RTR, errno is {}", rc);
     }
     rc
 }
@@ -701,7 +693,7 @@ pub fn modify_qp_to_rts(qp: IbvQp, timeout: u8, retry_cnt: u8, rnr_retry: u8) ->
         | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
     let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
     if rc != 0 {
-        panic!("failed to modify QP state to RTS");
+        panic!("failed to modify QP state to RTS, errno {}", rc);
     }
     rc
 }
@@ -956,6 +948,36 @@ pub fn remote_write(
     )
 }
 
+/// Send data to remote
+pub fn remote_send(addr: u64, len: u32, local_key: u32, qp: IbvQp, cq: IbvCq) -> c_int {
+    let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+    let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
+    let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+    // prepare the scatter/gather entry
+    sge.addr = addr;
+    sge.length = len.cast();
+    sge.lkey = local_key;
+
+    // prepare the send work request
+    sr.next = std::ptr::null_mut();
+    sr.wr_id = 0;
+    sr.sg_list = &mut sge;
+    sr.num_sge = 1;
+    sr.opcode = ibv_wr_opcode::IBV_WR_SEND;
+    sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+
+    req_cq_notify(cq);
+    // there is a Receive Request in the responder side, so we won't get any into RNR flow
+    let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
+    if rc == 0 {
+        println!("RDMA send request was posted");
+    } else {
+        panic!("failed to post SR, the error code is:{}", rc);
+    }
+    rc
+}
+
 /// Write data to remote or read data from remote, should not be used directly
 #[allow(clippy::too_many_arguments)]
 fn remote_read_write(
@@ -1127,6 +1149,31 @@ pub fn remote_atomic_cas(
         println!("RDMA atomic compare and swap was posted");
     } else {
         panic!("failed to post SR, the error code is:{}", rc);
+    }
+    rc
+}
+
+/// Post ibv receive request
+pub fn post_receive(addr: u64, len: u32, local_key: u32, qp: IbvQp) -> c_int {
+    let mut rr = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
+    let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
+    let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
+
+    // prepare the scatter/gather entry
+    sge.addr = addr.cast();
+    sge.length = len.cast();
+    sge.lkey = local_key;
+    // prepare the receive work request
+    rr.next = std::ptr::null_mut();
+    rr.wr_id = 0;
+    rr.sg_list = &mut sge;
+    rr.num_sge = 1;
+    // post the Receive Request to the RQ
+    let rc = unsafe { ibv_post_recv(qp.inner, &mut rr, &mut bad_wr) };
+    if rc == 0 {
+        println!("Receive Request was posted");
+    } else {
+        panic!("failed to post RR");
     }
     rc
 }

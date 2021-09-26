@@ -392,11 +392,15 @@ impl Resources {
             self.remote_props.qp_num,
             self.remote_props.lid,
             self.remote_props.gid,
+            1024,
+            0,
+            1,
+            0x12,
         );
         if rc != 0 {
             panic!("failed to modify QP state to RTR");
         }
-        rc = modify_qp_to_rts(self.qp, 0x12, 6, 0);
+        rc = modify_qp_to_rts(self.qp, 0x12, 6, 0, 0, 1);
         if rc != 0 {
             panic!("failed to modify QP state to RTS");
         }
@@ -632,6 +636,7 @@ pub fn modify_qp_to_init(ib_port: u8, qp: IbvQp, flag: ibv_access_flags) -> c_in
     rc
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Modify the queue pair to rtr state
 pub fn modify_qp_to_rtr(
     gid_idx: c_int,
@@ -640,14 +645,25 @@ pub fn modify_qp_to_rtr(
     remote_qp_num: u32,
     remote_lid: u16,
     remote_global_id: u128,
+    mtu: u32,
+    start_psn: u32,
+    max_dest_rd_atomic: u8,
+    min_rnr_timer: u8,
 ) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
-    attr.path_mtu = ibv_mtu::IBV_MTU_256;
+    attr.path_mtu = match mtu {
+        256 => ibv_mtu::IBV_MTU_256,
+        512 => ibv_mtu::IBV_MTU_512,
+        1024 => ibv_mtu::IBV_MTU_1024,
+        2048 => ibv_mtu::IBV_MTU_2048,
+        4096 => ibv_mtu::IBV_MTU_4096,
+        _ => panic!("{} is not a valid MTU size", mtu),
+    };
     attr.dest_qp_num = remote_qp_num;
-    attr.rq_psn = 0;
-    attr.max_dest_rd_atomic = 1;
-    attr.min_rnr_timer = 0x12;
+    attr.rq_psn = start_psn;
+    attr.max_dest_rd_atomic = max_dest_rd_atomic;
+    attr.min_rnr_timer = min_rnr_timer;
     attr.ah_attr.is_global = 0;
     attr.ah_attr.dlid = remote_lid;
     attr.ah_attr.sl = 0;
@@ -676,15 +692,23 @@ pub fn modify_qp_to_rtr(
     rc
 }
 
+#[allow(clippy::too_many_arguments)]
 /// modify queue pair to rts
-pub fn modify_qp_to_rts(qp: IbvQp, timeout: u8, retry_cnt: u8, rnr_retry: u8) -> c_int {
+pub fn modify_qp_to_rts(
+    qp: IbvQp,
+    timeout: u8,
+    retry_cnt: u8,
+    rnr_retry: u8,
+    start_psn: u32,
+    max_rd_atomic: u8,
+) -> c_int {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
     attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
     attr.timeout = timeout;
     attr.retry_cnt = retry_cnt;
     attr.rnr_retry = rnr_retry;
-    attr.sq_psn = 0;
-    attr.max_rd_atomic = 1;
+    attr.sq_psn = start_psn;
+    attr.max_rd_atomic = max_rd_atomic;
     let flags = ibv_qp_attr_mask::IBV_QP_STATE
         | ibv_qp_attr_mask::IBV_QP_TIMEOUT
         | ibv_qp_attr_mask::IBV_QP_RETRY_CNT

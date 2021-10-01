@@ -229,7 +229,8 @@ impl Resources {
 
     ///
     pub fn poll_completion(&self) -> c_int {
-        poll_completion(self.cq)
+        let (status, _) = poll_completion(self.cq);
+        status
     }
 
     ///
@@ -873,7 +874,7 @@ fn poll_completion_non_blocking(cq_addr: IbvCq, channel_addr: IbvEventChannel) -
 }
 
 ///
-pub fn poll_completion(cq: IbvCq) -> c_int {
+pub fn poll_completion(cq: IbvCq) -> (c_int, ibv_wc) {
     // let qp_addr = util::ptr_to_usize(self.qp);
     // let qp = unsafe { util::usize_to_mut_ptr::<ibv_qp>(qp_addr) };
     let mut wc = unsafe { std::mem::zeroed::<ibv_wc>() };
@@ -925,7 +926,7 @@ pub fn poll_completion(cq: IbvCq) -> c_int {
             );
         }
     }
-    0
+    (0, wc)
 }
 
 /// Read remote data

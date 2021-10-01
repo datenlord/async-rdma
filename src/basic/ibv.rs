@@ -723,6 +723,19 @@ pub fn modify_qp_to_rts(
     rc
 }
 
+/// modify queue pair's sq psn
+#[allow(dead_code)]
+pub fn modify_qp_sq_psn(qp: IbvQp, psn: u32) -> c_int {
+    let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
+    attr.sq_psn = psn;
+    let flags = ibv_qp_attr_mask::IBV_QP_SQ_PSN;
+    let rc = unsafe { ibv_modify_qp(qp.inner, &mut attr, flags.0.cast()) };
+    if rc != 0 {
+        panic!("failed to modify QP sq psn to {}, errno {}", psn, rc);
+    }
+    rc
+}
+
 ///
 pub fn query_qp(qp: IbvQp) -> (ibv_qp_init_attr, ibv_qp_attr) {
     let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };

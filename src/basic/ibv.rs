@@ -236,11 +236,15 @@ impl Resources {
     ///
     pub fn post_write_imm(&self) -> c_int {
         remote_write_with_imm(
+            util::ptr_to_usize(self.buf.as_ptr()).cast(),
+            0,
+            unsafe { (*self.mr.inner).lkey },
             self.remote_props.addr,
             self.remote_props.rkey,
             0x1234,
             self.qp,
             self.cq,
+            ibv_send_flags::IBV_SEND_SIGNALED,
         )
     }
 
@@ -266,18 +270,26 @@ impl Resources {
                 self.cq,
             ),
             ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM => remote_write_with_imm(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                len,
+                unsafe { (*self.mr.inner).lkey },
                 self.remote_props.addr,
                 self.remote_props.rkey,
                 0x1234,
                 self.qp,
                 self.cq,
+                ibv_send_flags::IBV_SEND_SIGNALED,
             ),
             ibv_wr_opcode::IBV_WR_SEND_WITH_IMM => remote_send_with_imm(
+                util::ptr_to_usize(self.buf.as_ptr()).cast(),
+                len,
+                unsafe { (*self.mr.inner).lkey },
                 self.remote_props.addr,
                 self.remote_props.rkey,
                 0x1234,
                 self.qp,
                 self.cq,
+                ibv_send_flags::IBV_SEND_SIGNALED,
             ),
             ibv_wr_opcode::IBV_WR_SEND => remote_send(
                 util::ptr_to_usize(self.buf.as_ptr()).cast(),
@@ -1005,7 +1017,7 @@ pub fn remote_send(addr: u64, len: u32, local_key: u32, qp: IbvQp, cq: IbvCq) ->
     sr.opcode = ibv_wr_opcode::IBV_WR_SEND;
     sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
 
-    req_cq_notify(cq);
+    req_cq_notify(cq, 0);
     // there is a Receive Request in the responder side, so we won't get any into RNR flow
     let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
     if rc == 0 {
@@ -1047,7 +1059,7 @@ fn remote_read_write(
     sr.wr.rdma.remote_addr = remote_addr;
     sr.wr.rdma.rkey = remote_key;
 
-    req_cq_notify(cq);
+    req_cq_notify(cq, 0);
     // there is a Receive Request in the responder side, so we won't get any into RNR flow
     let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
     if rc == 0 {
@@ -1063,64 +1075,97 @@ fn remote_read_write(
 }
 
 /// Write to remote with immediate data
+#[allow(clippy::too_many_arguments)]
 pub fn remote_write_with_imm(
+    addr: u64,
+    len: u32,
+    local_key: u32,
     remote_addr: u64,
     remote_key: u32,
     imm_data: u32,
     qp: IbvQp,
     cq: IbvCq,
+    send_flag: ibv_send_flags,
 ) -> c_int {
     remote_write_send_with_imm(
+        addr,
+        len,
+        local_key,
         remote_addr,
         remote_key,
         imm_data,
         qp,
         cq,
         ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM,
+        send_flag,
     )
 }
 
 /// Send to remote with immediate data
+#[allow(clippy::too_many_arguments)]
 pub fn remote_send_with_imm(
+    addr: u64,
+    len: u32,
+    local_key: u32,
     remote_addr: u64,
     remote_key: u32,
     imm_data: u32,
     qp: IbvQp,
     cq: IbvCq,
+    send_flag: ibv_send_flags,
 ) -> c_int {
     remote_write_send_with_imm(
+        addr,
+        len,
+        local_key,
         remote_addr,
         remote_key,
         imm_data,
         qp,
         cq,
         ibv_wr_opcode::IBV_WR_SEND_WITH_IMM,
+        send_flag,
     )
 }
 
 /// Write to remote with immediate data
+#[allow(clippy::too_many_arguments)]
 fn remote_write_send_with_imm(
-    // We don't need the remote address and length in send operation
-    _remote_addr: u64,
-    _remote_key: u32,
+    addr: u64,
+    len: u32,
+    local_key: u32,
+    remote_addr: u64,
+    remote_key: u32,
     imm_data: u32,
     qp: IbvQp,
     cq: IbvCq,
     opcode: c_uint,
+    send_flag: ibv_send_flags,
 ) -> c_int {
     let mut sr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
+    let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
     let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+
+    // prepare the scatter/gather entry
+    sge.addr = addr;
+    sge.length = len.cast();
+    sge.lkey = local_key;
 
     // prepare the send work request
     sr.next = std::ptr::null_mut();
     sr.wr_id = 0;
-    sr.sg_list = std::ptr::null_mut();
-    sr.num_sge = 0;
+    sr.sg_list = &mut sge;
+    sr.num_sge = 1;
     sr.opcode = opcode;
-    sr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0; // TODO: might use unsignaled SR
+    sr.send_flags = send_flag.0; // TODO: might use unsignaled SR
     sr.imm_data_invalidated_rkey_union.imm_data = imm_data;
 
-    req_cq_notify(cq);
+    if opcode == ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM {
+        sr.wr.rdma.remote_addr = remote_addr;
+        sr.wr.rdma.rkey = remote_key;
+    }
+
+    req_cq_notify(cq, 0);
     // there is a Receive Request in the responder side, so we won't get any into RNR flow
     let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
     if rc == 0 {
@@ -1180,7 +1225,7 @@ pub fn remote_atomic_cas(
     sr.wr.atomic.compare_add = old_value;
     sr.wr.atomic.swap = new_value;
 
-    req_cq_notify(cq);
+    req_cq_notify(cq, 0);
     // there is a Receive Request in the responder side, so we won't get any into RNR flow
     let rc = unsafe { ibv_post_send(qp.inner, &mut sr, &mut bad_wr) };
     if rc == 0 {
@@ -1217,8 +1262,7 @@ pub fn post_receive(addr: u64, len: u32, local_key: u32, qp: IbvQp) -> c_int {
 }
 
 ///
-fn req_cq_notify(cq: IbvCq) {
-    let solicited_only = 0;
+pub fn req_cq_notify(cq: IbvCq, solicited_only: i32) {
     let rc = unsafe { ibv_req_notify_cq(cq.inner, solicited_only) };
     if rc != 0 {
         panic!("Failed to request CQ notification");

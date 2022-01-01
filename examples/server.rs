@@ -17,7 +17,7 @@ async fn example2(rdma: &Rdma) {
 }
 
 async fn example3(rdma: &Rdma) {
-    let mut lmr = rdma.receive().await;
+    let mut lmr = rdma.receive().await.unwrap();
     debug!("e3 lmr : {:?}", unsafe { *(lmr.as_ptr() as *mut i32) });
     dbg!(unsafe { *(lmr.as_mut_ptr() as *mut i32) });
 }
@@ -27,7 +27,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
     debug!("server start");
     let rdmalistener = RdmaListener::bind("127.0.0.1:5555").await.unwrap();
-    let rdma = rdmalistener.accept().await.unwrap();
+    let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
     debug!("accepted");
     example1(&rdma).await;
     example2(&rdma).await;

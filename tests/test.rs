@@ -9,7 +9,7 @@ async fn server<A: ToSocketAddrs, R: Future<Output = Result<(), io::Error>>>(
     addr: A,
     f: RdmaFn<R>,
 ) -> io::Result<()> {
-    let rdma = RdmaListener::bind(addr).await?.accept().await?;
+    let rdma = RdmaListener::bind(addr).await?.accept(1, 1, 64).await?;
     f(rdma).await
 }
 
@@ -18,7 +18,7 @@ async fn client<A: ToSocketAddrs, R: Future<Output = Result<(), io::Error>>>(
     addr: A,
     f: RdmaFn<R>,
 ) -> io::Result<()> {
-    let rdma = Rdma::connect(addr).await?;
+    let rdma = Rdma::connect(addr, 1, 1, 64).await?;
     f(rdma).await
 }
 
@@ -49,7 +49,7 @@ mod test1 {
     }
 
     async fn client(rdma: Rdma) -> io::Result<()> {
-        let rmr = Arc::new(rdma.alloc_remote_mr(Layout::new::<i32>()).await.unwrap());
+        let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<i32>()).await.unwrap());
         let lmr = rdma.alloc_local_mr(Layout::new::<i32>()).unwrap();
         unsafe { *(lmr.as_ptr() as *mut i32) = 5 };
         rdma.write(&lmr, rmr.as_ref()).await.unwrap();
@@ -59,7 +59,7 @@ mod test1 {
 
     #[test]
     fn test() -> io::Result<()> {
-        test_server_client("127.0.0.1:8000", server, client)
+        test_server_client("127.0.0.1:18000", server, client)
     }
 }
 
@@ -73,7 +73,7 @@ mod test2 {
         for _ in 0..10 {
             let rdma_clone = rdma.clone();
             handles.push(tokio::spawn(async move {
-                let lm = rdma_clone.receive().await;
+                let lm = rdma_clone.receive().await.unwrap();
                 assert_eq!(unsafe { *(lm.as_ptr() as *mut i32) }, 5);
                 assert_eq!(lm.length(), 4);
             }));
@@ -91,6 +91,7 @@ mod test2 {
             let rdma_clone = rdma.clone();
             handles.push(tokio::spawn(async move {
                 let lm = rdma_clone.alloc_local_mr(Layout::new::<i32>()).unwrap();
+                println!("pointer {:?}", lm.as_ptr());
                 unsafe { *(lm.as_ptr() as *mut i32) = 5 };
                 rdma_clone.send(&lm).await.unwrap();
             }));
@@ -103,6 +104,6 @@ mod test2 {
 
     #[test]
     fn test() -> io::Result<()> {
-        test_server_client("127.0.0.1:8001", server, client)
+        test_server_client("127.0.0.1:18001", server, client)
     }
 }

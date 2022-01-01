@@ -1,5 +1,4 @@
 use crate::{context::Context, event_channel::EventChannel};
-use libc::c_void;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use rand::Rng;
@@ -7,74 +6,82 @@ use rdma_sys::{
     ibv_cq, ibv_create_cq, ibv_destroy_cq, ibv_poll_cq, ibv_req_notify_cq, ibv_wc, ibv_wc_status,
 };
 use std::{
-    cmp::Ordering,
     fmt::Debug,
     io, mem,
-    ptr::{self, NonNull},
+    ptr::NonNull,
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
+use utilities::{Cast, OverflowArithmetic};
 
+/// Complete Queue Structure
+#[derive(Debug)]
 pub struct CompletionQueue {
-    ec: Option<EventChannel>,
+    /// Event Channel
+    ec: EventChannel,
+    /// Real Completion Queue
     inner_cq: NonNull<ibv_cq>,
 }
 
 impl CompletionQueue {
-    pub fn as_ptr(&self) -> *mut ibv_cq {
+    /// Get the internal cq ptr
+    pub(crate) const fn as_ptr(&self) -> *mut ibv_cq {
         self.inner_cq.as_ptr()
     }
 
-    pub fn create(ctx: &Context, cq_size: u32, ec: Option<EventChannel>) -> io::Result<Self> {
-        let ec_inner = match &ec {
-            Some(ec) => ec.as_ptr(),
-            _ => ptr::null::<c_void>() as _,
-        };
+    /// Create a new completion queue and bind to the event channel `ec`, `cq_size` is the buffer
+    /// size of the completion queue
+    pub(crate) fn create(ctx: &Context, cq_size: u32, ec: EventChannel) -> io::Result<Self> {
         let inner_cq = NonNull::new(unsafe {
             ibv_create_cq(
                 ctx.as_ptr(),
-                cq_size as _,
+                cq_size.cast(),
                 std::ptr::null_mut(),
-                ec_inner,
+                ec.as_ptr(),
                 0,
             )
         })
         .ok_or(io::ErrorKind::Other)?;
-        Ok(CompletionQueue { ec, inner_cq })
+        Ok(Self { ec, inner_cq })
     }
 
-    pub fn req_notify(&self, solicited_only: bool) -> io::Result<()> {
-        if self.ec.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "no event channel".to_string(),
-            ));
-        }
-        let errno = unsafe { ibv_req_notify_cq(self.inner_cq.as_ptr(), solicited_only as _) };
-        if errno != 0 {
+    /// Request notification on next complete event arrive
+    pub(crate) fn req_notify(&self, solicited_only: bool) -> io::Result<()> {
+        let errno = unsafe {
+            ibv_req_notify_cq(self.inner_cq.as_ptr(), if solicited_only { 1 } else { 0 })
+        };
+        if errno != 0_i32 {
             return Err(io::Error::from_raw_os_error(errno));
         }
         Ok(())
     }
 
-    pub fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
-        let mut ans = vec![WorkCompletion::default(); num_entries];
+    /// Poll `num_entries` work completions from CQ
+    fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
+        let mut ans: Vec<WorkCompletion> = Vec::with_capacity(num_entries);
+
+        // The capacity equals to the length
+        unsafe { ans.set_len(num_entries) };
+
         let poll_res =
-            unsafe { ibv_poll_cq(self.as_ptr(), num_entries as _, ans.as_mut_ptr() as _) };
-        match poll_res.cmp(&0) {
-            Ordering::Greater | Ordering::Equal => {
-                let poll_res = poll_res as _;
-                for _ in poll_res..num_entries as _ {
-                    ans.remove(poll_res);
-                }
-                assert_eq!(ans.len(), poll_res);
-                Ok(ans)
-            }
-            Ordering::Less => Err(io::Error::new(io::ErrorKind::WouldBlock, "")),
+            unsafe { ibv_poll_cq(self.as_ptr(), num_entries.cast(), ans.as_mut_ptr().cast()) };
+        if poll_res >= 0_i32 {
+            let poll_res = poll_res.cast();
+
+            // the length equals to the poll results length
+            unsafe { ans.set_len(poll_res) };
+            ans.shrink_to(poll_res);
+
+            assert_eq!(ans.len(), poll_res);
+            assert_eq!(ans.capacity(), poll_res);
+            Ok(ans)
+        } else {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, ""))
         }
     }
 
-    pub fn poll_single(&self) -> io::Result<WorkCompletion> {
+    /// Poll one work completion from CQ
+    pub(crate) fn poll_single(&self) -> io::Result<WorkCompletion> {
         let polled = self.poll(1)?;
         polled
             .into_iter()
@@ -82,8 +89,9 @@ impl CompletionQueue {
             .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, ""))
     }
 
+    /// Get the internal event channel
     pub fn event_channel(&self) -> &EventChannel {
-        self.ec.as_ref().unwrap()
+        &self.ec
     }
 }
 
@@ -94,29 +102,29 @@ unsafe impl Send for CompletionQueue {}
 impl Drop for CompletionQueue {
     fn drop(&mut self) {
         let errno = unsafe { ibv_destroy_cq(self.as_ptr()) };
-        assert_eq!(errno, 0);
+        assert_eq!(errno, 0_i32);
     }
 }
 
+/// Work Completion
 #[repr(C)]
 pub struct WorkCompletion {
+    /// The internal ibv work completion
     inner_wc: ibv_wc,
 }
 
 impl WorkCompletion {
-    pub fn as_ptr(&self) -> *mut ibv_wc {
-        &self.inner_wc as *const _ as _
-    }
-
-    pub fn wr_id(&self) -> WorkRequestId {
+    /// Get work request Id
+    pub(crate) const fn wr_id(&self) -> WorkRequestId {
         WorkRequestId(self.inner_wc.wr_id)
     }
 
-    pub fn err(&self) -> Result<usize, WCError> {
+    /// Get work completion result, if success returns length, otherwise returns error
+    pub(crate) fn err(&self) -> Result<usize, WCError> {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
-            Ok(self.inner_wc.byte_len as usize)
+            Ok(self.inner_wc.byte_len.cast())
         } else {
-            Err(WCError::from_u32(self.inner_wc.status).unwrap())
+            Err(WCError::from_u32(self.inner_wc.status).unwrap_or(WCError::UnexpectedErr))
         }
     }
 }
@@ -137,23 +145,17 @@ impl Default for WorkCompletion {
     }
 }
 
-impl Clone for WorkCompletion {
-    fn clone(&self) -> Self {
-        let ans = Self::default();
-        unsafe { ptr::copy(self.as_ptr(), ans.as_ptr(), 1) };
-        ans
-    }
-}
-
-#[derive(Error, Debug, FromPrimitive)]
+/// Wrapper for work completion error
+#[allow(clippy::missing_docs_in_private_items)]
+#[derive(Error, Debug, FromPrimitive, Copy, Clone)]
 pub enum WCError {
     #[error("Local Length Error: this happens if a Work Request that was posted in a local Send Queue contains a message that is greater than the maximum message size that is supported by the RDMA device port that should send the message or an Atomic operation which its size is different than 8 bytes was sent. This also may happen if a Work Request that was posted in a local Receive Queue isn't big enough for holding the incoming message or if the incoming message size if greater the maximum message size supported by the RDMA device port that received the message.")]
     LocLenErr = 1,
     #[error("Local QP Operation Error: an internal QP consistency error was detected while processing this Work Request: this happens if a Work Request that was posted in a local Send Queue of a UD QP contains an Address Handle that is associated with a Protection Domain to a QP which is associated with a different Protection Domain or an opcode which isn't supported by the transport type of the QP isn't supported (for example: RDMA Write over a UD QP).")]
     LocQpOpErr = 2,
-    #[error("Local EE Context Operation Error: an internal EE Context consistency error was detected while processing this Work Request (unused, since its relevant only to RD QPs or EE Context, which aren’t supported).")]
+    #[error("Local EE Context Operation Error: an internal EE Context consistency error was detected while processing this Work Request (unused, since its relevant only to RD QPs or EE Context, which aren't supported).")]
     LocEecOpErr = 3,
-    #[error("Local Protection Error: the locally posted Work Request’s buffers in the scatter/gather list does not reference a Memory Region that is valid for the requested operation.")]
+    #[error("Local Protection Error: the locally posted Work Request's buffers in the scatter/gather list does not reference a Memory Region that is valid for the requested operation.")]
     LocProtErr = 4,
     #[error("Work Request Flushed Error: A Work Request was in process or outstanding when the QP transitioned into the Error State.")]
     WrFlushErr = 5,
@@ -189,28 +191,35 @@ pub enum WCError {
     RespTimeout = 20,
     #[error("General Error: other error which isn't one of the above errors.")]
     GeneralErr = 21,
+    #[error("Unexpected Error.")]
+    UnexpectedErr = 100,
+    #[error("Failed to submit the request")]
+    FailToSubmit = 101,
 }
 
 impl From<WCError> for io::Error {
+    #[inline]
     fn from(e: WCError) -> Self {
-        io::Error::new(io::ErrorKind::Other, e)
+        Self::new(io::ErrorKind::Other, e)
     }
 }
 
+/// Work request id
 #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
 pub struct WorkRequestId(u64);
 
 impl WorkRequestId {
+    /// Creat a new work request id
     pub fn new() -> Self {
         let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
+        // No time can be earlier than Unix Epoch
+        #[allow(clippy::unwrap_used)]
+        let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
         let time = since_the_epoch.subsec_micros();
         let rand = rand::thread_rng().gen::<u32>();
         let left: u64 = time.into();
         let right: u64 = rand.into();
-        Self((left << 32) | right)
+        Self(left.overflow_shl(32) | right)
     }
 }
 
@@ -221,6 +230,7 @@ impl Default for WorkRequestId {
 }
 
 impl From<WorkRequestId> for u64 {
+    #[inline]
     fn from(wr_id: WorkRequestId) -> Self {
         wr_id.0
     }

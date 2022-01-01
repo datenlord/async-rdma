@@ -3,7 +3,7 @@ use std::{alloc::Layout, sync::Arc};
 use tracing::debug;
 
 async fn example1(rdma: &Rdma) {
-    let rmr = Arc::new(rdma.alloc_remote_mr(Layout::new::<i32>()).await.unwrap());
+    let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<i32>()).await.unwrap());
     let mut lmr = rdma.alloc_local_mr(Layout::new::<i32>()).unwrap();
     unsafe { *(lmr.as_mut_ptr() as *mut i32) = 5 };
     rdma.write(&lmr, rmr.as_ref()).await.unwrap();
@@ -30,7 +30,7 @@ async fn example3(rdma: &Rdma) {
 async fn main() {
     tracing_subscriber::fmt::init();
     debug!("client start");
-    let rdma = Rdma::connect("127.0.0.1:5555").await.unwrap();
+    let rdma = Rdma::connect("127.0.0.1:5555", 1, 1, 512).await.unwrap();
     example1(&rdma).await;
     example2(&rdma).await;
     example3(&rdma).await;

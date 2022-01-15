@@ -5,6 +5,7 @@ use rand::Rng;
 use rdma_sys::{
     ibv_cq, ibv_create_cq, ibv_destroy_cq, ibv_poll_cq, ibv_req_notify_cq, ibv_wc, ibv_wc_status,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     io, mem,
@@ -205,7 +206,7 @@ impl From<WCError> for io::Error {
 }
 
 /// Work request id
-#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WorkRequestId(u64);
 
 impl WorkRequestId {

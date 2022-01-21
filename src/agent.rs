@@ -1,7 +1,5 @@
 use crate::{
-    memory_region::{
-        Local, LocalMemoryRegion, MemoryRegion, MemoryRegionToken, RemoteMemoryRegion,
-    },
+    memory_region::{LocalMemoryRegion, MemoryRegionToken, RemoteMemoryRegion},
     mr_allocator::MRAllocator,
     queue_pair::QueuePair,
 };
@@ -30,8 +28,10 @@ use utilities::{Cast, OverflowArithmetic};
 pub struct Agent {
     /// The agent inner implementation, which may be shared in many MRs
     inner: Arc<AgentInner>,
-    /// MR information receiver from agent thread
-    mr_recv: Mutex<Receiver<io::Result<Arc<dyn Any + Send + Sync>>>>,
+    /// Local MR information receiver from agent thread
+    local_mr_recv: Mutex<Receiver<Arc<LocalMemoryRegion>>>,
+    /// Remote MR information receiver from agent thread
+    remote_mr_recv: Mutex<Receiver<RemoteMemoryRegion>>,
     /// Data receiver from agent thread
     data_recv: Mutex<Receiver<LocalMemoryRegion>>,
     /// Join handle for the agent background thread
@@ -55,9 +55,11 @@ impl Agent {
     ) -> io::Result<Self> {
         let response_waits = Arc::new(Mutex::new(HashMap::new()));
         let mr_own = Arc::new(Mutex::new(HashMap::new()));
-        let (mr_send, mr_recv) = channel(1024);
+        let (local_mr_send, local_mr_recv) = channel(1024);
+        let (remote_mr_send, remote_mr_recv) = channel(1024);
         let (data_send, data_recv) = channel(1024);
-        let mr_recv_mutex = Mutex::new(mr_recv);
+        let local_mr_recv = Mutex::new(local_mr_recv);
+        let remote_mr_recv = Mutex::new(remote_mr_recv);
         let data_recv_mutex = Mutex::new(data_recv);
         let inner = Arc::new(AgentInner {
             qp,
@@ -68,17 +70,19 @@ impl Agent {
         });
         let handle = AgentThread::run(
             Arc::<AgentInner>::clone(&inner),
-            mr_send,
+            local_mr_send,
+            remote_mr_send,
             data_send,
             max_message_len,
         )?;
 
         Ok(Self {
             inner,
-            mr_recv: mr_recv_mutex,
             data_recv: data_recv_mutex,
             handle,
             max_message_len,
+            local_mr_recv,
+            remote_mr_recv,
         })
     }
 
@@ -123,12 +127,24 @@ impl Agent {
         Ok(())
     }
 
-    /// Receive a memory region metadata from the other side
-    pub(crate) async fn receive_mr(&self) -> io::Result<Arc<dyn Any + Send + Sync>> {
-        self.mr_recv.lock().await.recv().await.map_or_else(
-            || Err(io::Error::new(io::ErrorKind::Other, "mr channel closed")),
-            |mr| mr,
-        )
+    /// Receive a local memory region metadata from the other side
+    pub(crate) async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
+        self.local_mr_recv
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "mr channel closed"))
+    }
+
+    /// Receive a local memory region metadata from the other side
+    pub(crate) async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
+        self.remote_mr_recv
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "mr channel closed"))
     }
 
     /// Send the content in the `lm` to the other side
@@ -187,8 +203,10 @@ impl Agent {
 struct AgentThread {
     /// The agent part that may be shared in the memory region
     inner: Arc<AgentInner>,
-    /// The channel sender to send mr meta from the other side
-    mr_send: Sender<io::Result<Arc<dyn Any + Send + Sync>>>,
+    /// The channel sender to send local mr meta from the other side
+    local_mr_send: Sender<Arc<LocalMemoryRegion>>,
+    /// The channel sender to send remote mr meta from the other side
+    remote_mr_send: Sender<RemoteMemoryRegion>,
     /// The channel sender to send data from the other side
     data_send: Sender<LocalMemoryRegion>,
     /// Max message length
@@ -199,13 +217,15 @@ impl AgentThread {
     /// Spawn a main task to tokio thread pool
     fn run(
         inner: Arc<AgentInner>,
-        mr_send: Sender<io::Result<Arc<dyn Any + Send + Sync>>>,
+        local_mr_send: Sender<Arc<LocalMemoryRegion>>,
+        remote_mr_send: Sender<RemoteMemoryRegion>,
         data_send: Sender<LocalMemoryRegion>,
         max_message_len: usize,
     ) -> io::Result<JoinHandle<io::Result<()>>> {
         let agent = Arc::new(Self {
             inner,
-            mr_send,
+            local_mr_send,
+            remote_mr_send,
             data_send,
             max_message_len,
         });
@@ -306,16 +326,16 @@ impl AgentThread {
                 match param.kind {
                     SendMRKind::Local(token) => {
                         assert!(self
-                            .mr_send
-                            .send(Ok(Arc::new(RemoteMemoryRegion::new_from_token(
+                            .remote_mr_send
+                            .send(RemoteMemoryRegion::new_from_token(
                                 token,
                                 Arc::<AgentInner>::clone(&self.inner)
-                            ))))
+                            ))
                             .await
                             .is_ok());
                     }
                     SendMRKind::Remote(token) => {
-                        let mr = Arc::<MemoryRegion<Local>>::clone(
+                        let mr = Arc::clone(
                             self.inner.mr_own.lock().await.get(&token).ok_or_else(|| {
                                 io::Error::new(
                                     io::ErrorKind::Other,
@@ -323,7 +343,7 @@ impl AgentThread {
                                 )
                             })?,
                         );
-                        assert!(self.mr_send.send(Ok(mr)).await.is_ok());
+                        assert!(self.local_mr_send.send(mr).await.is_ok());
                     }
                 }
                 ResponseKind::SendMR(SendMRResponse {})

@@ -318,25 +318,21 @@ impl Rdma {
     /// The send the content in the `lm`
     #[inline]
     pub async fn send(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
-        Arc::<Agent>::clone(
-            self.agent
-                .as_ref()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?,
-        )
-        .send_data(lm)
-        .await
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .send_data(lm)
+            .await
     }
 
     /// Receive the content and stored in the returned memory region
     #[inline]
     pub async fn receive(&self) -> io::Result<LocalMemoryRegion> {
-        Arc::<Agent>::clone(
-            self.agent
-                .as_ref()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?,
-        )
-        .receive_data()
-        .await
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .receive_data()
+            .await
     }
 
     /// Read content in the `rm` and store the content in the `lm`
@@ -425,11 +421,11 @@ impl Rdma {
         }
     }
 
-    /// Receive a memory region
+    /// Receive a local memory region
     #[inline]
-    async fn receive_mr(&self) -> io::Result<Arc<dyn Any + Send + Sync>> {
+    pub async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
         if let Some(ref agent) = self.agent {
-            agent.receive_mr().await
+            agent.receive_local_mr().await
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -438,26 +434,17 @@ impl Rdma {
         }
     }
 
-    /// Receive a local memory region
-    #[inline]
-    pub async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
-        Ok(self.receive_mr().await?.downcast().map_err(|orig| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to downcast {:?} to Arc<LocalMemoryRegion>", orig),
-            )
-        })?)
-    }
-
     /// Receive a remote memory region
     #[inline]
-    pub async fn receive_remote_mr(&self) -> io::Result<Arc<RemoteMemoryRegion>> {
-        Ok(self.receive_mr().await?.downcast().map_err(|orig| {
-            io::Error::new(
+    pub async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
+        if let Some(ref agent) = self.agent {
+            agent.receive_remote_mr().await
+        } else {
+            Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("failed to downcast {:?} to Arc<RemoteMemoryRegion>", orig),
-            )
-        })?)
+                "Agent is not ready, please wait a while",
+            ))
+        }
     }
 }
 

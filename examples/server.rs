@@ -11,7 +11,7 @@ async fn example2(rdma: &Rdma) {
     let rmr = rdma.receive_remote_mr().await.unwrap();
     debug!("e2 receive");
     let mut lmr = rdma.alloc_local_mr(Layout::new::<i32>()).unwrap();
-    rdma.read(&mut lmr, rmr.as_ref()).await.unwrap();
+    rdma.read(&mut lmr, &rmr).await.unwrap();
     debug!("e2 read");
     dbg!(unsafe { *(lmr.as_ptr() as *mut i32) });
 }

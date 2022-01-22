@@ -4,9 +4,9 @@ use std::{alloc::Layout, io, ptr::NonNull, sync::Arc};
 
 /// Protection Domain Wrapper
 #[derive(Debug)]
-pub struct ProtectionDomain {
+pub(crate) struct ProtectionDomain {
     /// The device context
-    pub(super) ctx: Arc<Context>,
+    pub(crate) ctx: Arc<Context>,
     /// Internal `ibv_pd` pointer
     inner_pd: NonNull<ibv_pd>,
 }
@@ -18,7 +18,7 @@ impl ProtectionDomain {
     }
 
     /// Create a protection domain
-    pub fn create(ctx: &Arc<Context>) -> io::Result<Self> {
+    pub(crate) fn create(ctx: &Arc<Context>) -> io::Result<Self> {
         let inner_pd =
             NonNull::new(unsafe { ibv_alloc_pd(ctx.as_ptr()) }).ok_or(io::ErrorKind::Other)?;
         Ok(Self {
@@ -28,12 +28,12 @@ impl ProtectionDomain {
     }
 
     /// Create a queue pair builder
-    pub fn create_queue_pair_builder(self: &Arc<Self>) -> QueuePairBuilder {
+    pub(crate) fn create_queue_pair_builder(self: &Arc<Self>) -> QueuePairBuilder {
         QueuePairBuilder::new(self)
     }
 
     /// Alloca a memory region
-    pub fn alloc_memory_region(
+    pub(crate) fn alloc_memory_region(
         self: &Arc<Self>,
         layout: Layout,
         access: ibv_access_flags,

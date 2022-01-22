@@ -6,28 +6,31 @@ use tokio::io::unix::AsyncFd;
 
 /// Event channel wrapper for `ibv_comp_channel`
 #[derive(Debug)]
-pub struct EventChannel {
+pub(crate) struct EventChannel {
     /// The ibv device context
-    pub ctx: Arc<Context>,
+    _ctx: Arc<Context>,
     /// The inner ibv_comp_channel pointer
-    pub inner_ec: NonNull<ibv_comp_channel>,
+    inner_ec: NonNull<ibv_comp_channel>,
 }
 
 impl EventChannel {
     /// Get the inner `ibv_comp_channel` pointer
-    pub fn as_ptr(&self) -> *mut ibv_comp_channel {
+    pub(crate) fn as_ptr(&self) -> *mut ibv_comp_channel {
         self.inner_ec.as_ptr()
     }
 
     /// Create a new `EventChannel`
-    pub fn new(ctx: Arc<Context>) -> io::Result<Self> {
+    pub(crate) fn new(ctx: Arc<Context>) -> io::Result<Self> {
         let inner_ec = NonNull::new(unsafe { ibv_create_comp_channel(ctx.as_ptr()) })
             .ok_or(io::ErrorKind::Other)?;
-        Ok(Self { ctx, inner_ec })
+        Ok(Self {
+            _ctx: ctx,
+            inner_ec,
+        })
     }
 
     /// Get the event channel fd and wrap it into Tokio `AsyncFd`
-    pub fn async_fd(&self) -> io::Result<AsyncFd<RawFd>> {
+    pub(crate) fn async_fd(&self) -> io::Result<AsyncFd<RawFd>> {
         AsyncFd::new(unsafe { *self.as_ptr() }.fd.as_raw_fd())
     }
 }

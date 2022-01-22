@@ -5,7 +5,7 @@ use utilities::OverflowArithmetic;
 
 /// Memory region allocator
 #[derive(Debug)]
-pub struct MRAllocator {
+pub(crate) struct MRAllocator {
     /// Protection domain that holds the allocator
     _pd: Arc<ProtectionDomain>,
     /// The initial MR, and all allocated MRs comes from here
@@ -15,7 +15,7 @@ pub struct MRAllocator {
 impl MRAllocator {
     /// Create a new MR allocator
     #[allow(clippy::unwrap_in_result)]
-    pub fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self> {
+    pub(crate) fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self> {
         let access = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_READ
@@ -33,7 +33,7 @@ impl MRAllocator {
     }
 
     /// Allocate a MR according to the `layout`
-    pub fn alloc(&self, layout: &Layout) -> io::Result<LocalMemoryRegion> {
+    pub(crate) fn alloc(&self, layout: &Layout) -> io::Result<LocalMemoryRegion> {
         self.mr.alloc(layout)
     }
 }

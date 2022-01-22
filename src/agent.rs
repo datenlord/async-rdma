@@ -25,7 +25,7 @@ use utilities::{Cast, OverflowArithmetic};
 
 /// An agent for handling the dirty rdma request and async events
 #[derive(Debug)]
-pub struct Agent {
+pub(crate) struct Agent {
     /// The agent inner implementation, which may be shared in many MRs
     inner: Arc<AgentInner>,
     /// Local MR information receiver from agent thread
@@ -148,7 +148,7 @@ impl Agent {
     }
 
     /// Send the content in the `lm` to the other side
-    pub async fn send_data(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
+    pub(crate) async fn send_data(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
         let mut start = 0;
         let lm_len = lm.length();
         let max_content_len = self.max_message_len.overflow_sub(*SEND_DATA_OFFSET);
@@ -189,7 +189,7 @@ impl Agent {
     }
 
     /// Receive content sent from the other side and stored in the return value
-    pub async fn receive_data(&self) -> io::Result<LocalMemoryRegion> {
+    pub(crate) async fn receive_data(&self) -> io::Result<LocalMemoryRegion> {
         self.data_recv
             .lock()
             .await
@@ -422,7 +422,7 @@ impl AgentThread {
 
 /// The inner agent that may be shared in different MRs
 #[derive(Debug)]
-pub struct AgentInner {
+pub(crate) struct AgentInner {
     /// The Queue Pair used to communicate with other side
     qp: Arc<QueuePair>,
     /// The map holding the waiters that waits the response
@@ -437,7 +437,7 @@ pub struct AgentInner {
 
 impl AgentInner {
     /// Request a remote MR from the other side
-    pub async fn request_remote_mr(
+    pub(crate) async fn request_remote_mr(
         self: &Arc<Self>,
         layout: Layout,
     ) -> io::Result<RemoteMemoryRegion> {
@@ -464,7 +464,7 @@ impl AgentInner {
     }
 
     /// Release a remote MR got from the other side
-    pub async fn release_mr(&self, token: MemoryRegionToken) -> io::Result<()> {
+    pub(crate) async fn release_mr(&self, token: MemoryRegionToken) -> io::Result<()> {
         let request = Request {
             request_id: RequestId::new(),
             kind: RequestKind::ReleaseMR(ReleaseMRRequest { token }),

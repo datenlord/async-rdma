@@ -5,7 +5,7 @@ use rdma_sys::ibv_gid;
     serde::Serialize, serde::Deserialize, Default, Copy, Clone, Debug, Eq, PartialEq, Hash,
 )]
 #[repr(transparent)]
-pub struct Gid {
+pub(crate) struct Gid {
     /// Gid raw data
     raw: [u8; 16],
 }

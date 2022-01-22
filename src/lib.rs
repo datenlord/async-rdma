@@ -59,6 +59,8 @@ mod event_channel;
 mod event_listener;
 /// Gid for device
 mod gid;
+/// id utils
+mod id;
 /// Memory region abstraction
 mod memory_region;
 /// Memory window abstraction

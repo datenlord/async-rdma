@@ -6,18 +6,18 @@ use rdma_sys::{
     ibv_close_device, ibv_context, ibv_free_device_list, ibv_get_device_list, ibv_get_device_name,
     ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
-use std::{ffi::CStr, fmt::Debug, io, ptr::NonNull, sync::Arc};
+use std::{ffi::CStr, fmt::Debug, io, ops::Sub, ptr::NonNull, sync::Arc};
 use tracing::warn;
 use utilities::Cast;
 
 /// RDMA device context
-pub struct Context {
+pub(crate) struct Context {
     /// internal ibv context
-    pub inner_ctx: NonNull<ibv_context>,
+    inner_ctx: NonNull<ibv_context>,
     /// ibv port attribute
-    pub inner_port_attr: ibv_port_attr,
+    inner_port_attr: ibv_port_attr,
     /// Gid
-    pub gid: Gid,
+    gid: Gid,
 }
 
 impl Debug for Context {
@@ -36,7 +36,7 @@ impl Context {
     }
 
     /// Create a new context based on the provided device name, port number and gid index
-    pub fn open(dev_name: Option<&str>, port_num: u8, gid_index: usize) -> io::Result<Self> {
+    pub(crate) fn open(dev_name: Option<&str>, port_num: u8, gid_index: usize) -> io::Result<Self> {
         let mut num_devs: i32 = 0;
         let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
         if dev_list_ptr.is_null() {
@@ -71,12 +71,12 @@ impl Context {
         let mut errno =
             unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index.cast(), gid.as_mut()) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
         errno = unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(Context {
             inner_ctx,
@@ -86,12 +86,12 @@ impl Context {
     }
 
     /// Create an event channel
-    pub fn create_event_channel(self: &Arc<Self>) -> io::Result<EventChannel> {
+    pub(crate) fn create_event_channel(self: &Arc<Self>) -> io::Result<EventChannel> {
         EventChannel::new(Arc::<Self>::clone(self))
     }
 
     /// Create a completion queue
-    pub fn create_completion_queue(
+    pub(crate) fn create_completion_queue(
         &self,
         cq_size: u32,
         event_channel: EventChannel,
@@ -100,17 +100,21 @@ impl Context {
     }
 
     /// Create a protection domain
-    pub fn create_protection_domain(self: &Arc<Self>) -> io::Result<ProtectionDomain> {
+    pub(crate) fn create_protection_domain(self: &Arc<Self>) -> io::Result<ProtectionDomain> {
         ProtectionDomain::create(self)
+    }
+    /// Get port Lid
+    pub(crate) fn get_gid(&self) -> Gid {
+        self.gid
     }
 
     /// Get port Lid
-    pub fn get_lid(&self) -> u16 {
+    pub(crate) fn get_lid(&self) -> u16 {
         self.inner_port_attr.lid
     }
 
     /// Get the port MTU
-    pub fn get_active_mtu(&self) -> u32 {
+    pub(crate) fn get_active_mtu(&self) -> u32 {
         self.inner_port_attr.active_mtu
     }
 }

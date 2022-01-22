@@ -40,12 +40,12 @@ impl<T: RemoteKey> MemoryRegion<T> {
     }
 
     /// Get the remote key
-    pub fn rkey(&self) -> u32 {
+    pub(crate) fn rkey(&self) -> u32 {
         self.inner.rkey()
     }
 
     /// Get the token for the remote access
-    pub fn token(&self) -> MemoryRegionToken {
+    pub(crate) fn token(&self) -> MemoryRegionToken {
         MemoryRegionToken {
             addr: self.inner.addr,
             len: self.inner.len,
@@ -67,7 +67,7 @@ impl<T: RemoteKey> MemoryRegion<T> {
     /// the return value is also a `MemoryRegion` type if success.
     ///
     /// Return error if there's no enough resource
-    pub fn alloc(&self, layout: &Layout) -> io::Result<Self> {
+    pub(crate) fn alloc(&self, layout: &Layout) -> io::Result<Self> {
         Ok(Self {
             inner: Arc::new(self.inner.alloc(layout)?),
         })
@@ -76,13 +76,13 @@ impl<T: RemoteKey> MemoryRegion<T> {
 
 /// Memory region token used for the remote access
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub struct MemoryRegionToken {
+pub(crate) struct MemoryRegionToken {
     /// The start address
-    pub addr: usize,
+    pub(crate) addr: usize,
     /// The length
-    pub len: usize,
+    pub(crate) len: usize,
     /// The rkey
-    pub rkey: u32,
+    pub(crate) rkey: u32,
 }
 
 /// Remote key for remote access
@@ -122,7 +122,7 @@ impl<T: RemoteKey> MemoryRegionKind<T> {
 
 /// The real memory region structure, maybe shared
 #[derive(Debug)]
-pub struct InnerMr<T: RemoteKey> {
+pub(crate) struct InnerMr<T: RemoteKey> {
     /// The start address of thie MR
     addr: usize,
     /// the length of this MR
@@ -264,7 +264,7 @@ impl InnerMr<Local> {
 }
 
 /// Local Memory Region type
-pub type LocalMemoryRegion = MemoryRegion<Local>;
+pub(crate) type LocalMemoryRegion = MemoryRegion<Local>;
 
 impl LocalMemoryRegion {
     /// get the memory region start mut addr
@@ -285,12 +285,12 @@ impl LocalMemoryRegion {
     }
 
     /// get local key
-    pub fn lkey(&self) -> u32 {
+    pub(crate) fn lkey(&self) -> u32 {
         self.inner.lkey()
     }
 
     /// Create a local memory region from protection domain
-    pub fn new_from_pd(
+    pub(crate) fn new_from_pd(
         pd: &Arc<ProtectionDomain>,
         layout: Layout,
         access: ibv_access_flags,
@@ -334,11 +334,11 @@ impl Drop for Remote {
 }
 
 /// Remote memory region type
-pub type RemoteMemoryRegion = MemoryRegion<Remote>;
+pub(crate) type RemoteMemoryRegion = MemoryRegion<Remote>;
 
 impl RemoteMemoryRegion {
     /// Create a remote memory region from the `token`
-    pub fn new_from_token(token: MemoryRegionToken, agent: Arc<AgentInner>) -> Self {
+    pub(crate) fn new_from_token(token: MemoryRegionToken, agent: Arc<AgentInner>) -> Self {
         let addr = token.addr;
         let len = token.len;
         let remote = Remote { token, agent };

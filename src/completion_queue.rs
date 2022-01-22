@@ -8,6 +8,7 @@ use rdma_sys::{
 use std::{
     fmt::Debug,
     io, mem,
+    ops::Sub,
     ptr::NonNull,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,7 +17,7 @@ use utilities::{Cast, OverflowArithmetic};
 
 /// Complete Queue Structure
 #[derive(Debug)]
-pub struct CompletionQueue {
+pub(crate) struct CompletionQueue {
     /// Event Channel
     ec: EventChannel,
     /// Real Completion Queue
@@ -51,13 +52,13 @@ impl CompletionQueue {
             ibv_req_notify_cq(self.inner_cq.as_ptr(), if solicited_only { 1 } else { 0 })
         };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
 
     /// Poll `num_entries` work completions from CQ
-    fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
+    pub(crate) fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
         let mut ans: Vec<WorkCompletion> = Vec::with_capacity(num_entries);
 
         // The capacity equals to the length
@@ -90,7 +91,7 @@ impl CompletionQueue {
     }
 
     /// Get the internal event channel
-    pub fn event_channel(&self) -> &EventChannel {
+    pub(crate) fn event_channel(&self) -> &EventChannel {
         &self.ec
     }
 }
@@ -108,7 +109,7 @@ impl Drop for CompletionQueue {
 
 /// Work Completion
 #[repr(C)]
-pub struct WorkCompletion {
+pub(crate) struct WorkCompletion {
     /// The internal ibv work completion
     inner_wc: ibv_wc,
 }
@@ -120,7 +121,7 @@ impl WorkCompletion {
     }
 
     /// Get work completion result, if success returns length, otherwise returns error
-    pub(crate) fn err(&self) -> Result<usize, WCError> {
+    pub(crate) fn result(&self) -> Result<usize, WCError> {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
             Ok(self.inner_wc.byte_len.cast())
         } else {
@@ -148,7 +149,7 @@ impl Default for WorkCompletion {
 /// Wrapper for work completion error
 #[allow(clippy::missing_docs_in_private_items)]
 #[derive(Error, Debug, FromPrimitive, Copy, Clone)]
-pub enum WCError {
+pub(crate) enum WCError {
     #[error("Local Length Error: this happens if a Work Request that was posted in a local Send Queue contains a message that is greater than the maximum message size that is supported by the RDMA device port that should send the message or an Atomic operation which its size is different than 8 bytes was sent. This also may happen if a Work Request that was posted in a local Receive Queue isn't big enough for holding the incoming message or if the incoming message size if greater the maximum message size supported by the RDMA device port that received the message.")]
     LocLenErr = 1,
     #[error("Local QP Operation Error: an internal QP consistency error was detected while processing this Work Request: this happens if a Work Request that was posted in a local Send Queue of a UD QP contains an Address Handle that is associated with a Protection Domain to a QP which is associated with a different Protection Domain or an opcode which isn't supported by the transport type of the QP isn't supported (for example: RDMA Write over a UD QP).")]
@@ -206,11 +207,11 @@ impl From<WCError> for io::Error {
 
 /// Work request id
 #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
-pub struct WorkRequestId(u64);
+pub(crate) struct WorkRequestId(u64);
 
 impl WorkRequestId {
     /// Creat a new work request id
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let start = SystemTime::now();
         // No time can be earlier than Unix Epoch
         #[allow(clippy::unwrap_used)]

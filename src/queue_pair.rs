@@ -6,7 +6,7 @@ use crate::{
     protection_domain::ProtectionDomain,
     work_request::{RecvWr, SendWr},
 };
-use futures::{ready, Future};
+use futures::{ready, Future, FutureExt};
 use rdma_sys::{
     ibv_access_flags, ibv_cq, ibv_destroy_qp, ibv_modify_qp, ibv_post_recv, ibv_post_send, ibv_qp,
     ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr, ibv_qp_state, ibv_recv_wr, ibv_send_wr,
@@ -15,12 +15,17 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     io,
+    ops::Sub,
     pin::Pin,
     ptr::{self, NonNull},
     sync::Arc,
     task::Poll,
+    time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{sleep, Sleep},
+};
 use tracing::debug;
 use utilities::Cast;
 
@@ -73,9 +78,9 @@ impl Debug for QueuePairInitAttr {
 
 /// Queue pair builder
 #[derive(Debug)]
-pub struct QueuePairBuilder {
+pub(crate) struct QueuePairBuilder {
     /// Protection domain it belongs to
-    pub pd: Arc<ProtectionDomain>,
+    pd: Arc<ProtectionDomain>,
     /// Event linstener
     event_listener: Option<EventListener>,
     /// Queue pair init attribute
@@ -88,7 +93,7 @@ pub struct QueuePairBuilder {
 
 impl QueuePairBuilder {
     /// Create a new queue pair builder
-    pub fn new(pd: &Arc<ProtectionDomain>) -> Self {
+    pub(crate) fn new(pd: &Arc<ProtectionDomain>) -> Self {
         Self {
             pd: Arc::<ProtectionDomain>::clone(pd),
             qp_init_attr: QueuePairInitAttr::default(),
@@ -99,7 +104,7 @@ impl QueuePairBuilder {
     }
 
     /// Create a queue pair
-    pub fn build(mut self) -> io::Result<QueuePair> {
+    pub(crate) fn build(mut self) -> io::Result<QueuePair> {
         let inner_qp = NonNull::new(unsafe {
             rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut self.qp_init_attr.qp_init_attr_inner)
         })
@@ -119,7 +124,7 @@ impl QueuePairBuilder {
     }
 
     /// Set event listener
-    pub fn set_event_listener(mut self, el: EventListener) -> Self {
+    pub(crate) fn set_event_listener(mut self, el: EventListener) -> Self {
         self.qp_init_attr.qp_init_attr_inner.send_cq = el.cq.as_ptr();
         self.qp_init_attr.qp_init_attr_inner.recv_cq = el.cq.as_ptr();
         self.event_listener = Some(el);
@@ -141,7 +146,7 @@ impl QueuePairBuilder {
 
 /// Queue pair information used to hand shake
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct QueuePairEndpoint {
+pub(crate) struct QueuePairEndpoint {
     /// queue pair number
     qp_num: u32,
     /// lid
@@ -152,7 +157,7 @@ pub struct QueuePairEndpoint {
 
 /// Queue pair wrapper
 #[derive(Debug)]
-pub struct QueuePair {
+pub(crate) struct QueuePair {
     /// protection domain it belongs to
     pd: Arc<ProtectionDomain>,
     /// event listener
@@ -172,16 +177,16 @@ impl QueuePair {
     }
 
     /// get queue pair endpoint
-    pub fn endpoint(&self) -> QueuePairEndpoint {
+    pub(crate) fn endpoint(&self) -> QueuePairEndpoint {
         QueuePairEndpoint {
             qp_num: unsafe { (*self.as_ptr()).qp_num },
             lid: self.pd.ctx.get_lid(),
-            gid: self.pd.ctx.gid,
+            gid: self.pd.ctx.get_gid(),
         }
     }
 
     /// modify the queue pair state to init
-    pub fn modify_to_init(&self, flag: ibv_access_flags, port_num: u8) -> io::Result<()> {
+    pub(crate) fn modify_to_init(&self, flag: ibv_access_flags, port_num: u8) -> io::Result<()> {
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.pkey_index = 0;
         attr.port_num = port_num;
@@ -193,13 +198,13 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
 
     /// modify the queue pair state to ready to receive
-    pub fn modify_to_rtr(
+    pub(crate) fn modify_to_rtr(
         &self,
         remote: QueuePairEndpoint,
         start_psn: u32,
@@ -231,16 +236,16 @@ impl QueuePair {
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         debug!(
             "modify qp to rtr, err info : {:?}",
-            io::Error::from_raw_os_error(errno)
+            io::Error::from_raw_os_error(0_i32.sub(errno))
         );
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
 
     /// modify the queue pair state to ready to send
-    pub fn modify_to_rts(
+    pub(crate) fn modify_to_rts(
         &self,
         timeout: u8,
         retry_cnt: u8,
@@ -263,7 +268,7 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
@@ -275,7 +280,7 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
@@ -287,7 +292,7 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
@@ -304,7 +309,7 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
@@ -321,13 +326,13 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            return Err(io::Error::from_raw_os_error(errno));
+            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
     }
 
     /// send a slice of local memory regions
-    pub fn send_sge<'a>(
+    pub(crate) fn send_sge<'a>(
         self: &Arc<Self>,
         lms: &[&'a LocalMemoryRegion],
     ) -> QueuePairOps<QPSend<'a>> {
@@ -336,7 +341,7 @@ impl QueuePair {
     }
 
     /// receive data to a local memory region
-    pub fn receive_sge<'a>(
+    pub(crate) fn receive_sge<'a>(
         self: &Arc<Self>,
         lms: &[&'a LocalMemoryRegion],
     ) -> QueuePairOps<QPRecv<'a>> {
@@ -345,7 +350,7 @@ impl QueuePair {
     }
 
     /// read data from `rm` to `lms`
-    pub async fn read_sge(
+    pub(crate) async fn read_sge(
         &self,
         lms: &[&LocalMemoryRegion],
         rm: &RemoteMemoryRegion,
@@ -357,13 +362,13 @@ impl QueuePair {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
-            .err()
+            .result()
             .map(|sz| assert_eq!(sz, len))
             .map_err(Into::into)
     }
 
     /// write data from `lms` to `rm`
-    pub async fn write_sge(
+    pub(crate) async fn write_sge(
         &self,
         lms: &[&LocalMemoryRegion],
         rm: &RemoteMemoryRegion,
@@ -375,23 +380,23 @@ impl QueuePair {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
-            .err()
+            .result()
             .map(|sz| assert_eq!(sz, len))
             .map_err(Into::into)
     }
 
     /// Send data in `lm`
-    pub fn send(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPSend> {
+    pub(crate) fn send(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPSend> {
         self.send_sge(&[lm])
     }
 
     /// Receive data and store it into `lm`
-    pub fn receive(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPRecv> {
+    pub(crate) fn receive(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPRecv> {
         self.receive_sge(&[lm])
     }
 
     /// read data from `rm` to `lm`
-    pub async fn read(
+    pub(crate) async fn read(
         &self,
         lm: &mut LocalMemoryRegion,
         rm: &RemoteMemoryRegion,
@@ -400,7 +405,11 @@ impl QueuePair {
     }
 
     /// write data from `lm` to `rm`
-    pub async fn write(&self, lm: &LocalMemoryRegion, rm: &RemoteMemoryRegion) -> io::Result<()> {
+    pub(crate) async fn write(
+        &self,
+        lm: &LocalMemoryRegion,
+        rm: &RemoteMemoryRegion,
+    ) -> io::Result<()> {
         self.write_sge(&[lm], rm).await
     }
 }
@@ -416,24 +425,27 @@ impl Drop for QueuePair {
     }
 }
 
+/// Queue pair op resubmit delay, default is 1 sec
+static RESUBMIT_DELAY: Duration = Duration::from_secs(1);
+
 /// Queue pair operation trait
-pub trait QueuePairOp {
+pub(crate) trait QueuePairOp {
     /// work completion output type
     type Output;
 
     /// submit the operation
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()>;
 
-    /// parse the work completion
-    fn parse_wc(&self, wc: WorkCompletion) -> Self::Output;
+    /// should resubmit?
+    fn should_resubmit(&self, e: &io::Error) -> bool;
 
-    /// default error work completion
-    fn failed_to_submit(&self) -> Self::Output;
+    /// get the request result of the work completion
+    fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError>;
 }
 
 /// Queue pair send operation
 #[derive(Debug)]
-pub struct QPSend<'lm> {
+pub(crate) struct QPSend<'lm> {
     /// local memory regions
     lms: Vec<&'lm LocalMemoryRegion>,
     /// length of data to send
@@ -451,24 +463,24 @@ impl<'lm> QPSend<'lm> {
 }
 
 impl QueuePairOp for QPSend<'_> {
-    type Output = Result<(), WCError>;
+    type Output = ();
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
         qp.submit_send(&self.lms, wr_id)
     }
 
-    fn parse_wc(&self, wc: WorkCompletion) -> Self::Output {
-        wc.err().map(|sz| assert_eq!(sz, self.len))
+    fn should_resubmit(&self, e: &io::Error) -> bool {
+        matches!(e.kind(), io::ErrorKind::OutOfMemory)
     }
 
-    fn failed_to_submit(&self) -> Self::Output {
-        Err(WCError::FailToSubmit)
+    fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
+        wc.result().map(|sz| assert_eq!(sz, self.len))
     }
 }
 
 /// Queue pair receive operation
 #[derive(Debug)]
-pub struct QPRecv<'lm> {
+pub(crate) struct QPRecv<'lm> {
     /// the local memory regions
     lms: Vec<&'lm LocalMemoryRegion>,
 }
@@ -481,18 +493,18 @@ impl<'lm> QPRecv<'lm> {
 }
 
 impl QueuePairOp for QPRecv<'_> {
-    type Output = Result<usize, WCError>;
+    type Output = usize;
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
         qp.submit_receive(&self.lms, wr_id)
     }
 
-    fn parse_wc(&self, wc: WorkCompletion) -> Self::Output {
-        wc.err()
+    fn should_resubmit(&self, e: &io::Error) -> bool {
+        matches!(e.kind(), io::ErrorKind::OutOfMemory)
     }
 
-    fn failed_to_submit(&self) -> Self::Output {
-        Err(WCError::FailToSubmit)
+    fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
+        wc.result()
     }
 }
 
@@ -501,13 +513,21 @@ impl QueuePairOp for QPRecv<'_> {
 enum QueuePairOpsState {
     /// It's in init state, not yet submitted
     Init,
+    /// Submit
+    Submit(WorkRequestId, Option<mpsc::Receiver<WorkCompletion>>),
+    /// Sleep and prepare to resubmit
+    PendingToResubmit(
+        Pin<Box<Sleep>>,
+        WorkRequestId,
+        Option<mpsc::Receiver<WorkCompletion>>,
+    ),
     /// have submitted
     Submitted(mpsc::Receiver<WorkCompletion>),
 }
 
 /// Queue pair operation wrapper
 #[derive(Debug)]
-pub struct QueuePairOps<Op: QueuePairOp + Unpin> {
+pub(crate) struct QueuePairOps<Op: QueuePairOp + Unpin> {
     /// the internal queue pair
     qp: Arc<QueuePair>,
     /// operation state
@@ -528,23 +548,49 @@ impl<Op: QueuePairOp + Unpin> QueuePairOps<Op> {
 }
 
 impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
-    type Output = Op::Output;
+    type Output = io::Result<Op::Output>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let s = self.get_mut();
         match s.state {
             QueuePairOpsState::Init => {
                 let (wr_id, recv) = s.qp.event_listener.register();
-                if s.op.submit(&s.qp, wr_id).is_err() {
-                    tracing::error!("failed to submit the operation");
-                    return Poll::Ready(s.op.failed_to_submit());
+                s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::Submit(wr_id, ref mut recv) => {
+                if let Err(e) = s.op.submit(&s.qp, wr_id) {
+                    if s.op.should_resubmit(&e) {
+                        let sleep = Box::pin(sleep(RESUBMIT_DELAY));
+                        s.state = QueuePairOpsState::PendingToResubmit(sleep, wr_id, recv.take());
+                    } else {
+                        tracing::error!("failed to submit the operation");
+                        // TODO: deregister wrid
+                        return Poll::Ready(Err(e));
+                    }
+                } else {
+                    match recv.take().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::Other, "Bug in queue pair op poll")
+                    }) {
+                        Ok(recv) => s.state = QueuePairOpsState::Submitted(recv),
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
                 }
-                s.state = QueuePairOpsState::Submitted(recv);
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::PendingToResubmit(ref mut sleep, wr_id, ref mut recv) => {
+                ready!(sleep.poll_unpin(cx));
+                s.state = QueuePairOpsState::Submit(wr_id, recv.take());
                 Pin::new(s).poll(cx)
             }
             QueuePairOpsState::Submitted(ref mut recv) => {
-                let wc = ready!(recv.poll_recv(cx)).unwrap();
-                Poll::Ready(s.op.parse_wc(wc))
+                Poll::Ready(match ready!(recv.poll_recv(cx)) {
+                    Some(wc) => s.op.result(wc).map_err(Into::into),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Wc receiver unexpect closed",
+                    )),
+                })
             }
         }
     }

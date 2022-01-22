@@ -16,9 +16,9 @@ static EVENT_LISTENER_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The event listener that polls the completion queue events
 #[derive(Debug)]
-pub struct EventListener {
+pub(crate) struct EventListener {
     /// The completion queue
-    pub cq: Arc<CompletionQueue>,
+    pub(crate) cq: Arc<CompletionQueue>,
     /// Request map from request id to responder
     req_map: ReqMap,
     /// The polling thread task handle

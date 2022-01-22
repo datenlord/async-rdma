@@ -7,9 +7,9 @@ use utilities::{ptr_to_usize, Cast};
 
 /// Send work request
 #[repr(C)]
-pub struct SendWr {
+pub(crate) struct SendWr {
     /// internal `ibv_send_wr`
-    pub inner: ibv_send_wr,
+    inner: ibv_send_wr,
     /// the `ibv_sge`s to be sent
     sges: Vec<ibv_sge>,
 }
@@ -28,7 +28,7 @@ impl SendWr {
     }
 
     /// create a new send work requet for "send"
-    pub fn new_send(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_send(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
@@ -36,7 +36,7 @@ impl SendWr {
     }
 
     /// create a new send work requet for "read"
-    pub fn new_read(
+    pub(crate) fn new_read(
         lms: &[&LocalMemoryRegion],
         wr_id: WorkRequestId,
         rm: &RemoteMemoryRegion,
@@ -50,7 +50,7 @@ impl SendWr {
     }
 
     /// create a new send work requet for "write"
-    pub fn new_write(
+    pub(crate) fn new_write(
         lms: &[&LocalMemoryRegion],
         wr_id: WorkRequestId,
         rm: &RemoteMemoryRegion,
@@ -78,7 +78,7 @@ impl<'lm> AsMut<ibv_send_wr> for SendWr {
 
 /// Receive work request
 #[repr(C)]
-pub struct RecvWr {
+pub(crate) struct RecvWr {
     /// internal `ibv_recv_wr`
     inner: ibv_recv_wr,
     /// `ibv_sge`s to store the data
@@ -99,7 +99,7 @@ impl RecvWr {
     }
 
     /// create a new recv work request for "recv"
-    pub fn new_recv(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_recv(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
         Self::new(lms, wr_id)
     }
 }

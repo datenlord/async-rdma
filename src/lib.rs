@@ -76,7 +76,6 @@ use agent::Agent;
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
-use memory_region::{LocalMemoryRegion, RemoteMemoryRegion};
 use mr_allocator::MRAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
@@ -88,6 +87,8 @@ use tokio::{
 };
 use tracing::debug;
 use utilities::Cast;
+
+pub use memory_region::{LocalMemoryRegion, RemoteMemoryRegion};
 
 #[macro_use]
 extern crate lazy_static;

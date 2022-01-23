@@ -264,7 +264,7 @@ impl InnerMr<Local> {
 }
 
 /// Local Memory Region type
-pub(crate) type LocalMemoryRegion = MemoryRegion<Local>;
+pub type LocalMemoryRegion = MemoryRegion<Local>;
 
 impl LocalMemoryRegion {
     /// get the memory region start mut addr
@@ -334,7 +334,7 @@ impl Drop for Remote {
 }
 
 /// Remote memory region type
-pub(crate) type RemoteMemoryRegion = MemoryRegion<Remote>;
+pub type RemoteMemoryRegion = MemoryRegion<Remote>;
 
 impl RemoteMemoryRegion {
     /// Create a remote memory region from the `token`

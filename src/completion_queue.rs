@@ -1,19 +1,12 @@
-use crate::{context::Context, event_channel::EventChannel};
+use crate::{context::Context, event_channel::EventChannel, id};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use rand::Rng;
 use rdma_sys::{
     ibv_cq, ibv_create_cq, ibv_destroy_cq, ibv_poll_cq, ibv_req_notify_cq, ibv_wc, ibv_wc_status,
 };
-use std::{
-    fmt::Debug,
-    io, mem,
-    ops::Sub,
-    ptr::NonNull,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fmt::Debug, io, mem, ops::Sub, ptr::NonNull};
 use thiserror::Error;
-use utilities::{Cast, OverflowArithmetic};
+use utilities::Cast;
 
 /// Complete Queue Structure
 #[derive(Debug)]
@@ -210,17 +203,9 @@ impl From<WCError> for io::Error {
 pub(crate) struct WorkRequestId(u64);
 
 impl WorkRequestId {
-    /// Creat a new work request id
+    /// Create a new id for `WorkRequest`
     pub(crate) fn new() -> Self {
-        let start = SystemTime::now();
-        // No time can be earlier than Unix Epoch
-        #[allow(clippy::unwrap_used)]
-        let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-        let time = since_the_epoch.subsec_micros();
-        let rand = rand::thread_rng().gen::<u32>();
-        let left: u64 = time.into();
-        let right: u64 = rand.into();
-        Self(left.overflow_shl(32) | right)
+        WorkRequestId(id::random_u64())
     }
 }
 

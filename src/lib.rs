@@ -82,7 +82,7 @@ use mr_allocator::MRAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
 use rdma_sys::ibv_access_flags;
-use std::{alloc::Layout, any::Any, fmt::Debug, io, sync::Arc};
+use std::{alloc::Layout, fmt::Debug, io, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -412,11 +412,24 @@ impl Rdma {
         }
     }
 
-    /// Send a memory region, either local mr or remote mr
+    /// Send a local memory region, either local mr or remote mr
     #[inline]
-    pub async fn send_mr(&self, mr: Arc<dyn Any + Send + Sync>) -> io::Result<()> {
+    pub async fn send_local_mr(&self, mr: LocalMemoryRegion) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
-            agent.send_mr(mr).await
+            agent.send_local_mr(mr).await
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Agent is not ready, please wait a while",
+            ))
+        }
+    }
+
+    /// Send a remote memory region, either local mr or remote mr
+    #[inline]
+    pub async fn send_remote_mr(&self, mr: RemoteMemoryRegion) -> io::Result<()> {
+        if let Some(ref agent) = self.agent {
+            agent.send_remote_mr(mr).await
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -427,7 +440,7 @@ impl Rdma {
 
     /// Receive a local memory region
     #[inline]
-    pub async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
+    pub async fn receive_local_mr(&self) -> io::Result<LocalMemoryRegion> {
         if let Some(ref agent) = self.agent {
             agent.receive_local_mr().await
         } else {

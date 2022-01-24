@@ -8,10 +8,10 @@ use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use serde::{Deserialize, Serialize};
 use std::{
     alloc::Layout,
-    any::Any,
     collections::HashMap,
     fmt::Debug,
     io::{self, Cursor},
+    mem,
     sync::Arc,
 };
 use tokio::{
@@ -29,7 +29,7 @@ pub(crate) struct Agent {
     /// The agent inner implementation, which may be shared in many MRs
     inner: Arc<AgentInner>,
     /// Local MR information receiver from agent thread
-    local_mr_recv: Mutex<Receiver<Arc<LocalMemoryRegion>>>,
+    local_mr_recv: Mutex<Receiver<LocalMemoryRegion>>,
     /// Remote MR information receiver from agent thread
     remote_mr_recv: Mutex<Receiver<RemoteMemoryRegion>>,
     /// Data receiver from agent thread
@@ -91,36 +91,33 @@ impl Agent {
         self.inner.request_remote_mr(layout).await
     }
 
-    /// Send a memory region metadata to the other side
-    pub(crate) async fn send_mr(&self, mr: Arc<dyn Any + Send + Sync>) -> io::Result<()> {
-        let request = if mr.is::<LocalMemoryRegion>() {
-            // Have checked the type in the if condition
-            #[allow(clippy::unwrap_used)]
-            let mr = mr.downcast::<LocalMemoryRegion>().unwrap();
-            let token = mr.token();
-            let ans = SendMRKind::Local(token);
-            if self.inner.mr_own.lock().await.insert(token, mr).is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("the MR {:?} should be send multiple times", token),
-                ));
-            }
-            ans
-        } else {
-            let mr = mr.downcast::<RemoteMemoryRegion>().map_err(|m| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "this Mr {:?} can not be downcasted to RemoteMemoryRegion",
-                        m
-                    ),
-                )
-            })?;
-            SendMRKind::Remote(mr.token())
-        };
+    /// Send a local memory region metadata to the other side
+    pub(crate) async fn send_local_mr(&self, mr: LocalMemoryRegion) -> io::Result<()> {
+        // Have checked the type in the if condition
+        let token = mr.token();
+        if self.inner.mr_own.lock().await.insert(token, mr).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the MR {:?} should be send multiple times", token),
+            ));
+        }
+        let kind = SendMRKind::Local(token);
         let request = Request {
             request_id: AgentRequestId::new(),
-            kind: RequestKind::SendMR(SendMRRequest { kind: request }),
+            kind: RequestKind::SendMR(SendMRRequest { kind }),
+        };
+        // this response is not important
+        let _ = self.inner.send_request(request).await?;
+        Ok(())
+    }
+
+    /// Send a remote memory region metadata to the other side
+    pub(crate) async fn send_remote_mr(&self, mr: RemoteMemoryRegion) -> io::Result<()> {
+        let kind = SendMRKind::Remote(mr.token());
+        mem::forget(mr);
+        let request = Request {
+            request_id: AgentRequestId::new(),
+            kind: RequestKind::SendMR(SendMRRequest { kind }),
         };
         // this response is not important
         let _ = self.inner.send_request(request).await?;
@@ -128,7 +125,7 @@ impl Agent {
     }
 
     /// Receive a local memory region metadata from the other side
-    pub(crate) async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
+    pub(crate) async fn receive_local_mr(&self) -> io::Result<LocalMemoryRegion> {
         self.local_mr_recv
             .lock()
             .await
@@ -204,7 +201,7 @@ struct AgentThread {
     /// The agent part that may be shared in the memory region
     inner: Arc<AgentInner>,
     /// The channel sender to send local mr meta from the other side
-    local_mr_send: Sender<Arc<LocalMemoryRegion>>,
+    local_mr_send: Sender<LocalMemoryRegion>,
     /// The channel sender to send remote mr meta from the other side
     remote_mr_send: Sender<RemoteMemoryRegion>,
     /// The channel sender to send data from the other side
@@ -217,7 +214,7 @@ impl AgentThread {
     /// Spawn a main task to tokio thread pool
     fn run(
         inner: Arc<AgentInner>,
-        local_mr_send: Sender<Arc<LocalMemoryRegion>>,
+        local_mr_send: Sender<LocalMemoryRegion>,
         remote_mr_send: Sender<RemoteMemoryRegion>,
         data_send: Sender<LocalMemoryRegion>,
         max_message_len: usize,
@@ -300,12 +297,10 @@ impl AgentThread {
         debug!("handle request");
         let response = match request.kind {
             RequestKind::AllocMR(param) => {
-                let mr = Arc::new(
-                    self.inner.allocator.alloc(
-                        &Layout::from_size_align(param.size, param.align)
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-                    )?,
-                );
+                let mr = self.inner.allocator.alloc(
+                    &Layout::from_size_align(param.size, param.align)
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                )?;
                 let token = mr.token();
                 let response = AllocMRResponse { token };
                 // the MR is newly created, it's impossible to find it in the map
@@ -335,14 +330,18 @@ impl AgentThread {
                             .is_ok());
                     }
                     SendMRKind::Remote(token) => {
-                        let mr = Arc::clone(
-                            self.inner.mr_own.lock().await.get(&token).ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::Other,
-                                    format!("the token {:?} is not registered", token),
-                                )
-                            })?,
-                        );
+                        let mr =
+                            self.inner
+                                .mr_own
+                                .lock()
+                                .await
+                                .remove(&token)
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::Other,
+                                        format!("the token {:?} is not registered", token),
+                                    )
+                                })?;
                         assert!(self.local_mr_send.send(mr).await.is_ok());
                     }
                 }
@@ -427,7 +426,7 @@ pub(crate) struct AgentInner {
     /// The map holding the waiters that waits the response
     response_waits: ResponseWaitsMap,
     /// The Mrs owned by this agent
-    mr_own: Arc<Mutex<HashMap<MemoryRegionToken, Arc<LocalMemoryRegion>>>>,
+    mr_own: Arc<Mutex<HashMap<MemoryRegionToken, LocalMemoryRegion>>>,
     /// MR allocator that creating new memory regions
     allocator: Arc<MRAllocator>,
     /// Max message length

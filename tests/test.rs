@@ -40,7 +40,7 @@ fn test_server_client<
 
 mod test1 {
     use crate::*;
-    use std::{alloc::Layout, sync::Arc};
+    use std::alloc::Layout;
 
     async fn server(rdma: Rdma) -> io::Result<()> {
         let mr = rdma.receive_local_mr().await.unwrap();
@@ -49,11 +49,11 @@ mod test1 {
     }
 
     async fn client(rdma: Rdma) -> io::Result<()> {
-        let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<i32>()).await.unwrap());
+        let rmr = rdma.request_remote_mr(Layout::new::<i32>()).await.unwrap();
         let lmr = rdma.alloc_local_mr(Layout::new::<i32>()).unwrap();
         unsafe { *(lmr.as_ptr() as *mut i32) = 5 };
-        rdma.write(&lmr, rmr.as_ref()).await.unwrap();
-        rdma.send_mr(rmr.clone()).await.unwrap();
+        rdma.write(&lmr, &rmr).await.unwrap();
+        rdma.send_remote_mr(rmr).await.unwrap();
         Ok(())
     }
 

@@ -1,6 +1,6 @@
-use crate::{context::Context, memory_region::LocalMemoryRegion, queue_pair::QueuePairBuilder};
-use rdma_sys::{ibv_access_flags, ibv_alloc_pd, ibv_dealloc_pd, ibv_pd};
-use std::{alloc::Layout, io, ptr::NonNull, sync::Arc};
+use crate::{context::Context, queue_pair::QueuePairBuilder};
+use rdma_sys::{ibv_alloc_pd, ibv_dealloc_pd, ibv_pd};
+use std::{io, ptr::NonNull, sync::Arc};
 
 /// Protection Domain Wrapper
 #[derive(Debug)]
@@ -30,15 +30,6 @@ impl ProtectionDomain {
     /// Create a queue pair builder
     pub(crate) fn create_queue_pair_builder(self: &Arc<Self>) -> QueuePairBuilder {
         QueuePairBuilder::new(self)
-    }
-
-    /// Alloca a memory region
-    pub(crate) fn alloc_memory_region(
-        self: &Arc<Self>,
-        layout: Layout,
-        access: ibv_access_flags,
-    ) -> io::Result<LocalMemoryRegion> {
-        LocalMemoryRegion::new_from_pd(self, layout, access)
     }
 }
 

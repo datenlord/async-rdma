@@ -1,9 +1,7 @@
-use crate::{
-    completion_queue::WorkRequestId,
-    memory_region::{LocalMemoryRegion, RemoteMemoryRegion},
-};
+use crate::{completion_queue::WorkRequestId, memory_region::LocalMrAccess, RemoteMrAccess};
 use rdma_sys::{ibv_recv_wr, ibv_send_flags, ibv_send_wr, ibv_sge, ibv_wr_opcode};
-use utilities::{ptr_to_usize, Cast};
+use std::borrow::Borrow;
+use utilities::Cast;
 
 /// Send work request
 #[repr(C)]
@@ -16,9 +14,16 @@ pub(crate) struct SendWr {
 
 impl SendWr {
     /// create a new send work request
-    fn new(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    #[allow(single_use_lifetimes)]
+    fn new<'lm, LM: Borrow<dyn LocalMrAccess + 'lm>>(lms: &[LM], wr_id: WorkRequestId) -> Self {
         assert!(!lms.is_empty());
-        let mut sges: Vec<ibv_sge> = lms.iter().map(|lm| (*lm).into()).collect();
+        let mut sges: Vec<ibv_sge> = lms
+            .iter()
+            .map(|lm| {
+                let lm: &dyn LocalMrAccess = lm.borrow();
+                Into::<ibv_sge>::into(lm)
+            })
+            .collect();
         let mut inner = unsafe { std::mem::zeroed::<ibv_send_wr>() };
         inner.next = std::ptr::null_mut();
         inner.wr_id = wr_id.into();
@@ -28,7 +33,7 @@ impl SendWr {
     }
 
     /// create a new send work requet for "send"
-    pub(crate) fn new_send(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_send(lms: &[&dyn LocalMrAccess], wr_id: WorkRequestId) -> Self {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
@@ -37,28 +42,28 @@ impl SendWr {
 
     /// create a new send work requet for "read"
     pub(crate) fn new_read(
-        lms: &[&LocalMemoryRegion],
+        lms: &[&mut dyn LocalMrAccess],
         wr_id: WorkRequestId,
-        rm: &RemoteMemoryRegion,
+        rm: &dyn RemoteMrAccess,
     ) -> Self {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_READ;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
-        sr.inner.wr.rdma.remote_addr = ptr_to_usize(rm.as_ptr()).cast();
+        sr.inner.wr.rdma.remote_addr = rm.addr().cast();
         sr.inner.wr.rdma.rkey = rm.rkey();
         sr
     }
 
     /// create a new send work requet for "write"
     pub(crate) fn new_write(
-        lms: &[&LocalMemoryRegion],
+        lms: &[&dyn LocalMrAccess],
         wr_id: WorkRequestId,
-        rm: &RemoteMemoryRegion,
+        rm: &mut dyn RemoteMrAccess,
     ) -> Self {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
-        sr.inner.wr.rdma.remote_addr = ptr_to_usize(rm.as_ptr()).cast();
+        sr.inner.wr.rdma.remote_addr = rm.addr().cast();
         sr.inner.wr.rdma.rkey = rm.rkey();
         sr
     }
@@ -87,9 +92,15 @@ pub(crate) struct RecvWr {
 
 impl RecvWr {
     /// create a new recv work request
-    fn new(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    fn new(lms: &[&mut dyn LocalMrAccess], wr_id: WorkRequestId) -> Self {
         assert!(!lms.is_empty());
-        let mut sges: Vec<ibv_sge> = lms.iter().map(|lm| (*lm).into()).collect();
+        let mut sges: Vec<ibv_sge> = lms
+            .iter()
+            .map(|lm| {
+                let lm: &dyn LocalMrAccess = lm.borrow();
+                Into::<ibv_sge>::into(lm)
+            })
+            .collect();
         let mut inner = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
         inner.next = std::ptr::null_mut();
         inner.wr_id = wr_id.into();
@@ -99,7 +110,7 @@ impl RecvWr {
     }
 
     /// create a new recv work request for "recv"
-    pub(crate) fn new_recv(lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_recv(lms: &[&mut dyn LocalMrAccess], wr_id: WorkRequestId) -> Self {
         Self::new(lms, wr_id)
     }
 }
@@ -116,11 +127,11 @@ impl AsMut<ibv_recv_wr> for RecvWr {
     }
 }
 
-impl From<&LocalMemoryRegion> for ibv_sge {
+impl From<&dyn LocalMrAccess> for ibv_sge {
     #[inline]
-    fn from(lmr: &LocalMemoryRegion) -> Self {
+    fn from(lmr: &dyn LocalMrAccess) -> Self {
         Self {
-            addr: ptr_to_usize(lmr.as_ptr()).cast(),
+            addr: lmr.addr().cast(),
             length: lmr.length().cast(),
             lkey: lmr.lkey(),
         }

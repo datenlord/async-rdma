@@ -1,4 +1,4 @@
-use async_rdma::{Rdma, RdmaListener};
+use async_rdma::{LocalMrAccess, Rdma, RdmaListener};
 use std::alloc::Layout;
 use tracing::debug;
 

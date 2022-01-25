@@ -45,6 +45,7 @@
     clippy::shadow_reuse, // Not too much bad
     clippy::exhaustive_enums,
     clippy::exhaustive_structs,
+    clippy::indexing_slicing,
 )]
 
 /// The agent that handles async events in the background
@@ -78,7 +79,10 @@ use agent::Agent;
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
-use mr_allocator::MRAllocator;
+pub use memory_region::{
+    LocalMr, LocalMrAccess, MrAccess, RemoteMr, RemoteMrAccess, RemoteMrSlice,
+};
+use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
 use rdma_sys::ibv_access_flags;
@@ -89,8 +93,6 @@ use tokio::{
 };
 use tracing::debug;
 use utilities::Cast;
-
-pub use memory_region::{LocalMemoryRegion, RemoteMemoryRegion};
 
 #[macro_use]
 extern crate lazy_static;
@@ -266,7 +268,7 @@ pub struct Rdma {
     #[allow(dead_code)]
     pd: Arc<ProtectionDomain>,
     /// Memory region allocator
-    allocator: Arc<MRAllocator>,
+    allocator: Arc<MrAllocator>,
     /// Queue pair
     qp: Arc<QueuePair>,
     /// Background agent
@@ -287,7 +289,7 @@ impl Rdma {
         let cq = Arc::new(ctx.create_completion_queue(cq_size, ec)?);
         let event_listener = EventListener::new(cq);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MRAllocator::new(Arc::<ProtectionDomain>::clone(&pd))?);
+        let allocator = Arc::new(MrAllocator::new(Arc::<ProtectionDomain>::clone(&pd)));
         let qp = Arc::new(
             pd.create_queue_pair_builder()
                 .set_event_listener(event_listener)
@@ -321,7 +323,7 @@ impl Rdma {
 
     /// The send the content in the `lm`
     #[inline]
-    pub async fn send(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
+    pub async fn send(&self, lm: &LocalMr) -> io::Result<()> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
@@ -331,7 +333,7 @@ impl Rdma {
 
     /// Receive the content and stored in the returned memory region
     #[inline]
-    pub async fn receive(&self) -> io::Result<LocalMemoryRegion> {
+    pub async fn receive(&self) -> io::Result<LocalMr> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
@@ -343,15 +345,19 @@ impl Rdma {
     #[inline]
     pub async fn read(
         &self,
-        lm: &mut LocalMemoryRegion,
-        rm: &RemoteMemoryRegion,
+        lm: &mut dyn LocalMrAccess,
+        rm: &dyn RemoteMrAccess,
     ) -> io::Result<()> {
         self.qp.read(lm, rm).await
     }
 
     /// Write content in the `lm` to `rm`
     #[inline]
-    pub async fn write(&self, lm: &LocalMemoryRegion, rm: &RemoteMemoryRegion) -> io::Result<()> {
+    pub async fn write(
+        &self,
+        lm: &dyn LocalMrAccess,
+        rm: &mut dyn RemoteMrAccess,
+    ) -> io::Result<()> {
         self.qp.write(lm, rm).await
     }
 
@@ -386,7 +392,7 @@ impl Rdma {
         rdma.qp_handshake(remote)?;
         let agent = Arc::new(Agent::new(
             Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MRAllocator>::clone(&rdma.allocator),
+            Arc::<MrAllocator>::clone(&rdma.allocator),
             max_message_length,
         )?);
         rdma.agent = Some(agent);
@@ -395,13 +401,13 @@ impl Rdma {
 
     /// Allocate a local memory region
     #[inline]
-    pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMemoryRegion> {
+    pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMr> {
         self.allocator.alloc(&layout)
     }
 
     /// Request a remote memory region
     #[inline]
-    pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMemoryRegion> {
+    pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMr> {
         if let Some(ref agent) = self.agent {
             agent.request_remote_mr(layout).await
         } else {
@@ -414,7 +420,7 @@ impl Rdma {
 
     /// Send a local memory region, either local mr or remote mr
     #[inline]
-    pub async fn send_local_mr(&self, mr: LocalMemoryRegion) -> io::Result<()> {
+    pub async fn send_local_mr(&self, mr: LocalMr) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
             agent.send_local_mr(mr).await
         } else {
@@ -427,7 +433,7 @@ impl Rdma {
 
     /// Send a remote memory region, either local mr or remote mr
     #[inline]
-    pub async fn send_remote_mr(&self, mr: RemoteMemoryRegion) -> io::Result<()> {
+    pub async fn send_remote_mr(&self, mr: RemoteMr) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
             agent.send_remote_mr(mr).await
         } else {
@@ -440,7 +446,7 @@ impl Rdma {
 
     /// Receive a local memory region
     #[inline]
-    pub async fn receive_local_mr(&self) -> io::Result<LocalMemoryRegion> {
+    pub async fn receive_local_mr(&self) -> io::Result<LocalMr> {
         if let Some(ref agent) = self.agent {
             agent.receive_local_mr().await
         } else {
@@ -453,7 +459,7 @@ impl Rdma {
 
     /// Receive a remote memory region
     #[inline]
-    pub async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
+    pub async fn receive_remote_mr(&self) -> io::Result<RemoteMr> {
         if let Some(ref agent) = self.agent {
             agent.receive_remote_mr().await
         } else {
@@ -520,7 +526,7 @@ impl RdmaListener {
         debug!("handshake done");
         let agent = Arc::new(Agent::new(
             Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MRAllocator>::clone(&rdma.allocator),
+            Arc::<MrAllocator>::clone(&rdma.allocator),
             max_message_length,
         )?);
         rdma.agent = Some(agent);

@@ -7,7 +7,7 @@
 //!
 //!     cargo run --example rpc
 
-use async_rdma::{LocalMemoryRegion, Rdma, RdmaListener};
+use async_rdma::{LocalMr, LocalMrAccess, Rdma, RdmaListener};
 use std::{alloc::Layout, sync::Arc, time::Duration};
 use tokio::net::ToSocketAddrs;
 
@@ -126,7 +126,7 @@ impl Server {
     }
 }
 
-fn transmute_lmr_to_string(lmr: &LocalMemoryRegion) -> String {
+fn transmute_lmr_to_string(lmr: &LocalMr) -> String {
     unsafe {
         let resp = &*(lmr.as_ptr() as *const Response);
         match resp {
@@ -198,7 +198,7 @@ impl Client {
         // put data into lmr
         unsafe { *(lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
         // request a remote mr located in the server
-        let rmr_req = self
+        let mut rmr_req = self
             .rdma_stub
             .request_remote_mr(Layout::new::<Request>())
             .await
@@ -206,7 +206,7 @@ impl Client {
             .unwrap();
         // write data from local mr to remote mr by rdma `write`
         self.rdma_stub
-            .write(&lmr_req, &rmr_req)
+            .write(&lmr_req, &mut rmr_req)
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();

@@ -1,7 +1,7 @@
 use crate::{
     id,
-    memory_region::{LocalMemoryRegion, MemoryRegionToken, RemoteMemoryRegion},
-    mr_allocator::MRAllocator,
+    memory_region::{LocalMr, LocalMrAccess, MrAccess, MrToken, RemoteMr},
+    mr_allocator::MrAllocator,
     queue_pair::QueuePair,
 };
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
@@ -29,11 +29,11 @@ pub(crate) struct Agent {
     /// The agent inner implementation, which may be shared in many MRs
     inner: Arc<AgentInner>,
     /// Local MR information receiver from agent thread
-    local_mr_recv: Mutex<Receiver<LocalMemoryRegion>>,
+    local_mr_recv: Mutex<Receiver<LocalMr>>,
     /// Remote MR information receiver from agent thread
-    remote_mr_recv: Mutex<Receiver<RemoteMemoryRegion>>,
+    remote_mr_recv: Mutex<Receiver<RemoteMr>>,
     /// Data receiver from agent thread
-    data_recv: Mutex<Receiver<LocalMemoryRegion>>,
+    data_recv: Mutex<Receiver<LocalMr>>,
     /// Join handle for the agent background thread
     handle: JoinHandle<io::Result<()>>,
     /// Max message length
@@ -50,7 +50,7 @@ impl Agent {
     /// Create a new agent thread
     pub(crate) fn new(
         qp: Arc<QueuePair>,
-        allocator: Arc<MRAllocator>,
+        allocator: Arc<MrAllocator>,
         max_message_len: usize,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(LockFreeCuckooHash::new());
@@ -87,12 +87,12 @@ impl Agent {
     }
 
     /// Allocate a remote memory region
-    pub(crate) async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMemoryRegion> {
+    pub(crate) async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMr> {
         self.inner.request_remote_mr(layout).await
     }
 
     /// Send a local memory region metadata to the other side
-    pub(crate) async fn send_local_mr(&self, mr: LocalMemoryRegion) -> io::Result<()> {
+    pub(crate) async fn send_local_mr(&self, mr: LocalMr) -> io::Result<()> {
         // Have checked the type in the if condition
         let token = mr.token();
         if self.inner.mr_own.lock().await.insert(token, mr).is_some() {
@@ -112,8 +112,9 @@ impl Agent {
     }
 
     /// Send a remote memory region metadata to the other side
-    pub(crate) async fn send_remote_mr(&self, mr: RemoteMemoryRegion) -> io::Result<()> {
+    pub(crate) async fn send_remote_mr(&self, mr: RemoteMr) -> io::Result<()> {
         let kind = SendMRKind::Remote(mr.token());
+        #[allow(clippy::mem_forget)]
         mem::forget(mr);
         let request = Request {
             request_id: AgentRequestId::new(),
@@ -125,7 +126,7 @@ impl Agent {
     }
 
     /// Receive a local memory region metadata from the other side
-    pub(crate) async fn receive_local_mr(&self) -> io::Result<LocalMemoryRegion> {
+    pub(crate) async fn receive_local_mr(&self) -> io::Result<LocalMr> {
         self.local_mr_recv
             .lock()
             .await
@@ -135,7 +136,7 @@ impl Agent {
     }
 
     /// Receive a local memory region metadata from the other side
-    pub(crate) async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
+    pub(crate) async fn receive_remote_mr(&self) -> io::Result<RemoteMr> {
         self.remote_mr_recv
             .lock()
             .await
@@ -145,7 +146,7 @@ impl Agent {
     }
 
     /// Send the content in the `lm` to the other side
-    pub(crate) async fn send_data(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
+    pub(crate) async fn send_data(&self, lm: &LocalMr) -> io::Result<()> {
         let mut start = 0;
         let lm_len = lm.length();
         let max_content_len = self.max_message_len.overflow_sub(*SEND_DATA_OFFSET);
@@ -159,7 +160,7 @@ impl Agent {
             };
             let response = self
                 .inner
-                .send_request_append_data(request, &[&lm.slice(start..end)?])
+                .send_request_append_data(request, &[&&lm[start..end]])
                 .await?;
             if let ResponseKind::SendData(send_data_resp) = response {
                 if send_data_resp.status > 0 {
@@ -186,7 +187,7 @@ impl Agent {
     }
 
     /// Receive content sent from the other side and stored in the return value
-    pub(crate) async fn receive_data(&self) -> io::Result<LocalMemoryRegion> {
+    pub(crate) async fn receive_data(&self) -> io::Result<LocalMr> {
         self.data_recv
             .lock()
             .await
@@ -201,11 +202,11 @@ struct AgentThread {
     /// The agent part that may be shared in the memory region
     inner: Arc<AgentInner>,
     /// The channel sender to send local mr meta from the other side
-    local_mr_send: Sender<LocalMemoryRegion>,
+    local_mr_send: Sender<LocalMr>,
     /// The channel sender to send remote mr meta from the other side
-    remote_mr_send: Sender<RemoteMemoryRegion>,
+    remote_mr_send: Sender<RemoteMr>,
     /// The channel sender to send data from the other side
-    data_send: Sender<LocalMemoryRegion>,
+    data_send: Sender<LocalMr>,
     /// Max message length
     max_message_len: usize,
 }
@@ -214,9 +215,9 @@ impl AgentThread {
     /// Spawn a main task to tokio thread pool
     fn run(
         inner: Arc<AgentInner>,
-        local_mr_send: Sender<LocalMemoryRegion>,
-        remote_mr_send: Sender<RemoteMemoryRegion>,
-        data_send: Sender<LocalMemoryRegion>,
+        local_mr_send: Sender<LocalMr>,
+        remote_mr_send: Sender<RemoteMr>,
+        data_send: Sender<LocalMr>,
         max_message_len: usize,
     ) -> io::Result<JoinHandle<io::Result<()>>> {
         let agent = Arc::new(Self {
@@ -248,7 +249,7 @@ impl AgentThread {
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_message_len, 1) })?;
         loop {
             debug!("receiving message");
-            let sz = self.inner.qp.receive(&buf).await?;
+            let sz = self.inner.qp.receive(&mut buf).await?;
             debug!("received message, size = {}", sz);
             let message = bincode::deserialize(buf.as_slice().get(0..sz).ok_or_else(|| {
                 io::Error::new(
@@ -322,7 +323,7 @@ impl AgentThread {
                     SendMRKind::Local(token) => {
                         assert!(self
                             .remote_mr_send
-                            .send(RemoteMemoryRegion::new_from_token(
+                            .send(RemoteMr::new_from_token(
                                 token,
                                 Arc::<AgentInner>::clone(&self.inner)
                             ))
@@ -390,13 +391,9 @@ impl AgentThread {
     }
 
     /// handle the send request separately as we need to prepare a buf
-    async fn handle_send_req(
-        self: Arc<Self>,
-        request: Request,
-        buf: LocalMemoryRegion,
-    ) -> io::Result<()> {
+    async fn handle_send_req(self: Arc<Self>, request: Request, buf: LocalMr) -> io::Result<()> {
         if let RequestKind::SendData(param) = request.kind {
-            let buf = buf.slice(*SEND_DATA_OFFSET..(SEND_DATA_OFFSET.overflow_add(param.len)))?;
+            let buf = buf.take(*SEND_DATA_OFFSET..(SEND_DATA_OFFSET.overflow_add(param.len)));
             self.data_send.send(buf).await.map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
@@ -426,9 +423,9 @@ pub(crate) struct AgentInner {
     /// The map holding the waiters that waits the response
     response_waits: ResponseWaitsMap,
     /// The Mrs owned by this agent
-    mr_own: Arc<Mutex<HashMap<MemoryRegionToken, LocalMemoryRegion>>>,
+    mr_own: Arc<Mutex<HashMap<MrToken, LocalMr>>>,
     /// MR allocator that creating new memory regions
-    allocator: Arc<MRAllocator>,
+    allocator: Arc<MrAllocator>,
     /// Max message length
     max_message_len: usize,
 }
@@ -438,7 +435,7 @@ impl AgentInner {
     pub(crate) async fn request_remote_mr(
         self: &Arc<Self>,
         layout: Layout,
-    ) -> io::Result<RemoteMemoryRegion> {
+    ) -> io::Result<RemoteMr> {
         let request = AllocMRRequest {
             size: layout.size(),
             align: layout.align(),
@@ -449,7 +446,7 @@ impl AgentInner {
         };
         let response = self.send_request(request).await?;
         if let ResponseKind::AllocMR(alloc_mr_response) = response {
-            Ok(RemoteMemoryRegion::new_from_token(
+            Ok(RemoteMr::new_from_token(
                 alloc_mr_response.token,
                 Arc::<Self>::clone(self),
             ))
@@ -462,7 +459,7 @@ impl AgentInner {
     }
 
     /// Release a remote MR got from the other side
-    pub(crate) async fn release_mr(&self, token: MemoryRegionToken) -> io::Result<()> {
+    pub(crate) async fn release_mr(&self, token: MrToken) -> io::Result<()> {
         let request = Request {
             request_id: AgentRequestId::new(),
             kind: RequestKind::ReleaseMR(ReleaseMRRequest { token }),
@@ -480,7 +477,7 @@ impl AgentInner {
     async fn send_request_append_data(
         &self,
         request: Request,
-        lm: &[&LocalMemoryRegion],
+        lm: &[&dyn LocalMrAccess],
     ) -> io::Result<ResponseKind> {
         // Using mpsc here bacause `oneshot` tx need it's ownership when `send`.
         // But we cann't get it from LockFreeCuckooHash because of the principle of LockFreeCuckooHash.
@@ -507,8 +504,8 @@ impl AgentInner {
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = buf.slice(0..msz)?;
-        let mut lms = vec![&buf];
+        let buf = &&buf[0..msz];
+        let mut lms: Vec<&dyn LocalMrAccess> = vec![buf];
         lms.extend(lm);
         let lms_len: usize = lms.iter().map(|l| l.length()).sum();
         assert!(lms_len <= self.max_message_len);
@@ -532,7 +529,7 @@ impl AgentInner {
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = buf.slice(0..msz)?;
+        let buf = buf.take(0..msz);
         self.qp.send(&buf).await?;
         Ok(())
     }
@@ -578,14 +575,14 @@ struct AllocMRRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct AllocMRResponse {
     /// The token to access the MR
-    token: MemoryRegionToken,
+    token: MrToken,
 }
 
 /// Request to release a MR
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct ReleaseMRRequest {
     /// Token of the MR
-    token: MemoryRegionToken,
+    token: MrToken,
 }
 
 /// Response to the release MR request
@@ -599,9 +596,9 @@ struct ReleaseMRResponse {
 #[derive(Serialize, Deserialize, Clone, Copy)]
 enum SendMRKind {
     /// Local MR
-    Local(MemoryRegionToken),
+    Local(MrToken),
     /// Remote MR
-    Remote(MemoryRegionToken),
+    Remote(MrToken),
 }
 
 /// Reqeust to send MR metadata

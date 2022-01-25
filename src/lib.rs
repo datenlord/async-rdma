@@ -80,7 +80,7 @@ use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
 pub use memory_region::{
-    LocalMr, LocalMrAccess, MrAccess, RemoteMr, RemoteMrAccess, RemoteMrSlice,
+    LocalMr, LocalMrAccess, LocalMrSlice, MrAccess, RemoteMr, RemoteMrAccess, RemoteMrSlice,
 };
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
@@ -333,7 +333,7 @@ impl Rdma {
 
     /// Receive the content and stored in the returned memory region
     #[inline]
-    pub async fn receive(&self) -> io::Result<LocalMr> {
+    pub async fn receive(&self) -> io::Result<(LocalMr, usize)> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?

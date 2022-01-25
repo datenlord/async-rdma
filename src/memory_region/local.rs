@@ -193,22 +193,6 @@ impl LocalMr {
             allocator,
         }
     }
-
-    /// take mr into sub mr
-    #[inline]
-    #[must_use]
-    pub fn take(self, range: Range<usize>) -> Self {
-        #[allow(clippy::restriction)]
-        if range.start >= range.end || range.end > self.length() {
-            panic!("out of local mr bound");
-        }
-        Self {
-            addr: self.addr().add(range.start),
-            len: range.len(),
-            raw: Arc::<RawMemoryRegion>::clone(&self.raw),
-            allocator: Arc::<MrAllocator>::clone(&self.allocator),
-        }
-    }
 }
 
 /// Local Mr Slice, A Dst

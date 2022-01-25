@@ -395,7 +395,7 @@ impl QueuePair {
     }
 
     /// Receive data and store it into `lm`
-    pub(crate) async fn receive(
+    pub(crate) async fn _receive(
         self: &Arc<Self>,
         lm: &'_ mut dyn LocalMrAccess,
     ) -> io::Result<usize> {

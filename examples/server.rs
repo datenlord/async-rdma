@@ -17,7 +17,7 @@ async fn example2(rdma: &Rdma) {
 }
 
 async fn example3(rdma: &Rdma) {
-    let mut lmr = rdma.receive().await.unwrap();
+    let (mut lmr, _) = rdma.receive().await.unwrap();
     debug!("e3 lmr : {:?}", unsafe { *(lmr.as_ptr() as *mut i32) });
     dbg!(unsafe { *(lmr.as_mut_ptr() as *mut i32) });
 }

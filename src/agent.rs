@@ -33,11 +33,11 @@ pub(crate) struct Agent {
     /// Remote MR information receiver from agent thread
     remote_mr_recv: Mutex<Receiver<RemoteMr>>,
     /// Data receiver from agent thread
-    data_recv: Mutex<Receiver<LocalMr>>,
+    data_recv: Mutex<Receiver<(LocalMr, usize)>>,
     /// Join handle for the agent background thread
     handle: JoinHandle<io::Result<()>>,
     /// Max message length
-    max_message_len: usize,
+    max_sr_data_len: usize,
 }
 
 impl Drop for Agent {
@@ -51,7 +51,7 @@ impl Agent {
     pub(crate) fn new(
         qp: Arc<QueuePair>,
         allocator: Arc<MrAllocator>,
-        max_message_len: usize,
+        max_sr_data_len: usize,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(LockFreeCuckooHash::new());
         let mr_own = Arc::new(Mutex::new(HashMap::new()));
@@ -66,21 +66,21 @@ impl Agent {
             response_waits,
             mr_own,
             allocator,
-            max_message_len,
+            max_sr_data_len,
         });
         let handle = AgentThread::run(
             Arc::<AgentInner>::clone(&inner),
             local_mr_send,
             remote_mr_send,
             data_send,
-            max_message_len,
+            max_sr_data_len,
         )?;
 
         Ok(Self {
             inner,
             data_recv: data_recv_mutex,
             handle,
-            max_message_len,
+            max_sr_data_len,
             local_mr_recv,
             remote_mr_recv,
         })
@@ -102,10 +102,7 @@ impl Agent {
             ));
         }
         let kind = SendMRKind::Local(token);
-        let request = Request {
-            request_id: AgentRequestId::new(),
-            kind: RequestKind::SendMR(SendMRRequest { kind }),
-        };
+        let request = RequestKind::SendMR(SendMRRequest { kind });
         // this response is not important
         let _ = self.inner.send_request(request).await?;
         Ok(())
@@ -116,10 +113,7 @@ impl Agent {
         let kind = SendMRKind::Remote(mr.token());
         #[allow(clippy::mem_forget)]
         mem::forget(mr);
-        let request = Request {
-            request_id: AgentRequestId::new(),
-            kind: RequestKind::SendMR(SendMRRequest { kind }),
-        };
+        let request = RequestKind::SendMR(SendMRRequest { kind });
         // this response is not important
         let _ = self.inner.send_request(request).await?;
         Ok(())
@@ -149,15 +143,11 @@ impl Agent {
     pub(crate) async fn send_data(&self, lm: &LocalMr) -> io::Result<()> {
         let mut start = 0;
         let lm_len = lm.length();
-        let max_content_len = self.max_message_len.overflow_sub(*SEND_DATA_OFFSET);
         while start < lm_len {
-            let end = (start.overflow_add(max_content_len)).min(lm_len);
-            let request = Request {
-                request_id: AgentRequestId::new(),
-                kind: RequestKind::SendData(SendDataRequest {
-                    len: end.overflow_sub(start),
-                }),
-            };
+            let end = (start.overflow_add(self.max_sr_data_len)).min(lm_len);
+            let request = RequestKind::SendData(SendDataRequest {
+                len: end.overflow_sub(start),
+            });
             let response = self
                 .inner
                 .send_request_append_data(request, &[&&lm[start..end]])
@@ -187,7 +177,7 @@ impl Agent {
     }
 
     /// Receive content sent from the other side and stored in the return value
-    pub(crate) async fn receive_data(&self) -> io::Result<LocalMr> {
+    pub(crate) async fn receive_data(&self) -> io::Result<(LocalMr, usize)> {
         self.data_recv
             .lock()
             .await
@@ -206,9 +196,9 @@ struct AgentThread {
     /// The channel sender to send remote mr meta from the other side
     remote_mr_send: Sender<RemoteMr>,
     /// The channel sender to send data from the other side
-    data_send: Sender<LocalMr>,
-    /// Max message length
-    max_message_len: usize,
+    data_send: Sender<(LocalMr, usize)>,
+    /// Max send/recv message length
+    max_sr_data_len: usize,
 }
 
 impl AgentThread {
@@ -217,22 +207,22 @@ impl AgentThread {
         inner: Arc<AgentInner>,
         local_mr_send: Sender<LocalMr>,
         remote_mr_send: Sender<RemoteMr>,
-        data_send: Sender<LocalMr>,
-        max_message_len: usize,
+        data_send: Sender<(LocalMr, usize)>,
+        max_sr_data_len: usize,
     ) -> io::Result<JoinHandle<io::Result<()>>> {
         let agent = Arc::new(Self {
             inner,
             local_mr_send,
             remote_mr_send,
             data_send,
-            max_message_len,
+            max_sr_data_len,
         });
-        if max_message_len < *SEND_DATA_OFFSET {
+        if max_sr_data_len == 0 {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "max message length is {:?}, it should be at leaset {:?}",
-                    max_message_len, *SEND_DATA_OFFSET
+                    "max message length is {:?}, it should be greater than 0",
+                    max_sr_data_len
                 ),
             ))
         } else {
@@ -242,40 +232,52 @@ impl AgentThread {
 
     /// The main agent function that handles messages sent from the other side
     async fn main(self: Arc<Self>) -> io::Result<()> {
-        let mut buf = self
+        let mut header_buf = self
             .inner
             .allocator
             // alignment 1 is always correct
-            .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_message_len, 1) })?;
+            .alloc(unsafe { &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1) })?;
+        let mut data_buf = self
+            .inner
+            .allocator
+            // alignment 1 is always correct
+            .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
             debug!("receiving message");
-            let sz = self.inner.qp.receive(&mut buf).await?;
+            let sz = self
+                .inner
+                .qp
+                .receive_sge(&[&mut header_buf, &mut data_buf])
+                .await?;
             debug!("received message, size = {}", sz);
-            let message = bincode::deserialize(buf.as_slice().get(0..sz).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "{:?} is out of range, the length is {:?}",
-                        0..sz,
-                        buf.length()
-                    ),
-                )
-            })?)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to deserialize {:?}", e),
-                )
-            })?;
+            let header_sz = sz.min(*REQUEST_HEADER_MAX_LEN);
+            let message =
+                bincode::deserialize(header_buf.as_slice().get(0..header_sz).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!(
+                            "{:?} is out of range, the length is {:?}",
+                            0..sz,
+                            header_buf.length()
+                        ),
+                    )
+                })?)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize {:?}", e),
+                    )
+                })?;
             match message {
                 Message::Request(request) => match request.kind {
                     RequestKind::SendData(_) => {
                         // detach the task
-                        let _task =
-                            tokio::spawn(Arc::<Self>::clone(&self).handle_send_req(request, buf));
+                        let _task = tokio::spawn(
+                            Arc::<Self>::clone(&self).handle_send_req(request, data_buf),
+                        );
                         // alignment 1 is always correct
-                        buf = self.inner.allocator.alloc(unsafe {
-                            &Layout::from_size_align_unchecked(self.max_message_len, 1)
+                        data_buf = self.inner.allocator.alloc(unsafe {
+                            &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
                         })?;
                     }
                     RequestKind::AllocMR(_)
@@ -391,10 +393,9 @@ impl AgentThread {
     }
 
     /// handle the send request separately as we need to prepare a buf
-    async fn handle_send_req(self: Arc<Self>, request: Request, buf: LocalMr) -> io::Result<()> {
+    async fn handle_send_req(self: Arc<Self>, request: Request, data: LocalMr) -> io::Result<()> {
         if let RequestKind::SendData(param) = request.kind {
-            let buf = buf.take(*SEND_DATA_OFFSET..(SEND_DATA_OFFSET.overflow_add(param.len)));
-            self.data_send.send(buf).await.map_err(|e| {
+            self.data_send.send((data, param.len)).await.map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
                     format!("Data receiver has stopped, {:?}", e),
@@ -427,7 +428,7 @@ pub(crate) struct AgentInner {
     /// MR allocator that creating new memory regions
     allocator: Arc<MrAllocator>,
     /// Max message length
-    max_message_len: usize,
+    max_sr_data_len: usize,
 }
 
 impl AgentInner {
@@ -440,10 +441,7 @@ impl AgentInner {
             size: layout.size(),
             align: layout.align(),
         };
-        let request = Request {
-            request_id: AgentRequestId::new(),
-            kind: RequestKind::AllocMR(request),
-        };
+        let request = RequestKind::AllocMR(request);
         let response = self.send_request(request).await?;
         if let ResponseKind::AllocMR(alloc_mr_response) = response {
             Ok(RemoteMr::new_from_token(
@@ -460,55 +458,58 @@ impl AgentInner {
 
     /// Release a remote MR got from the other side
     pub(crate) async fn release_mr(&self, token: MrToken) -> io::Result<()> {
-        let request = Request {
-            request_id: AgentRequestId::new(),
-            kind: RequestKind::ReleaseMR(ReleaseMRRequest { token }),
-        };
+        let request = RequestKind::ReleaseMR(ReleaseMRRequest { token });
         let _response = self.send_request(request).await?;
         Ok(())
     }
 
     /// Send a request to the agent on the other side
-    async fn send_request(&self, request: Request) -> io::Result<ResponseKind> {
+    async fn send_request(&self, request: RequestKind) -> io::Result<ResponseKind> {
         self.send_request_append_data(request, &[]).await
     }
 
     /// Send a request with data appended
     async fn send_request_append_data(
         &self,
-        request: Request,
-        lm: &[&dyn LocalMrAccess],
+        request: RequestKind,
+        data: &[&dyn LocalMrAccess],
     ) -> io::Result<ResponseKind> {
+        let data_len: usize = data.iter().map(|l| l.length()).sum();
+        assert!(data_len <= self.max_sr_data_len);
         // Using mpsc here bacause `oneshot` tx need it's ownership when `send`.
         // But we cann't get it from LockFreeCuckooHash because of the principle of LockFreeCuckooHash.
         let (tx, mut rx) = channel(2);
-        let mut req = request;
+        let mut req = Request {
+            request_id: AgentRequestId::new(),
+            kind: request,
+        };
         while !self
             .response_waits
             .insert_if_not_exists(req.request_id, tx.clone())
         {
             req = Request {
                 request_id: AgentRequestId::new(),
-                kind: request.kind,
+                kind: request,
             };
         }
-        let mut buf = self
+        let mut header_buf = self
             .allocator
             // alignment 1 is always correct
-            .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_message_len, 1) })?;
-        let cursor = Cursor::new(buf.as_mut_slice());
+            .alloc(unsafe { &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1) })?;
+        let cursor = Cursor::new(header_buf.as_mut_slice());
         let message = Message::Request(req);
         // FIXME: serialize udpate
-        let msz = bincode::serialized_size(&message)
+        let mut msz = bincode::serialized_size(&message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = &&buf[0..msz];
-        let mut lms: Vec<&dyn LocalMrAccess> = vec![buf];
-        lms.extend(lm);
-        let lms_len: usize = lms.iter().map(|l| l.length()).sum();
-        assert!(lms_len <= self.max_message_len);
+        if let RequestKind::SendMR(_) = req.kind {
+            msz = *REQUEST_HEADER_MAX_LEN;
+        }
+        let header_buf = &&header_buf[0..msz];
+        let mut lms: Vec<&dyn LocalMrAccess> = vec![header_buf];
+        lms.extend(data);
         self.qp.send_sge(&lms).await?;
         rx.recv()
             .await
@@ -517,34 +518,91 @@ impl AgentInner {
 
     /// Send a response to the other side
     async fn send_response(&self, response: Response) -> io::Result<()> {
-        let mut buf = self
+        let mut header = self
             .allocator
             // alignment 1 is always correct
-            .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_message_len, 1) })
+            .alloc(unsafe { &Layout::from_size_align_unchecked(*RESPONSE_HEADER_MAX_LEN, 1) })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let cursor = Cursor::new(buf.as_mut_slice());
+        let cursor = Cursor::new(header.as_mut_slice());
         let message = Message::Response(response);
         let msz = bincode::serialized_size(&message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = buf.take(0..msz);
+        let buf = &header[0..msz];
         self.qp.send(&buf).await?;
         Ok(())
     }
 }
 
 lazy_static! {
-    static ref SEND_DATA_OFFSET: usize = {
-        let request = Request {
-            request_id: AgentRequestId::new(),
-            kind: RequestKind::SendData(SendDataRequest { len: 0 }),
-        };
-        let message = Message::Request(request);
-        // This is the easiest serialize, should not fail
+    static ref REQUEST_HEADER_MAX_LEN: usize = {
+        let mut request_kind = vec![];
+        request_kind.push(RequestKind::AllocMR(AllocMRRequest { size: 0, align: 0 }));
+        request_kind.push(RequestKind::ReleaseMR(ReleaseMRRequest {
+            token: MrToken {
+                addr: 0,
+                len: 0,
+                rkey: 0,
+            },
+        }));
+        request_kind.push(RequestKind::SendMR(SendMRRequest {
+            kind: SendMRKind::Local(MrToken {
+                addr: 0,
+                len: 0,
+                rkey: 0,
+            }),
+        }));
+        request_kind.push(RequestKind::SendMR(SendMRRequest {
+            kind: SendMRKind::Remote(MrToken {
+                addr: 0,
+                len: 0,
+                rkey: 0,
+            }),
+        }));
+        request_kind.push(RequestKind::SendData(SendDataRequest { len: 0 }));
         #[allow(clippy::unwrap_used)]
-        bincode::serialized_size(&message).unwrap().cast()
+        request_kind
+            .into_iter()
+            .map(|kind| {
+                #[allow(clippy::unwrap_used)]
+                bincode::serialized_size(&Message::Request(Request {
+                    request_id: AgentRequestId::new(),
+                    kind,
+                }))
+                .unwrap()
+                .cast()
+            })
+            .max()
+            .unwrap()
+    };
+    static ref RESPONSE_HEADER_MAX_LEN: usize = {
+        let mut response_kind = vec![];
+        response_kind.push(ResponseKind::AllocMR(AllocMRResponse {
+            token: MrToken {
+                addr: 0,
+                len: 0,
+                rkey: 0,
+            },
+        }));
+        response_kind.push(ResponseKind::ReleaseMR(ReleaseMRResponse { status: 0 }));
+        response_kind.push(ResponseKind::SendMR(SendMRResponse {}));
+        response_kind.push(ResponseKind::SendData(SendDataResponse { status: 0 }));
+        #[allow(clippy::unwrap_used)]
+        response_kind
+            .into_iter()
+            .map(|kind| {
+                #[allow(clippy::unwrap_used)]
+                bincode::serialized_size(&Message::Response(Response {
+                    request_id: AgentRequestId::new(),
+                    kind,
+                }))
+                .unwrap()
+                .cast()
+            })
+            .max()
+            .unwrap()
     };
 }
 

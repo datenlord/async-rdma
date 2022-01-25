@@ -93,7 +93,7 @@ impl Server {
             let resp = rdma
                 .receive()
                 .await
-                .map(|lmr_req| unsafe {
+                .map(|(lmr_req, _)| unsafe {
                     //get `Request` from mr
                     let req = &*(lmr_req.as_ptr() as *const Request);
                     Self::process_request(req)
@@ -175,7 +175,7 @@ impl Client {
         self.rdma_stub
             .receive()
             .await
-            .map(|lmr_resp| transmute_lmr_to_string(&lmr_resp))
+            .map(|(lmr_resp, _)| transmute_lmr_to_string(&lmr_resp))
             .map_err(|err| println!("{}", &err))
             .unwrap()
     }
@@ -248,7 +248,7 @@ impl Client {
         self.rdma_stub
             .receive()
             .await
-            .map(|lmr_resp| unsafe {
+            .map(|(lmr_resp, _)| unsafe {
                 let resp = &*(lmr_resp.as_ptr() as *const Response);
                 if let Response::Sync = resp {
                 } else {

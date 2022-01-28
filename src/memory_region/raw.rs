@@ -41,7 +41,6 @@ impl LocalMrAccess for RawMemoryRegion {
 
 impl RawMemoryRegion {
     /// Register a raw memory region from protection domain
-    #[allow(clippy::restriction)]
     pub(crate) fn register_from_pd(
         pd: &Arc<ProtectionDomain>,
         addr: *mut u8,
@@ -55,7 +54,7 @@ impl RawMemoryRegion {
             inner_mr,
             addr,
             len,
-            _pd: pd.clone(),
+            _pd: Arc::<ProtectionDomain>::clone(pd),
         })
     }
 }

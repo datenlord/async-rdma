@@ -29,3 +29,6 @@ tokio = {version = "1.15", features = ["full", "tracing"]}
 tracing = "0.1"
 tracing-subscriber = "0.2"
 utilities = {git = "https://github.com/datenlord/utilities"}
+
+[dev-dependencies]
+portpicker = "0.1.1"

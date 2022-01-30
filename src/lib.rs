@@ -1,5 +1,62 @@
-//! RDMA high level abstraction, providing several useful APIs.
-//! [Here's a placeholder]
+//! RDMA high-level abstraction, providing several useful APIs.
+//!
+//! Async-rdma is a framework for writing asynchronous rdma applications with the Rust
+//! programing language. At a high level, it provides a few major components:
+//!
+//! * Tools for establishing connections with rdma endpoints such as `RdmaBuilder`.
+//!
+//! *  High-level APIs for data transmission between endpoints including `read`,
+//! `write`, `send`, `receive`.
+//!
+//! *  High-level APIs for rdma memory region management including `alloc_local_mr`,
+//! `request_remote_mr`, `send_mr`, `receive_local_mr`, `receive_remote_mr`.
+//!
+//! *  A framework including `agent` and `event_listener` working behind APIs for memory
+//! region management and executing rdma requests such as `post_send` and `poll`.
+//!
+//! #### Example
+//! A simple example: client request a remote memory region and put data into this remote
+//! memory region by rdma `write`.
+//! And finally client `send_mr` to make server aware of this memory region.
+//! Server `receive_local_mr`, and then get data from this mr.
+//!
+//! ```
+//! use async_rdma::{Rdma, RdmaListener};
+//! use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+//! use portpicker::pick_unused_port;
+//!
+//! struct Data(String);
+//!
+//! async fn client(addr: SocketAddrV4) -> io::Result<()> {
+//!     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+//!     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+//!     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+//!     // then send this mr to server to make server aware of this mr.
+//!     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+//!     rdma.write(&lmr, &rmr).await?;
+//!     // send the content of lmr to server
+//!     rdma.send_mr(rmr.clone()).await?;
+//!     Ok(())
+//! }
+//!
+//! #[tokio::main]
+//! async fn server(addr: SocketAddrV4) -> io::Result<()> {
+//!     let rdma_listener = RdmaListener::bind(addr).await?;
+//!     let rdma = rdma_listener.accept(1, 1, 512).await?;
+//!     let lmr = rdma.receive_local_mr().await?;
+//!     // print the content of lmr, which was `write` by client
+//!     unsafe { println!("{}", &*(*(lmr.as_ptr() as *const Data)).0) };
+//!     Ok(())
+//! }
+//! #[tokio::main]
+//! async fn main() {
+//!     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+//!     std::thread::spawn(move || server(addr));
+//!     tokio::time::sleep(Duration::new(1, 0)).await;
+//!     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+//! }
+//! ```
+//!
 //!
 #![deny(
     // The following are allowed by default lints according to
@@ -319,7 +376,50 @@ impl Rdma {
         Ok(())
     }
 
-    /// The send the content in the `lm`
+    /// Send the content in the `lm`
+    ///
+    /// Used with `receive`.
+    /// Application scenario such as: client put data into a local mr and `send` to server.
+    /// Server `receive` the mr sent by client and process data in it.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // put data into lmr
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive().await?;
+    ///     // read data from mr
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn send(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
         self.agent
@@ -330,6 +430,49 @@ impl Rdma {
     }
 
     /// Receive the content and stored in the returned memory region
+    ///
+    /// Used with `send`.
+    /// Application scenario such as: client put data into a local mr and `send` to server.
+    /// Server `receive` the mr sent by client and process data in it.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // put data into lmr
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive().await?;
+    ///     // read data from mr
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn receive(&self) -> io::Result<LocalMemoryRegion> {
         self.agent
@@ -340,6 +483,50 @@ impl Rdma {
     }
 
     /// Read content in the `rm` and store the content in the `lm`
+    ///
+    /// Application scenario such as: client put data into a local mr and `send_mr` to server.
+    /// Server get a remote mr by `receive_remote_mr`, and then get data from this rmr by rdma `read`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<Data>())?);
+    ///     // put data into lmr
+    ///     unsafe { *(Arc::get_mut(&mut lmr).unwrap().as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send_mr(lmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let rmr = rdma.receive_remote_mr().await?;
+    ///     // `read` data from rmr to lmr
+    ///     rdma.read(&mut lmr, &rmr).await?;
+    ///     // print the content of lmr, which was get from rmr by rdma `read`
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn read(
         &self,
@@ -350,12 +537,87 @@ impl Rdma {
     }
 
     /// Write content in the `lm` to `rm`
+    ///
+    /// Application scenario such as: client request a remote mr through `request_remote_mr`,
+    /// and then put data into this rmr by rdma `write`. After all client `send_mr` to make
+    /// server aware of this mr.
+    /// After client `send_mr`, server `receive_local_mr`, and then get data from this mr.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     // then send this mr to server to make server aware of this mr.
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     rdma.write(&lmr, &rmr).await?;
+    ///     // send the content of lmr to server
+    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     // print the content of lmr, which was `write` by client
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn write(&self, lm: &LocalMemoryRegion, rm: &RemoteMemoryRegion) -> io::Result<()> {
         self.qp.write(lm, rm).await
     }
 
-    /// Connect the remote endpoint build rmda queue pair by TCP connection
+    /// Connect the remote endpoint and build rmda queue pair by TCP connection
+    ///
+    /// `gid_index`: 0:ipv6, 1:ipv4
+    /// `max_message_length`: max length of msg used in `send`&`receive`.
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     println!("connected");
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn connect<A: ToSocketAddrs>(
         addr: A,
@@ -394,12 +656,95 @@ impl Rdma {
     }
 
     /// Allocate a local memory region
+    ///
+    /// You can use local mr to `send`&`receive` or `read`&`write` with a remote mr.
+    /// The parameter `layout` can be obtained by `Layout::new::<Data>()`.
+    /// You can learn the way to write or read data in mr in the following example.
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // put data into lmr
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive().await?;
+    ///     // read data from mr
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMemoryRegion> {
         self.allocator.alloc(&layout)
     }
 
     /// Request a remote memory region
+    ///
+    /// Used with `send_mr`, `receive_local_mr`, `read` and `write`.
+    /// Application scenario such as: client uses `request_remote_mr` to apply for
+    /// a remote mr from server, and makes server aware of this mr by `send_mr` to server.
+    /// For server, this mr is a local mr, which can be received through `receive_local_mr`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // request a mr located in server.
+    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     // do something with rmr like `write` data into it.
+    ///     // then send this mr to server to make server aware of this mr.
+    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the mr which was requested by client.
+    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     // do something with lmr like getting data from it.
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMemoryRegion> {
         if let Some(ref agent) = self.agent {
@@ -412,7 +757,50 @@ impl Rdma {
         }
     }
 
-    /// Send a memory region, either local mr or remote mr
+    /// Send a memory region to remote, either local mr or remote mr
+    ///
+    /// Used with `receive_local_mr` or `receive_remote_mr`
+    /// Application scenario such as: client uses `request_remote_mr` to apply for
+    /// a remote mr from server, and makes server aware of this mr by `send_mr` to server.
+    /// For server, this mr is a local mr, which can be received through `receive_local_mr`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // request a mr located in server.
+    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     // do something with rmr like `write` data into it.
+    ///     // then send this mr to server to make server aware of this mr.
+    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the mr which was requested by client.
+    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     // do something with lmr like getting data from it.
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn send_mr(&self, mr: Arc<dyn Any + Send + Sync>) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
@@ -426,6 +814,59 @@ impl Rdma {
     }
 
     /// Receive a local memory region
+    ///
+    /// Used with `send_mr`.
+    /// Application scenario such as: client uses `request_remote_mr` to apply for
+    /// a remote mr from server, and makes server aware of this mr by `send_mr` to server.
+    /// For server, this mr is a local mr, which can be received through `receive_local_mr`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// Application scenario such as: client request a remote mr through `request_remote_mr`,
+    /// and then put data into this rmr by rdma `write`. After all client `send_mr` to make
+    /// server aware of this mr.
+    /// After client `send_mr`, server `receive_local_mr`, and then get data from this mr.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     // then send this mr to server to make server aware of this mr.
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     rdma.write(&lmr, &rmr).await?;
+    ///     // send the content of lmr to server
+    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     // print the content of lmr, which was `write` by client
+    ///     unsafe { assert_eq!("hello world".to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
         if let Some(ref agent) = self.agent {
@@ -439,6 +880,50 @@ impl Rdma {
     }
 
     /// Receive a remote memory region
+    ///
+    /// Used with `send_mr`.
+    /// Application scenario such as: server alloc a local mr and put data into it and let
+    /// client know about this mr through `send_mr`. For client, this is a remote mr located
+    /// in server.Client receive the metadata of this mr by `receive_remote_mr`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // receive an mr located in server.
+    ///     let rmr = rdma.receive_remote_mr().await?;
+    ///     // do something with rmr like `read` data from it.
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     let mut lmr = Arc::new(rdma
+    ///         .alloc_local_mr(Layout::new::<Data>())?);
+    ///     // do something with lmr like put data into it.
+    ///     // send this lmr to client
+    ///     rdma.send_mr(lmr.clone()).await?;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main()
+    /// {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
         if let Some(ref agent) = self.agent {

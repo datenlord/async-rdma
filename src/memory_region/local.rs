@@ -1,15 +1,7 @@
-use super::{
-    mr_slice_from_raw_parts, mr_slice_from_raw_parts_mut, mr_slice_metadata, raw::RawMemoryRegion,
-    MrAccess, SliceIndex, SliceMetaData,
-};
-use crate::mr_allocator::MrAllocator;
-use std::{
-    fmt::Debug,
-    ops::{Add, Index, IndexMut, Range, RangeFrom, RangeFull, RangeTo},
-    slice,
-    sync::Arc,
-};
-use utilities::{cast_to_mut_ptr, cast_to_ptr, Cast};
+use utilities::OverflowArithmetic;
+
+use super::{raw::RawMemoryRegion, MrAccess};
+use std::{fmt::Debug, io, ops::Range, slice, sync::Arc};
 
 /// Local memory region trait
 pub trait LocalMrAccess: MrAccess {
@@ -44,18 +36,26 @@ pub trait LocalMrAccess: MrAccess {
     fn lkey(&self) -> u32;
 }
 
+/// Affiliation of mr.
+///
+/// Get `Master mr` from `mr_allocator` by `alloc`, and get `Slave mr` from `Master mr`
+/// by `get()`.
+#[derive(Debug)]
+pub(crate) enum MrAffiliation {
+    /// master local mr comes from mr_allocator
+    Master(Arc<RawMemoryRegion>),
+    /// slave local mr comes from master mr
+    Slave(Arc<LocalMr>),
+}
 /// Local Memory Region
-#[repr(C)]
 #[derive(Debug)]
 pub struct LocalMr {
-    /// The start address of thie MR
+    /// The affiliation of this mr
+    affil: MrAffiliation,
+    /// The start address of this mr
     addr: usize,
-    /// the length of this MR
+    /// the length of this mr
     len: usize,
-    /// raw memory region
-    raw: Arc<RawMemoryRegion>,
-    /// allocator the mr alloc from
-    allocator: Arc<MrAllocator>,
 }
 
 impl MrAccess for LocalMr {
@@ -71,256 +71,93 @@ impl MrAccess for LocalMr {
 
     #[inline]
     fn rkey(&self) -> u32 {
-        self.raw.rkey()
+        match self.affil {
+            MrAffiliation::Master(ref rmr) => rmr.rkey(),
+            // cause multi jump
+            MrAffiliation::Slave(ref lmr) => lmr.rkey(),
+        }
+    }
+
+    #[inline]
+    fn token(&self) -> super::MrToken {
+        super::MrToken {
+            addr: self.addr(),
+            len: self.length(),
+            rkey: self.rkey(),
+        }
     }
 }
 
 impl LocalMrAccess for LocalMr {
     #[inline]
     fn lkey(&self) -> u32 {
-        self.raw.lkey()
-    }
-}
-
-impl AsRef<LocalMrSlice> for LocalMr {
-    #[inline]
-    fn as_ref(&self) -> &LocalMrSlice {
-        unsafe {
-            &*mr_slice_from_raw_parts(
-                cast_to_ptr(self),
-                SliceMetaData {
-                    offset: 0,
-                    len: self.length().cast(),
-                },
-            )
+        match self.affil {
+            MrAffiliation::Master(ref rmr) => rmr.lkey(),
+            // cause multi jump
+            MrAffiliation::Slave(ref lmr) => lmr.lkey(),
         }
-    }
-}
-
-impl AsMut<LocalMrSlice> for LocalMr {
-    #[inline]
-    fn as_mut(&mut self) -> &mut LocalMrSlice {
-        unsafe {
-            &mut *mr_slice_from_raw_parts_mut(
-                cast_to_mut_ptr(self),
-                SliceMetaData {
-                    offset: 0,
-                    len: self.length().cast(),
-                },
-            )
-        }
-    }
-}
-
-impl Index<Range<usize>> for LocalMr {
-    type Output = LocalMrSlice;
-
-    #[inline]
-    fn index(&self, index: Range<usize>) -> &Self::Output {
-        index.index(self.as_ref())
-    }
-}
-
-impl Index<RangeFull> for LocalMr {
-    type Output = LocalMrSlice;
-
-    #[inline]
-    fn index(&self, _index: RangeFull) -> &Self::Output {
-        &self[0..self.length()]
-    }
-}
-
-impl Index<RangeFrom<usize>> for LocalMr {
-    type Output = LocalMrSlice;
-
-    #[inline]
-    fn index(&self, index: RangeFrom<usize>) -> &Self::Output {
-        &self[index.start..self.length()]
-    }
-}
-
-impl Index<RangeTo<usize>> for LocalMr {
-    type Output = LocalMrSlice;
-
-    #[inline]
-    fn index(&self, index: RangeTo<usize>) -> &Self::Output {
-        &self[0..index.end]
-    }
-}
-
-impl IndexMut<Range<usize>> for LocalMr {
-    #[inline]
-    fn index_mut(&mut self, index: Range<usize>) -> &mut Self::Output {
-        index.index_mut(self.as_mut())
-    }
-}
-
-impl IndexMut<RangeFull> for LocalMr {
-    #[inline]
-    fn index_mut(&mut self, _index: RangeFull) -> &mut Self::Output {
-        let len = self.length();
-        &mut self[0..len]
-    }
-}
-
-impl IndexMut<RangeFrom<usize>> for LocalMr {
-    #[inline]
-    fn index_mut(&mut self, index: RangeFrom<usize>) -> &mut Self::Output {
-        let len = self.length();
-        &mut self[index.start..len]
-    }
-}
-
-impl IndexMut<RangeTo<usize>> for LocalMr {
-    #[inline]
-    fn index_mut(&mut self, index: RangeTo<usize>) -> &mut Self::Output {
-        &mut self[0..index.end]
     }
 }
 
 impl LocalMr {
     /// New Local Mr
-    pub(crate) fn new(
-        addr: usize,
-        len: usize,
-        raw: Arc<RawMemoryRegion>,
-        allocator: Arc<MrAllocator>,
-    ) -> Self {
-        Self {
-            addr,
-            len,
-            raw,
-            allocator,
+    pub(crate) fn new(affil: MrAffiliation, addr: usize, len: usize) -> Self {
+        Self { affil, addr, len }
+    }
+
+    /// Get a slave lmr
+    #[inline]
+    pub fn get(self: &Arc<Self>, i: Range<usize>) -> io::Result<Self> {
+        // SAFETY: `self` is checked to be valid and in bounds above.
+        if i.start >= i.end || i.end > self.length() {
+            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+        } else {
+            let affil = MrAffiliation::Slave(Arc::<Self>::clone(self));
+            Ok(Self::new(affil, self.addr().overflow_add(i.start), i.len()))
+        }
+    }
+
+    /// return a slave mr and take the ownership of the master mr
+    pub(crate) fn take(self, i: Range<usize>) -> io::Result<Self> {
+        // SAFETY: `self` is checked to be valid and in bounds above.
+        if i.start >= i.end || i.end > self.length() {
+            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+        } else {
+            let addr = self.addr().overflow_add(i.start);
+            let affil = MrAffiliation::Slave(Arc::new(self));
+            Ok(Self::new(affil, addr, i.len()))
         }
     }
 }
 
-/// Local Mr Slice, A Dst
-#[repr(C)]
-#[derive(Debug)]
-pub struct LocalMrSlice {
-    /// local mr, the slice not own
-    mr: LocalMr,
-    /// unused for dst
-    _unused: [u8],
-}
-
-impl MrAccess for &LocalMrSlice {
+impl MrAccess for &LocalMr {
     #[inline]
     fn addr(&self) -> usize {
-        let metadata = mr_slice_metadata(*self);
-        let offset: usize = metadata.offset.cast();
-        self.mr.addr().add(offset)
+        self.addr
     }
 
     #[inline]
     fn length(&self) -> usize {
-        let metadata = mr_slice_metadata(*self);
-        metadata.len.cast()
+        self.len
     }
 
     #[inline]
     fn rkey(&self) -> u32 {
-        self.mr.rkey()
+        match self.affil {
+            MrAffiliation::Master(ref rmr) => rmr.rkey(),
+            // cause multi jump
+            MrAffiliation::Slave(ref lmr) => lmr.rkey(),
+        }
     }
 }
 
-impl MrAccess for &mut LocalMrSlice {
-    #[inline]
-    fn addr(&self) -> usize {
-        let metadata = mr_slice_metadata(*self);
-        let offset: usize = metadata.offset.cast();
-        self.mr.addr().add(offset)
-    }
-
-    #[inline]
-    fn length(&self) -> usize {
-        let metadata = mr_slice_metadata(*self);
-        metadata.len.cast()
-    }
-
-    #[inline]
-    fn rkey(&self) -> u32 {
-        self.mr.rkey()
-    }
-}
-
-impl LocalMrAccess for &LocalMrSlice {
+impl LocalMrAccess for &LocalMr {
     #[inline]
     fn lkey(&self) -> u32 {
-        self.mr.lkey()
-    }
-}
-
-impl LocalMrAccess for &mut LocalMrSlice {
-    #[inline]
-    fn lkey(&self) -> u32 {
-        self.mr.lkey()
-    }
-}
-
-unsafe impl SliceIndex<LocalMrSlice> for Range<usize> {
-    type Output = LocalMrSlice;
-
-    fn get(self, slice: &LocalMrSlice) -> Option<&Self::Output> {
-        if self.start >= self.end || self.end > slice.length() {
-            None
-        } else {
-            // SAFETY: `self` is checked to be valid and in bounds above.
-            unsafe { Some(&*self.get_unchecked(slice)) }
-        }
-    }
-
-    fn get_mut(self, slice: &mut LocalMrSlice) -> Option<&mut Self::Output> {
-        if self.start >= self.end || self.end > slice.length() {
-            None
-        } else {
-            // SAFETY: `self` is checked to be valid and in bounds above.
-            unsafe { Some(&mut *self.get_unchecked_mut(slice)) }
-        }
-    }
-
-    unsafe fn get_unchecked(self, slice: *const LocalMrSlice) -> *const Self::Output {
-        mr_slice_from_raw_parts(
-            slice.cast(),
-            SliceMetaData {
-                offset: self.start.cast(),
-                len: self.len().cast(),
-            },
-        )
-    }
-
-    unsafe fn get_unchecked_mut(self, slice: *mut LocalMrSlice) -> *mut Self::Output {
-        mr_slice_from_raw_parts_mut(
-            slice.cast(),
-            SliceMetaData {
-                offset: self.start.cast(),
-                len: self.len().cast(),
-            },
-        )
-    }
-
-    fn index(self, slice: &LocalMrSlice) -> &Self::Output {
-        #[allow(clippy::restriction)]
-        if self.start >= self.end {
-            panic!("range start is greater than end");
-        } else if self.end > slice.length() {
-            panic!("range end is greater than slice end");
-        } else {
-            // SAFETY: `self` is checked to be valid and in bounds above.
-            unsafe { &*self.get_unchecked(slice) }
-        }
-    }
-
-    fn index_mut(self, slice: &mut LocalMrSlice) -> &mut Self::Output {
-        #[allow(clippy::restriction)]
-        if self.start >= self.end {
-            panic!("range start is greater than end");
-        } else if self.end > slice.length() {
-            panic!("range end is greater than slice end");
-        } else {
-            // SAFETY: `self` is checked to be valid and in bounds above.
-            unsafe { &mut *self.get_unchecked_mut(slice) }
+        match self.affil {
+            MrAffiliation::Master(ref rmr) => rmr.lkey(),
+            // cause multi jump
+            MrAffiliation::Slave(ref lmr) => lmr.lkey(),
         }
     }
 }

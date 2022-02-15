@@ -79,9 +79,7 @@ use agent::Agent;
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
-pub use memory_region::{
-    LocalMr, LocalMrAccess, LocalMrSlice, MrAccess, RemoteMr, RemoteMrAccess, RemoteMrSlice,
-};
+pub use memory_region::{LocalMr, LocalMrAccess, MrAccess, RemoteMr, RemoteMrAccess};
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
@@ -323,7 +321,7 @@ impl Rdma {
 
     /// The send the content in the `lm`
     #[inline]
-    pub async fn send(&self, lm: &LocalMr) -> io::Result<()> {
+    pub async fn send(&self, lm: &Arc<LocalMr>) -> io::Result<()> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?

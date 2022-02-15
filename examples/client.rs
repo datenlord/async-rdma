@@ -1,5 +1,5 @@
 use async_rdma::{LocalMrAccess, Rdma};
-use std::alloc::Layout;
+use std::{alloc::Layout, sync::Arc};
 use tracing::debug;
 
 async fn example1(rdma: &Rdma) {
@@ -22,7 +22,7 @@ async fn example2(rdma: &Rdma) {
 async fn example3(rdma: &Rdma) {
     let mut lmr = rdma.alloc_local_mr(Layout::new::<i32>()).unwrap();
     unsafe { *(lmr.as_mut_ptr() as *mut i32) = 555 };
-    rdma.send(&lmr).await.unwrap();
+    rdma.send(&Arc::new(lmr)).await.unwrap();
     debug!("e3 send");
 }
 

@@ -50,7 +50,7 @@ impl Server {
             .unwrap();
         //write data to lmr
         unsafe { *(lmr_sync.as_mut_ptr() as *mut Request) = Request::Sync };
-        rdma.send(&lmr_sync)
+        rdma.send(&Arc::new(lmr_sync))
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();
@@ -106,7 +106,7 @@ impl Server {
                 .unwrap();
             // put `Response` into a new mr and send it to client
             unsafe { *(lmr_resp.as_mut_ptr() as *mut Response) = resp };
-            rdma.send(&lmr_resp)
+            rdma.send(&Arc::new(lmr_resp))
                 .await
                 .map_err(|err| println!("{}", &err))
                 .unwrap();
@@ -131,7 +131,7 @@ fn transmute_lmr_to_string(lmr: &LocalMr) -> String {
         let resp = &*(lmr.as_ptr() as *const Response);
         match resp {
             Response::Echo { msg } => msg.to_string(),
-            _ => panic!("invalid input"),
+            _ => panic!("invalid input : {:?}", resp),
         }
     }
 }
@@ -167,7 +167,7 @@ impl Client {
         unsafe { *(lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
         // send request to server by rdma `send`
         self.rdma_stub
-            .send(&lmr_req)
+            .send(&Arc::new(lmr_req))
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();

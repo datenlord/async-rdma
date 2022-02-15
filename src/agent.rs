@@ -140,7 +140,7 @@ impl Agent {
     }
 
     /// Send the content in the `lm` to the other side
-    pub(crate) async fn send_data(&self, lm: &LocalMr) -> io::Result<()> {
+    pub(crate) async fn send_data(&self, lm: &Arc<LocalMr>) -> io::Result<()> {
         let mut start = 0;
         let lm_len = lm.length();
         while start < lm_len {
@@ -150,7 +150,7 @@ impl Agent {
             });
             let response = self
                 .inner
-                .send_request_append_data(request, &[&&lm[start..end]])
+                .send_request_append_data(request, &[&lm.get(start..end).unwrap()])
                 .await?;
             if let ResponseKind::SendData(send_data_resp) = response {
                 if send_data_resp.status > 0 {
@@ -507,7 +507,7 @@ impl AgentInner {
         if let RequestKind::SendMR(_) = req.kind {
             msz = *REQUEST_HEADER_MAX_LEN;
         }
-        let header_buf = &&header_buf[0..msz];
+        let header_buf = &header_buf.take(0..msz)?;
         let mut lms: Vec<&dyn LocalMrAccess> = vec![header_buf];
         lms.extend(data);
         self.qp.send_sge(&lms).await?;
@@ -530,7 +530,7 @@ impl AgentInner {
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = &header[0..msz];
+        let buf = &header.take(0..msz)?;
         self.qp.send(&buf).await?;
         Ok(())
     }

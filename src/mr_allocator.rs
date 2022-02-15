@@ -1,5 +1,5 @@
 use crate::{
-    memory_region::{LocalMr, MrAccess, RawMemoryRegion},
+    memory_region::{LocalMr, MrAccess, MrAffiliation, RawMemoryRegion},
     protection_domain::ProtectionDomain,
 };
 use rdma_sys::ibv_access_flags;
@@ -18,7 +18,6 @@ pub(crate) struct MrAllocator {
 
 impl MrAllocator {
     /// Create a new MR allocator
-    #[allow(clippy::unwrap_in_result)]
     pub(crate) fn new(pd: Arc<ProtectionDomain>) -> Self {
         Self { pd }
     }
@@ -36,12 +35,8 @@ impl MrAllocator {
             layout.size(),
             access,
         )?);
-        Ok(LocalMr::new(
-            raw_mr.addr(),
-            raw_mr.length(),
-            raw_mr,
-            Arc::<MrAllocator>::clone(self),
-        ))
+        let affil = MrAffiliation::Master(Arc::<RawMemoryRegion>::clone(&raw_mr));
+        Ok(LocalMr::new(affil, raw_mr.addr(), raw_mr.length()))
     }
 }
 

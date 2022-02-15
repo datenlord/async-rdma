@@ -5,14 +5,14 @@ mod raw;
 /// Remote Memory Region
 mod remote;
 
+pub(crate) use local::MrAffiliation;
 #[allow(unreachable_pub)]
-pub use local::{LocalMr, LocalMrAccess, LocalMrSlice};
+pub use local::{LocalMr, LocalMrAccess};
 pub(crate) use raw::RawMemoryRegion;
 #[allow(unreachable_pub)]
-pub use remote::{RemoteMr, RemoteMrAccess, RemoteMrSlice};
+pub use remote::{RemoteMr, RemoteMrAccess};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-use utilities::cast_to_ptr;
 
 /// Rdma Memory Region Access
 pub trait MrAccess: Sync + Send + Debug {
@@ -45,29 +45,6 @@ pub struct MrToken {
     pub len: usize,
     /// The rkey
     pub rkey: u32,
-}
-
-/// Mr slice metadata, which size should equal to sizeof usize
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SliceMetaData {
-    /// start at the offset of Mr which this slice belong
-    offset: u32,
-    /// len of mr slice
-    len: u32,
-}
-
-impl From<usize> for SliceMetaData {
-    fn from(u: usize) -> Self {
-        unsafe { *(cast_to_ptr(&u)) }
-    }
-}
-
-impl From<SliceMetaData> for usize {
-    #[inline]
-    fn from(s: SliceMetaData) -> Self {
-        unsafe { *(cast_to_ptr(&s)) }
-    }
 }
 
 /// Slice index trait, copy of unstable rust std lib
@@ -108,74 +85,4 @@ pub(crate) unsafe trait SliceIndex<T: ?Sized> {
     /// Returns a mutable reference to the output at this location, panicking
     /// if out of bounds.
     fn index_mut(self, slice: &mut T) -> &mut Self::Output;
-}
-
-/// Mr slice Ptr Repr
-#[repr(C)]
-union MrSlicePtrRepr<T: ?Sized> {
-    /// const ptr
-    const_ptr: *const T,
-    /// mut ptr
-    mut_ptr: *mut T,
-    /// ptr and metadata components
-    components: MrSlicePtrComponents,
-}
-
-/// Mr slice components include Mr ptr and slice metadata
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MrSlicePtrComponents {
-    /// ptr to Mr
-    data_address: *const (),
-    /// metadata of mr slice
-    metadata: SliceMetaData,
-}
-
-/// get mr slice ptr from addr and memtadata
-#[inline]
-const fn mr_slice_from_raw_parts<T: ?Sized>(
-    data_address: *const (),
-    metadata: SliceMetaData,
-) -> *const T {
-    // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-    // and PtrComponents<T> have the same memory layouts. Only std can make this
-    // guarantee.
-    unsafe {
-        MrSlicePtrRepr {
-            components: MrSlicePtrComponents {
-                data_address,
-                metadata,
-            },
-        }
-        .const_ptr
-    }
-}
-
-/// get mut mr slice ptr from mut addr and memtadata
-#[inline]
-const fn mr_slice_from_raw_parts_mut<T: ?Sized>(
-    data_address: *mut (),
-    metadata: SliceMetaData,
-) -> *mut T {
-    // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-    // and PtrComponents<T> have the same memory layouts. Only std can make this
-    // guarantee.
-    unsafe {
-        MrSlicePtrRepr {
-            components: MrSlicePtrComponents {
-                data_address,
-                metadata,
-            },
-        }
-        .mut_ptr
-    }
-}
-
-/// get the metadata of mr slice
-#[inline]
-const fn mr_slice_metadata<T: ?Sized>(ptr: *const T) -> SliceMetaData {
-    // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-    // and PtrComponents<T> have the same memory layouts. Only std can make this
-    // guarantee.
-    unsafe { MrSlicePtrRepr { const_ptr: ptr }.components.metadata }
 }

@@ -29,13 +29,13 @@ impl MrAccess for RawMemoryRegion {
     }
 
     fn rkey(&self) -> u32 {
-        unsafe { *self.inner_mr.as_ptr() }.rkey
+        unsafe { self.inner_mr.as_ref().rkey }
     }
 }
 
 impl LocalMrAccess for RawMemoryRegion {
     fn lkey(&self) -> u32 {
-        unsafe { self.inner_mr.as_ref() }.lkey
+        unsafe { self.inner_mr.as_ref().lkey }
     }
 }
 

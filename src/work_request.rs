@@ -2,8 +2,8 @@ use crate::{
     completion_queue::WorkRequestId,
     memory_region::{LocalMemoryRegion, RemoteMemoryRegion},
 };
+use clippy_utilities::Cast;
 use rdma_sys::{ibv_recv_wr, ibv_send_flags, ibv_send_wr, ibv_sge, ibv_wr_opcode};
-use utilities::{ptr_to_usize, Cast};
 
 /// Send work request
 #[repr(C)]
@@ -36,6 +36,7 @@ impl SendWr {
     }
 
     /// create a new send work requet for "read"
+    #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
     pub(crate) fn new_read(
         lms: &[&LocalMemoryRegion],
         wr_id: WorkRequestId,
@@ -44,12 +45,13 @@ impl SendWr {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_READ;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
-        sr.inner.wr.rdma.remote_addr = ptr_to_usize(rm.as_ptr()).cast();
+        sr.inner.wr.rdma.remote_addr = (rm.as_ptr() as usize).cast();
         sr.inner.wr.rdma.rkey = rm.rkey();
         sr
     }
 
     /// create a new send work requet for "write"
+    #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
     pub(crate) fn new_write(
         lms: &[&LocalMemoryRegion],
         wr_id: WorkRequestId,
@@ -58,7 +60,7 @@ impl SendWr {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
-        sr.inner.wr.rdma.remote_addr = ptr_to_usize(rm.as_ptr()).cast();
+        sr.inner.wr.rdma.remote_addr = (rm.as_ptr() as usize).cast();
         sr.inner.wr.rdma.rkey = rm.rkey();
         sr
     }
@@ -118,9 +120,10 @@ impl AsMut<ibv_recv_wr> for RecvWr {
 
 impl From<&LocalMemoryRegion> for ibv_sge {
     #[inline]
+    #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
     fn from(lmr: &LocalMemoryRegion) -> Self {
         Self {
-            addr: ptr_to_usize(lmr.as_ptr()).cast(),
+            addr: (lmr.as_ptr() as usize).cast(),
             length: lmr.length().cast(),
             lkey: lmr.lkey(),
         }

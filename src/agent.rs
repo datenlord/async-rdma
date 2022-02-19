@@ -4,6 +4,7 @@ use crate::{
     mr_allocator::MRAllocator,
     queue_pair::QueuePair,
 };
+use clippy_utilities::{Cast, OverflowArithmetic};
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,7 +23,6 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, trace};
-use utilities::{Cast, OverflowArithmetic};
 /// An agent for handling the dirty rdma request and async events
 #[derive(Debug)]
 pub(crate) struct Agent {

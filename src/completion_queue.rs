@@ -1,4 +1,5 @@
 use crate::{context::Context, event_channel::EventChannel, id};
+use clippy_utilities::Cast;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use rdma_sys::{
@@ -6,7 +7,6 @@ use rdma_sys::{
 };
 use std::{fmt::Debug, io, mem, ops::Sub, ptr::NonNull};
 use thiserror::Error;
-use utilities::Cast;
 
 /// Complete Queue Structure
 #[derive(Debug)]

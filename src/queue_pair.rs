@@ -6,6 +6,7 @@ use crate::{
     protection_domain::ProtectionDomain,
     work_request::{RecvWr, SendWr},
 };
+use clippy_utilities::Cast;
 use futures::{ready, Future, FutureExt};
 use rdma_sys::{
     ibv_access_flags, ibv_cq, ibv_destroy_qp, ibv_modify_qp, ibv_post_recv, ibv_post_send, ibv_qp,
@@ -27,7 +28,6 @@ use tokio::{
     time::{sleep, Sleep},
 };
 use tracing::debug;
-use utilities::Cast;
 
 /// Queue pair initialized attribute
 struct QueuePairInitAttr {

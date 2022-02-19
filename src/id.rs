@@ -1,6 +1,6 @@
+use clippy_utilities::OverflowArithmetic;
 use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
-use utilities::OverflowArithmetic;
 
 /// Creat a random u64 id.
 ///

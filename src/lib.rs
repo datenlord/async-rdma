@@ -132,6 +132,7 @@ mod queue_pair;
 mod work_request;
 
 use agent::Agent;
+use clippy_utilities::Cast;
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
@@ -145,7 +146,6 @@ use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
 };
 use tracing::debug;
-use utilities::Cast;
 
 pub use memory_region::{LocalMemoryRegion, RemoteMemoryRegion};
 

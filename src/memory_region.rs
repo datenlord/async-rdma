@@ -1,4 +1,5 @@
 use crate::{agent::AgentInner, protection_domain::ProtectionDomain};
+use clippy_utilities::{Cast, OverflowArithmetic};
 use rdma_sys::{ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,7 +12,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 use tracing::error;
-use utilities::{mut_ptr_to_usize, Cast, OverflowArithmetic};
 
 /// Memory Region
 /// It's managed in the hierarchy way
@@ -290,6 +290,7 @@ impl LocalMemoryRegion {
     }
 
     /// Create a local memory region from protection domain
+    #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
     pub(crate) fn new_from_pd(
         pd: &Arc<ProtectionDomain>,
         layout: Layout,
@@ -305,7 +306,7 @@ impl LocalMemoryRegion {
             inner_mr,
             _pd: Arc::<ProtectionDomain>::clone(pd),
         };
-        Ok(MemoryRegion::new_root(mut_ptr_to_usize(addr), len, local))
+        Ok(MemoryRegion::new_root(addr as usize, len, local))
     }
 }
 

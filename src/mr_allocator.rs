@@ -1,7 +1,7 @@
 use crate::{memory_region::LocalMemoryRegion, protection_domain::ProtectionDomain};
+use clippy_utilities::OverflowArithmetic;
 use rdma_sys::ibv_access_flags;
 use std::{alloc::Layout, io, sync::Arc};
-use utilities::OverflowArithmetic;
 
 /// Memory region allocator
 #[derive(Debug)]

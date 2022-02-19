@@ -2,13 +2,13 @@ use crate::{
     completion_queue::CompletionQueue, event_channel::EventChannel, gid::Gid,
     protection_domain::ProtectionDomain,
 };
+use clippy_utilities::Cast;
 use rdma_sys::{
     ibv_close_device, ibv_context, ibv_free_device_list, ibv_get_device_list, ibv_get_device_name,
     ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
 use std::{ffi::CStr, fmt::Debug, io, ops::Sub, ptr::NonNull, sync::Arc};
 use tracing::warn;
-use utilities::Cast;
 
 /// RDMA device context
 pub(crate) struct Context {

@@ -7,7 +7,7 @@
 //!
 //!     cargo run --example rpc
 
-use async_rdma::{LocalMemoryRegion, Rdma, RdmaListener};
+use async_rdma::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaListener};
 use std::{alloc::Layout, sync::Arc, time::Duration};
 use tokio::net::ToSocketAddrs;
 
@@ -72,16 +72,15 @@ impl Server {
                 Self::process_request(req)
             };
             // alloc a lmr for client to 'read' 'Response'
-            let mut lmr_resp = Arc::new(
-                rdma.alloc_local_mr(Layout::new::<Response>())
-                    .map_err(|err| println!("{}", &err))
-                    .unwrap(),
-            );
+            let mut lmr_resp = rdma
+                .alloc_local_mr(Layout::new::<Response>())
+                .map_err(|err| println!("{}", &err))
+                .unwrap();
             // put 'Response' into lmr
-            unsafe { *(Arc::get_mut(&mut lmr_resp).unwrap().as_mut_ptr() as *mut Response) = resp };
+            unsafe { *(lmr_resp.as_mut_ptr() as *mut Response) = resp };
             Self::sync_with_client(&rdma).await;
             // send the metadata of lmr to client to 'read'
-            rdma.send_mr(lmr_resp.clone())
+            rdma.send_local_mr(lmr_resp)
                 .await
                 .map_err(|err| println!("{}", &err))
                 .unwrap();
@@ -127,12 +126,12 @@ impl Server {
     }
 }
 
-fn transmute_lmr_to_string(lmr: &LocalMemoryRegion) -> String {
+fn transmute_lmr_to_string(lmr: &LocalMr) -> String {
     unsafe {
         let resp = &*(lmr.as_ptr() as *const Response);
         match resp {
             Response::Echo { msg } => msg.to_string(),
-            _ => panic!("invalid input"),
+            _ => panic!("invalid input : {:?}", resp),
         }
     }
 }
@@ -199,22 +198,21 @@ impl Client {
         // put data into lmr
         unsafe { *(lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
         // request a remote mr located in the server
-        let rmr_req = Arc::new(
-            self.rdma_stub
-                .request_remote_mr(Layout::new::<Request>())
-                .await
-                .map_err(|err| println!("{}", &err))
-                .unwrap(),
-        );
-        // send metadata of the remote mr to make server aware of it.
-        self.rdma_stub
-            .send_mr(rmr_req.clone())
+        let mut rmr_req = self
+            .rdma_stub
+            .request_remote_mr(Layout::new::<Request>())
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();
         // write data from local mr to remote mr by rdma `write`
         self.rdma_stub
-            .write(&lmr_req, rmr_req.as_ref())
+            .write(&lmr_req, &mut rmr_req)
+            .await
+            .map_err(|err| println!("{}", &err))
+            .unwrap();
+        // send metadata of the remote mr to make server aware of it.
+        self.rdma_stub
+            .send_remote_mr(rmr_req)
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();
@@ -264,6 +262,7 @@ impl Client {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     //run rpc server
     std::thread::spawn(|| Server::start("127.0.0.1:5555"));
     println!("rpc server started");

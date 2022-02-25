@@ -24,18 +24,19 @@
 //! use async_rdma::{Rdma, RdmaListener};
 //! use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
 //! use portpicker::pick_unused_port;
+//! use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
 //!
 //! struct Data(String);
 //!
 //! async fn client(addr: SocketAddrV4) -> io::Result<()> {
 //!     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
 //!     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
-//!     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+//!     let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
 //!     // then send this mr to server to make server aware of this mr.
 //!     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
-//!     rdma.write(&lmr, &rmr).await?;
+//!     rdma.write(&lmr, &mut rmr).await?;
 //!     // send the content of lmr to server
-//!     rdma.send_mr(rmr.clone()).await?;
+//!     rdma.send_remote_mr(rmr).await?;
 //!     Ok(())
 //! }
 //!
@@ -102,6 +103,7 @@
     clippy::shadow_reuse, // Not too much bad
     clippy::exhaustive_enums,
     clippy::exhaustive_structs,
+    clippy::indexing_slicing,
 )]
 
 /// The agent that handles async events in the background
@@ -136,18 +138,21 @@ use clippy_utilities::Cast;
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
-use mr_allocator::MRAllocator;
+pub use memory_region::{
+    local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
+    remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
+    MrAccess,
+};
+use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
 use rdma_sys::ibv_access_flags;
-use std::{alloc::Layout, any::Any, fmt::Debug, io, sync::Arc};
+use std::{alloc::Layout, fmt::Debug, io, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
 };
 use tracing::debug;
-
-pub use memory_region::{LocalMemoryRegion, RemoteMemoryRegion};
 
 #[macro_use]
 extern crate lazy_static;
@@ -323,7 +328,7 @@ pub struct Rdma {
     #[allow(dead_code)]
     pd: Arc<ProtectionDomain>,
     /// Memory region allocator
-    allocator: Arc<MRAllocator>,
+    allocator: Arc<MrAllocator>,
     /// Queue pair
     qp: Arc<QueuePair>,
     /// Background agent
@@ -344,7 +349,7 @@ impl Rdma {
         let cq = Arc::new(ctx.create_completion_queue(cq_size, ec)?);
         let event_listener = EventListener::new(cq);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MRAllocator::new(Arc::<ProtectionDomain>::clone(&pd))?);
+        let allocator = Arc::new(MrAllocator::new(Arc::<ProtectionDomain>::clone(&pd)));
         let qp = Arc::new(
             pd.create_queue_pair_builder()
                 .set_event_listener(event_listener)
@@ -389,6 +394,8 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+
     ///
     /// struct Data(String);
     ///
@@ -421,7 +428,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn send(&self, lm: &LocalMemoryRegion) -> io::Result<()> {
+    pub async fn send(&self, lm: &LocalMr) -> io::Result<()> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
@@ -442,6 +449,7 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
     ///
     /// struct Data(String);
     ///
@@ -474,7 +482,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn receive(&self) -> io::Result<LocalMemoryRegion> {
+    pub async fn receive(&self) -> io::Result<LocalMr> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
@@ -494,15 +502,17 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+    ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
-    ///     let mut lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<Data>())?);
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
     ///     // put data into lmr
-    ///     unsafe { *(Arc::get_mut(&mut lmr).unwrap().as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
     ///     // send the content of lmr to server
-    ///     rdma.send_mr(lmr.clone()).await?;
+    ///     rdma.send_local_mr(lmr).await?;
     ///     Ok(())
     /// }
     ///
@@ -530,8 +540,8 @@ impl Rdma {
     #[inline]
     pub async fn read(
         &self,
-        lm: &mut LocalMemoryRegion,
-        rm: &RemoteMemoryRegion,
+        lm: &mut dyn LocalMrWriteAccess,
+        rm: &dyn RemoteMrReadAccess,
     ) -> io::Result<()> {
         self.qp.read(lm, rm).await
     }
@@ -550,18 +560,19 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
     ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
-    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
     ///     // then send this mr to server to make server aware of this mr.
     ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
-    ///     rdma.write(&lmr, &rmr).await?;
+    ///     rdma.write(&lmr, &mut rmr).await?;
     ///     // send the content of lmr to server
-    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     rdma.send_remote_mr(rmr).await?;
     ///     Ok(())
     /// }
     ///
@@ -583,7 +594,11 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn write(&self, lm: &LocalMemoryRegion, rm: &RemoteMemoryRegion) -> io::Result<()> {
+    pub async fn write(
+        &self,
+        lm: &dyn LocalMrReadAccess,
+        rm: &mut dyn RemoteMrWriteAccess,
+    ) -> io::Result<()> {
         self.qp.write(lm, rm).await
     }
 
@@ -648,7 +663,7 @@ impl Rdma {
         rdma.qp_handshake(remote)?;
         let agent = Arc::new(Agent::new(
             Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MRAllocator>::clone(&rdma.allocator),
+            Arc::<MrAllocator>::clone(&rdma.allocator),
             max_message_length,
         )?);
         rdma.agent = Some(agent);
@@ -666,6 +681,7 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
     ///
     /// struct Data(String);
     ///
@@ -698,7 +714,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMemoryRegion> {
+    pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMr> {
         self.allocator.alloc(&layout)
     }
 
@@ -716,15 +732,17 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+    ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     // request a mr located in server.
-    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     let rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
     ///     // do something with rmr like `write` data into it.
     ///     // then send this mr to server to make server aware of this mr.
-    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     rdma.send_remote_mr(rmr).await?;
     ///     Ok(())
     /// }
     ///
@@ -746,7 +764,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMemoryRegion> {
+    pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMr> {
         if let Some(ref agent) = self.agent {
             agent.request_remote_mr(layout).await
         } else {
@@ -757,11 +775,70 @@ impl Rdma {
         }
     }
 
-    /// Send a memory region to remote, either local mr or remote mr
+    /// Send a local memory region metadata to remote
     ///
-    /// Used with `receive_local_mr` or `receive_remote_mr`
+    /// Used with `receive_remote_mr`
+    ///
+    /// Application scenario such as: client uses `alloc_local_mr` to alloc a local mr, and
+    /// makes server aware of this mr by `send_local_mr` to server.
+    /// For server, this mr is a remote mr, which can be received through `receive_remote_mr`.
+    ///
+    /// Application scenario can be seen in `[/example/rpc.rs]`
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
+    /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // request a mr located in server.
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // do something with rmr like `write` data into it.
+    ///     // then send this mr to server to make server aware of this mr.
+    ///     rdma.send_local_mr(lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the mr which was requested by client.
+    ///     let rmr = rdma.receive_remote_mr().await?;
+    ///     // do something with lmr like getting data from it.
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn send_local_mr(&self, mr: LocalMr) -> io::Result<()> {
+        if let Some(ref agent) = self.agent {
+            agent.send_local_mr(mr).await
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Agent is not ready, please wait a while",
+            ))
+        }
+    }
+
+    /// Send a remote memory region metadata to remote
+    ///
+    /// Used with `receive_local_mr`.
+    ///
     /// Application scenario such as: client uses `request_remote_mr` to apply for
-    /// a remote mr from server, and makes server aware of this mr by `send_mr` to server.
+    /// a remote mr from server, and makes server aware of this mr by `send_remote_mr` to server.
     /// For server, this mr is a local mr, which can be received through `receive_local_mr`.
     ///
     /// Application scenario can be seen in `[/example/rpc.rs]`
@@ -771,16 +848,17 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
     ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     // request a mr located in server.
-    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     let rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
     ///     // do something with rmr like `write` data into it.
     ///     // then send this mr to server to make server aware of this mr.
-    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     rdma.send_remote_mr(rmr).await?;
     ///     Ok(())
     /// }
     ///
@@ -802,9 +880,9 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn send_mr(&self, mr: Arc<dyn Any + Send + Sync>) -> io::Result<()> {
+    pub async fn send_remote_mr(&self, mr: RemoteMr) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
-            agent.send_mr(mr).await
+            agent.send_remote_mr(mr).await
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -835,18 +913,19 @@ impl Rdma {
     /// use async_rdma::{Rdma, RdmaListener};
     /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
+    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
     ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
-    ///     let rmr = Arc::new(rdma.request_remote_mr(Layout::new::<Data>()).await?);
+    ///     let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
     ///     // then send this mr to server to make server aware of this mr.
     ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
-    ///     rdma.write(&lmr, &rmr).await?;
+    ///     rdma.write(&lmr, &mut rmr).await?;
     ///     // send the content of lmr to server
-    ///     rdma.send_mr(rmr.clone()).await?;
+    ///     rdma.send_remote_mr(rmr).await?;
     ///     Ok(())
     /// }
     ///
@@ -868,7 +947,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn receive_local_mr(&self) -> io::Result<Arc<LocalMemoryRegion>> {
+    pub async fn receive_local_mr(&self) -> io::Result<LocalMr> {
         if let Some(ref agent) = self.agent {
             agent.receive_local_mr().await
         } else {
@@ -908,11 +987,10 @@ impl Rdma {
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
     ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
-    ///     let mut lmr = Arc::new(rdma
-    ///         .alloc_local_mr(Layout::new::<Data>())?);
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
     ///     // do something with lmr like put data into it.
     ///     // send this lmr to client
-    ///     rdma.send_mr(lmr.clone()).await?;
+    ///     rdma.send_local_mr(lmr).await?;
     ///     Ok(())
     /// }
     /// #[tokio::main]
@@ -925,7 +1003,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn receive_remote_mr(&self) -> io::Result<RemoteMemoryRegion> {
+    pub async fn receive_remote_mr(&self) -> io::Result<RemoteMr> {
         if let Some(ref agent) = self.agent {
             agent.receive_remote_mr().await
         } else {
@@ -992,7 +1070,7 @@ impl RdmaListener {
         debug!("handshake done");
         let agent = Arc::new(Agent::new(
             Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MRAllocator>::clone(&rdma.allocator),
+            Arc::<MrAllocator>::clone(&rdma.allocator),
             max_message_length,
         )?);
         rdma.agent = Some(agent);

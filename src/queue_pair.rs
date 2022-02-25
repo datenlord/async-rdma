@@ -2,7 +2,10 @@ use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
     event_listener::EventListener,
     gid::Gid,
-    memory_region::{LocalMemoryRegion, RemoteMemoryRegion},
+    memory_region::{
+        local::{LocalMrReadAccess, LocalMrWriteAccess},
+        remote::{RemoteMrReadAccess, RemoteMrWriteAccess},
+    },
     protection_domain::ProtectionDomain,
     work_request::{RecvWr, SendWr},
 };
@@ -274,7 +277,7 @@ impl QueuePair {
     }
 
     /// submit a send request
-    fn submit_send(&self, lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> io::Result<()> {
+    fn submit_send(&self, lms: &[&dyn LocalMrReadAccess], wr_id: WorkRequestId) -> io::Result<()> {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut sr = SendWr::new_send(lms, wr_id);
         self.event_listener.cq.req_notify(false)?;
@@ -286,7 +289,11 @@ impl QueuePair {
     }
 
     /// submit a receive request
-    fn submit_receive(&self, lms: &[&LocalMemoryRegion], wr_id: WorkRequestId) -> io::Result<()> {
+    fn submit_receive(
+        &self,
+        lms: &[&mut dyn LocalMrWriteAccess],
+        wr_id: WorkRequestId,
+    ) -> io::Result<()> {
         let mut rr = RecvWr::new_recv(lms, wr_id);
         let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
         self.event_listener.cq.req_notify(false)?;
@@ -300,8 +307,8 @@ impl QueuePair {
     /// submit a read request
     fn submit_read(
         &self,
-        lms: &[&LocalMemoryRegion],
-        rm: &RemoteMemoryRegion,
+        lms: &[&mut dyn LocalMrWriteAccess],
+        rm: &dyn RemoteMrReadAccess,
         wr_id: WorkRequestId,
     ) -> io::Result<()> {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
@@ -317,8 +324,8 @@ impl QueuePair {
     /// submit a write request
     fn submit_write(
         &self,
-        lms: &[&LocalMemoryRegion],
-        rm: &RemoteMemoryRegion,
+        lms: &[&dyn LocalMrReadAccess],
+        rm: &mut dyn RemoteMrWriteAccess,
         wr_id: WorkRequestId,
     ) -> io::Result<()> {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
@@ -334,7 +341,7 @@ impl QueuePair {
     /// send a slice of local memory regions
     pub(crate) fn send_sge<'a>(
         self: &Arc<Self>,
-        lms: &[&'a LocalMemoryRegion],
+        lms: &'a [&'a dyn LocalMrReadAccess],
     ) -> QueuePairOps<QPSend<'a>> {
         let send = QPSend::new(lms);
         QueuePairOps::new(Arc::<Self>::clone(self), send)
@@ -343,7 +350,7 @@ impl QueuePair {
     /// receive data to a local memory region
     pub(crate) fn receive_sge<'a>(
         self: &Arc<Self>,
-        lms: &[&'a LocalMemoryRegion],
+        lms: &'a [&'a mut dyn LocalMrWriteAccess],
     ) -> QueuePairOps<QPRecv<'a>> {
         let recv = QPRecv::new(lms);
         QueuePairOps::new(Arc::<Self>::clone(self), recv)
@@ -352,8 +359,8 @@ impl QueuePair {
     /// read data from `rm` to `lms`
     pub(crate) async fn read_sge(
         &self,
-        lms: &[&LocalMemoryRegion],
-        rm: &RemoteMemoryRegion,
+        lms: &[&mut dyn LocalMrWriteAccess],
+        rm: &dyn RemoteMrReadAccess,
     ) -> io::Result<()> {
         let (wr_id, mut resp_rx) = self.event_listener.register();
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
@@ -370,8 +377,8 @@ impl QueuePair {
     /// write data from `lms` to `rm`
     pub(crate) async fn write_sge(
         &self,
-        lms: &[&LocalMemoryRegion],
-        rm: &RemoteMemoryRegion,
+        lms: &[&dyn LocalMrReadAccess],
+        rm: &mut dyn RemoteMrWriteAccess,
     ) -> io::Result<()> {
         let (wr_id, mut resp_rx) = self.event_listener.register();
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
@@ -386,20 +393,23 @@ impl QueuePair {
     }
 
     /// Send data in `lm`
-    pub(crate) fn send(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPSend> {
-        self.send_sge(&[lm])
+    pub(crate) async fn send(self: &Arc<Self>, lm: &dyn LocalMrReadAccess) -> io::Result<()> {
+        self.send_sge(&[lm]).await
     }
 
     /// Receive data and store it into `lm`
-    pub(crate) fn receive(self: &Arc<Self>, lm: &LocalMemoryRegion) -> QueuePairOps<QPRecv> {
-        self.receive_sge(&[lm])
+    pub(crate) async fn _receive(
+        self: &Arc<Self>,
+        lm: &'_ mut dyn LocalMrWriteAccess,
+    ) -> io::Result<usize> {
+        self.receive_sge(&[lm]).await
     }
 
     /// read data from `rm` to `lm`
     pub(crate) async fn read(
         &self,
-        lm: &mut LocalMemoryRegion,
-        rm: &RemoteMemoryRegion,
+        lm: &mut dyn LocalMrWriteAccess,
+        rm: &dyn RemoteMrReadAccess,
     ) -> io::Result<()> {
         self.read_sge(&[lm], rm).await
     }
@@ -407,8 +417,8 @@ impl QueuePair {
     /// write data from `lm` to `rm`
     pub(crate) async fn write(
         &self,
-        lm: &LocalMemoryRegion,
-        rm: &RemoteMemoryRegion,
+        lm: &dyn LocalMrReadAccess,
+        rm: &mut dyn RemoteMrWriteAccess,
     ) -> io::Result<()> {
         self.write_sge(&[lm], rm).await
     }
@@ -447,17 +457,17 @@ pub(crate) trait QueuePairOp {
 #[derive(Debug)]
 pub(crate) struct QPSend<'lm> {
     /// local memory regions
-    lms: Vec<&'lm LocalMemoryRegion>,
+    lms: &'lm [&'lm dyn LocalMrReadAccess],
     /// length of data to send
     len: usize,
 }
 
 impl<'lm> QPSend<'lm> {
     /// Create a new send operation from `lms`
-    fn new(lms: &[&'lm LocalMemoryRegion]) -> Self {
+    fn new(lms: &'lm [&'lm dyn LocalMrReadAccess]) -> Self {
         Self {
             len: lms.iter().map(|lm| lm.length()).sum(),
-            lms: lms.to_vec(),
+            lms,
         }
     }
 }
@@ -466,7 +476,7 @@ impl QueuePairOp for QPSend<'_> {
     type Output = ();
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
-        qp.submit_send(&self.lms, wr_id)
+        qp.submit_send(self.lms, wr_id)
     }
 
     fn should_resubmit(&self, e: &io::Error) -> bool {
@@ -477,18 +487,17 @@ impl QueuePairOp for QPSend<'_> {
         wc.result().map(|sz| assert_eq!(sz, self.len))
     }
 }
-
 /// Queue pair receive operation
 #[derive(Debug)]
 pub(crate) struct QPRecv<'lm> {
     /// the local memory regions
-    lms: Vec<&'lm LocalMemoryRegion>,
+    lms: &'lm [&'lm mut dyn LocalMrWriteAccess],
 }
 
 impl<'lm> QPRecv<'lm> {
     /// create a new queue pair receive operation
-    fn new(lms: &[&'lm LocalMemoryRegion]) -> Self {
-        Self { lms: lms.to_vec() }
+    fn new(lms: &'lm [&'lm mut dyn LocalMrWriteAccess]) -> Self {
+        Self { lms }
     }
 }
 
@@ -496,7 +505,7 @@ impl QueuePairOp for QPRecv<'_> {
     type Output = usize;
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
-        qp.submit_receive(&self.lms, wr_id)
+        qp.submit_receive(self.lms, wr_id)
     }
 
     fn should_resubmit(&self, e: &io::Error) -> bool {

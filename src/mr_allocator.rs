@@ -1,40 +1,41 @@
-use crate::{memory_region::LocalMemoryRegion, protection_domain::ProtectionDomain};
-use clippy_utilities::OverflowArithmetic;
+use crate::{
+    memory_region::{local::LocalMr, MrAccess, RawMemoryRegion},
+    protection_domain::ProtectionDomain,
+};
 use rdma_sys::ibv_access_flags;
-use std::{alloc::Layout, io, sync::Arc};
+use std::{
+    alloc::{alloc, Layout},
+    io,
+    sync::Arc,
+};
 
 /// Memory region allocator
 #[derive(Debug)]
-pub(crate) struct MRAllocator {
+pub(crate) struct MrAllocator {
     /// Protection domain that holds the allocator
-    _pd: Arc<ProtectionDomain>,
-    /// The initial MR, and all allocated MRs comes from here
-    mr: Arc<LocalMemoryRegion>,
+    pd: Arc<ProtectionDomain>,
 }
 
-impl MRAllocator {
+impl MrAllocator {
     /// Create a new MR allocator
-    #[allow(clippy::unwrap_in_result)]
-    pub(crate) fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self> {
+    pub(crate) fn new(pd: Arc<ProtectionDomain>) -> Self {
+        Self { pd }
+    }
+
+    /// Allocate a MR according to the `layout`
+    pub(crate) fn alloc(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        let addr = unsafe { alloc(*layout) };
         let access = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
             | ibv_access_flags::IBV_ACCESS_REMOTE_READ
             | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
-        let mr = Arc::new(
-            // TODO: the default size should be configurable
-            pd.alloc_memory_region(
-                // the alignment is guaranteed
-                #[allow(clippy::unwrap_used)]
-                Layout::from_size_align(4096.overflow_mul(2), 4096).unwrap(),
-                access,
-            )?,
-        );
-        Ok(Self { _pd: pd, mr })
-    }
-
-    /// Allocate a MR according to the `layout`
-    pub(crate) fn alloc(&self, layout: &Layout) -> io::Result<LocalMemoryRegion> {
-        self.mr.alloc(layout)
+        let raw_mr = Arc::new(RawMemoryRegion::register_from_pd(
+            &self.pd,
+            addr,
+            layout.size(),
+            access,
+        )?);
+        Ok(LocalMr::new(raw_mr.addr(), raw_mr.length(), raw_mr))
     }
 }
 

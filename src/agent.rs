@@ -40,6 +40,9 @@ pub(crate) struct Agent {
     data_recv: Mutex<Receiver<(LocalMr, usize)>>,
     /// Join handle for the agent background thread
     handle: JoinHandle<io::Result<()>>,
+    /// Agent thread resource
+    #[allow(dead_code)]
+    agent_thread: Arc<AgentThread>,
     /// Max message length
     max_sr_data_len: usize,
 }
@@ -72,7 +75,7 @@ impl Agent {
             allocator,
             max_sr_data_len,
         });
-        let handle = AgentThread::run(
+        let (agent_thread, handle) = AgentThread::run(
             Arc::<AgentInner>::clone(&inner),
             local_mr_send,
             remote_mr_send,
@@ -84,6 +87,7 @@ impl Agent {
             inner,
             data_recv: data_recv_mutex,
             handle,
+            agent_thread,
             max_sr_data_len,
             local_mr_recv,
             remote_mr_recv,
@@ -210,6 +214,7 @@ impl Agent {
 }
 
 /// Agent thread data structure, actually it spawn a task on the tokio thread pool
+#[derive(Debug)]
 struct AgentThread {
     /// The agent part that may be shared in the memory region
     inner: Arc<AgentInner>,
@@ -231,7 +236,7 @@ impl AgentThread {
         remote_mr_send: Sender<RemoteMr>,
         data_send: Sender<(LocalMr, usize)>,
         max_sr_data_len: usize,
-    ) -> io::Result<JoinHandle<io::Result<()>>> {
+    ) -> io::Result<(Arc<Self>, JoinHandle<io::Result<()>>)> {
         let agent = Arc::new(Self {
             inner,
             local_mr_send,
@@ -248,7 +253,10 @@ impl AgentThread {
                 ),
             ))
         } else {
-            Ok(tokio::spawn(agent.main()))
+            Ok((
+                Arc::<AgentThread>::clone(&agent),
+                tokio::spawn(agent.main()),
+            ))
         }
     }
 

@@ -538,11 +538,11 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn read(
-        &self,
-        lm: &mut dyn LocalMrWriteAccess,
-        rm: &dyn RemoteMrReadAccess,
-    ) -> io::Result<()> {
+    pub async fn read<LW, RR>(&self, lm: &mut LW, rm: &RR) -> io::Result<()>
+    where
+        LW: LocalMrWriteAccess,
+        RR: RemoteMrReadAccess,
+    {
         self.qp.read(lm, rm).await
     }
 
@@ -594,11 +594,11 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn write(
-        &self,
-        lm: &dyn LocalMrReadAccess,
-        rm: &mut dyn RemoteMrWriteAccess,
-    ) -> io::Result<()> {
+    pub async fn write<LR, RW>(&self, lm: &LR, rm: &mut RW) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
         self.qp.write(lm, rm).await
     }
 

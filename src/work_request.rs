@@ -20,14 +20,16 @@ pub(crate) struct SendWr {
 
 impl SendWr {
     /// create a new send work request
-    #[allow(single_use_lifetimes)]
-    fn new<'lm, LM: Borrow<dyn LocalMrReadAccess + 'lm>>(lms: &[LM], wr_id: WorkRequestId) -> Self {
+    fn new<LR>(lms: &[&LR], wr_id: WorkRequestId) -> Self
+    where
+        LR: LocalMrReadAccess,
+    {
         assert!(!lms.is_empty());
         let mut sges: Vec<ibv_sge> = lms
             .iter()
             .map(|lm| {
-                let lm: &dyn LocalMrReadAccess = lm.borrow();
-                Into::<ibv_sge>::into(lm)
+                let lm: &LR = lm.borrow();
+                sge_from_mr(lm)
             })
             .collect();
         let mut inner = unsafe { std::mem::zeroed::<ibv_send_wr>() };
@@ -39,7 +41,10 @@ impl SendWr {
     }
 
     /// create a new send work requet for "send"
-    pub(crate) fn new_send(lms: &[&dyn LocalMrReadAccess], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_send<LR>(lms: &[&LR], wr_id: WorkRequestId) -> Self
+    where
+        LR: LocalMrReadAccess,
+    {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
@@ -48,17 +53,17 @@ impl SendWr {
 
     /// create a new send work requet for "read"
     #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
-    pub(crate) fn new_read(
-        lms: &[&mut dyn LocalMrWriteAccess],
-        wr_id: WorkRequestId,
-        rm: &dyn RemoteMrReadAccess,
-    ) -> Self {
+    pub(crate) fn new_read<LW, RR>(lms: &[&mut LW], wr_id: WorkRequestId, rm: &RR) -> Self
+    where
+        LW: LocalMrWriteAccess,
+        RR: RemoteMrReadAccess,
+    {
         assert!(!lms.is_empty());
         let mut sges: Vec<ibv_sge> = lms
             .iter()
             .map(|lm| {
-                let lm: &dyn LocalMrWriteAccess = lm.borrow();
-                Into::<ibv_sge>::into(lm)
+                let lm: &LW = lm.borrow();
+                sge_from_mr(lm)
             })
             .collect();
         let mut inner = unsafe { std::mem::zeroed::<ibv_send_wr>() };
@@ -76,11 +81,11 @@ impl SendWr {
 
     /// create a new send work requet for "write"
     #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
-    pub(crate) fn new_write(
-        lms: &[&dyn LocalMrReadAccess],
-        wr_id: WorkRequestId,
-        rm: &mut dyn RemoteMrWriteAccess,
-    ) -> Self {
+    pub(crate) fn new_write<LR, RW>(lms: &[&LR], wr_id: WorkRequestId, rm: &mut RW) -> Self
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
         let mut sr = Self::new(lms, wr_id);
         sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
@@ -113,13 +118,16 @@ pub(crate) struct RecvWr {
 
 impl RecvWr {
     /// create a new recv work request
-    fn new(lms: &[&mut dyn LocalMrWriteAccess], wr_id: WorkRequestId) -> Self {
+    fn new<LW>(lms: &[&mut LW], wr_id: WorkRequestId) -> Self
+    where
+        LW: LocalMrWriteAccess,
+    {
         assert!(!lms.is_empty());
         let mut sges: Vec<ibv_sge> = lms
             .iter()
             .map(|lm| {
-                let lm: &dyn LocalMrWriteAccess = lm.borrow();
-                Into::<ibv_sge>::into(lm)
+                let lm: &LW = lm.borrow();
+                sge_from_mr(lm)
             })
             .collect();
         let mut inner = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
@@ -131,7 +139,10 @@ impl RecvWr {
     }
 
     /// create a new recv work request for "recv"
-    pub(crate) fn new_recv(lms: &[&mut dyn LocalMrWriteAccess], wr_id: WorkRequestId) -> Self {
+    pub(crate) fn new_recv<LW>(lms: &[&mut LW], wr_id: WorkRequestId) -> Self
+    where
+        LW: LocalMrWriteAccess,
+    {
         Self::new(lms, wr_id)
     }
 }
@@ -148,24 +159,21 @@ impl AsMut<ibv_recv_wr> for RecvWr {
     }
 }
 
-impl From<&dyn LocalMrReadAccess> for ibv_sge {
-    #[inline]
-    fn from(lmr: &dyn LocalMrReadAccess) -> Self {
-        Self {
-            addr: lmr.addr().cast(),
-            length: lmr.length().cast(),
-            lkey: lmr.lkey(),
-        }
-    }
-}
-
-impl From<&dyn LocalMrWriteAccess> for ibv_sge {
-    #[inline]
-    fn from(lmr: &dyn LocalMrWriteAccess) -> Self {
-        Self {
-            addr: lmr.addr().cast(),
-            length: lmr.length().cast(),
-            lkey: lmr.lkey(),
-        }
+/// From lcoal mr to sge
+///
+/// Not impl From<&LR> for `ibv_sge` because implementing a foreign trait is only possible
+/// if at least one of the types for which it is implemented is local only traits defined
+/// in the current crate can be implemented for a type parameter rustc E0210.
+///
+/// If we impl<LR> From<&LR> for `ibv_sge` we will get an error: type parameter `LR` must
+/// be used as the type parameter for some local type (e.g., `MyStruct<LR>`).
+fn sge_from_mr<LR>(lmr: &LR) -> ibv_sge
+where
+    LR: LocalMrReadAccess,
+{
+    ibv_sge {
+        addr: lmr.addr().cast(),
+        length: lmr.length().cast(),
+        lkey: lmr.lkey(),
     }
 }

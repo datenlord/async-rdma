@@ -110,6 +110,19 @@ impl LocalMr {
             ))
         }
     }
+
+    /// take the ownership and return a sub local mr from self.
+    #[inline]
+    pub fn take(mut self, i: Range<usize>) -> io::Result<Self> {
+        // SAFETY: `self` is checked to be valid and in bounds above.
+        if i.start >= i.end || i.end > self.length() {
+            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+        } else {
+            self.addr = self.addr.overflow_add(i.start);
+            self.len = i.end.overflow_sub(i.start);
+            Ok(self)
+        }
+    }
 }
 
 impl MrAccess for &LocalMr {

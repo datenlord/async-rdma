@@ -189,27 +189,16 @@ impl Agent {
         Ok(())
     }
 
-    /// Receive content sent from the other side and stored in the return value
+    /// Receive content sent from the other side and stored in the `LocalMr`
     pub(crate) async fn receive_data(&self) -> io::Result<LocalMr> {
-        let data = self
+        let (lmr, len) = self
             .data_recv
             .lock()
             .await
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "data channel closed"))?;
-        // TODO: avoid data copy or provide another api which is quick but ugly.
-        let mut res_lmr = self
-            .inner
-            .allocator
-            // alignment 1 is always correct
-            .alloc(unsafe { &Layout::from_size_align_unchecked(data.1, 1) })?;
-        res_lmr.as_mut_slice().copy_from_slice(
-            data.0
-                .get(*SEND_DATA_OFFSET..(SEND_DATA_OFFSET.overflow_add(data.1)))?
-                .as_slice(),
-        );
-        Ok(res_lmr)
+        lmr.take(0..len)
     }
 }
 
@@ -262,21 +251,29 @@ impl AgentThread {
 
     /// The main agent function that handles messages sent from the other side
     async fn main(self: Arc<Self>) -> io::Result<()> {
-        let mut buf = self
+        let mut header_buf = self
+            .inner
+            .allocator
+            // alignment 1 is always correct
+            .alloc(unsafe { &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1) })?;
+        let mut data_buf = self
             .inner
             .allocator
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
-            let sz = self.inner.qp.receive_sge(&[&mut buf]).await?;
-            // let header_sz = sz.min(*REQUEST_HEADER_MAX_LEN);
-            let message = bincode::deserialize(buf.as_slice().get(0..sz).ok_or_else(|| {
+            let sz = self
+                .inner
+                .qp
+                .receive_sge(&[&mut header_buf, &mut data_buf])
+                .await?;
+            let message = bincode::deserialize(header_buf.as_slice().get(..).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Other,
                     format!(
                         "{:?} is out of range, the length is {:?}",
                         0..sz,
-                        buf.length()
+                        header_buf.length()
                     ),
                 )
             })?)
@@ -291,10 +288,11 @@ impl AgentThread {
                 Message::Request(request) => match request.kind {
                     RequestKind::SendData(_) => {
                         // detach the task
-                        let _task =
-                            tokio::spawn(Arc::<Self>::clone(&self).handle_send_req(request, buf));
+                        let _task = tokio::spawn(
+                            Arc::<Self>::clone(&self).handle_send_req(request, data_buf),
+                        );
                         // alignment 1 is always correct
-                        buf = self.inner.allocator.alloc(unsafe {
+                        data_buf = self.inner.allocator.alloc(unsafe {
                             &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
                         })?;
                     }
@@ -519,12 +517,9 @@ impl AgentInner {
         let cursor = Cursor::new(header_buf.as_mut_slice());
         let message = Message::Request(req);
         // FIXME: serialize udpate
-        let msz = bincode::serialized_size(&message)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-            .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let header_buf = &header_buf.get(0..msz)?;
+        let header_buf = &header_buf.get(0..header_buf.length())?;
         let mut lms: Vec<&LocalMrSlice> = vec![header_buf];
         lms.extend(data);
         self.qp.send_sge(&lms).await?;

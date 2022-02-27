@@ -1,7 +1,7 @@
 use crate::{
     id,
     memory_region::{
-        local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
+        local::{LocalMr, LocalMrReadAccess, LocalMrSlice, LocalMrWriteAccess},
         remote::RemoteMr,
         MrAccess, MrToken,
     },
@@ -492,7 +492,7 @@ impl AgentInner {
     async fn send_request_append_data(
         &self,
         kind: RequestKind,
-        data: &[&dyn LocalMrReadAccess],
+        data: &[&LocalMrSlice<'_>],
     ) -> io::Result<ResponseKind> {
         let data_len: usize = data.iter().map(|l| l.length()).sum();
         assert!(data_len <= self.max_sr_data_len);
@@ -525,7 +525,7 @@ impl AgentInner {
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let header_buf = &header_buf.get(0..msz)?;
-        let mut lms: Vec<&dyn LocalMrReadAccess> = vec![header_buf];
+        let mut lms: Vec<&LocalMrSlice> = vec![header_buf];
         lms.extend(data);
         self.qp.send_sge(&lms).await?;
         rx.recv()

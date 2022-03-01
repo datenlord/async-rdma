@@ -277,12 +277,12 @@ impl QueuePair {
     }
 
     /// submit a send request
-    fn submit_send<LR>(&self, lms: &[&LR], wr_id: WorkRequestId) -> io::Result<()>
+    fn submit_send<LR>(&self, lms: &[&LR], wr_id: WorkRequestId, imm: Option<u32>) -> io::Result<()>
     where
         LR: LocalMrReadAccess,
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        let mut sr = SendWr::new_send(lms, wr_id);
+        let mut sr = SendWr::new_send(lms, wr_id, imm);
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
@@ -323,13 +323,19 @@ impl QueuePair {
     }
 
     /// submit a write request
-    fn submit_write<LR, RW>(&self, lms: &[&LR], rm: &mut RW, wr_id: WorkRequestId) -> io::Result<()>
+    fn submit_write<LR, RW>(
+        &self,
+        lms: &[&LR],
+        rm: &mut RW,
+        wr_id: WorkRequestId,
+        imm: Option<u32>,
+    ) -> io::Result<()>
     where
         LR: LocalMrReadAccess,
         RW: RemoteMrWriteAccess,
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        let mut sr = SendWr::new_write(lms, wr_id, rm);
+        let mut sr = SendWr::new_write(lms, wr_id, rm, imm);
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
@@ -342,11 +348,12 @@ impl QueuePair {
     pub(crate) fn send_sge<'a, LR>(
         self: &Arc<Self>,
         lms: &'a [&'a LR],
+        imm: Option<u32>,
     ) -> QueuePairOps<QPSend<'a, LR>>
     where
         LR: LocalMrReadAccess,
     {
-        let send = QPSend::new(lms);
+        let send = QPSend::new(lms, imm);
         QueuePairOps::new(Arc::<Self>::clone(self), send)
     }
 
@@ -381,14 +388,19 @@ impl QueuePair {
     }
 
     /// write data from `lms` to `rm`
-    pub(crate) async fn write_sge<LR, RW>(&self, lms: &[&LR], rm: &mut RW) -> io::Result<()>
+    pub(crate) async fn write_sge<LR, RW>(
+        &self,
+        lms: &[&LR],
+        rm: &mut RW,
+        imm: Option<u32>,
+    ) -> io::Result<()>
     where
         LR: LocalMrReadAccess,
         RW: RemoteMrWriteAccess,
     {
         let (wr_id, mut resp_rx) = self.event_listener.register();
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
-        self.submit_write(lms, rm, wr_id)?;
+        self.submit_write(lms, rm, wr_id, imm)?;
         resp_rx
             .recv()
             .await
@@ -403,15 +415,7 @@ impl QueuePair {
     where
         LR: LocalMrReadAccess,
     {
-        self.send_sge(&[lm]).await
-    }
-
-    /// Receive data and store it into `lm`
-    pub(crate) async fn _receive<LW>(self: &Arc<Self>, lm: &'_ mut LW) -> io::Result<usize>
-    where
-        LW: LocalMrWriteAccess,
-    {
-        self.receive_sge(&[lm]).await
+        self.send_sge(&[lm], None).await
     }
 
     /// read data from `rm` to `lm`
@@ -424,12 +428,17 @@ impl QueuePair {
     }
 
     /// write data from `lm` to `rm`
-    pub(crate) async fn write<LR, RW>(&self, lm: &LR, rm: &mut RW) -> io::Result<()>
+    pub(crate) async fn write<LR, RW>(
+        &self,
+        lm: &LR,
+        rm: &mut RW,
+        imm: Option<u32>,
+    ) -> io::Result<()>
     where
         LR: LocalMrReadAccess,
         RW: RemoteMrWriteAccess,
     {
-        self.write_sge(&[lm], rm).await
+        self.write_sge(&[lm], rm, imm).await
     }
 }
 
@@ -472,6 +481,8 @@ where
     lms: &'lm [&'lm LR],
     /// length of data to send
     len: usize,
+    /// Optionally, an immediate 4 byte value may be transmitted with the data buffer.
+    imm: Option<u32>,
 }
 
 impl<'lm, LR> QPSend<'lm, LR>
@@ -479,13 +490,14 @@ where
     LR: LocalMrReadAccess,
 {
     /// Create a new send operation from `lms`
-    fn new(lms: &'lm [&'lm LR]) -> Self
+    fn new(lms: &'lm [&'lm LR], imm: Option<u32>) -> Self
     where
         LR: LocalMrReadAccess,
     {
         Self {
             len: lms.iter().map(|lm| lm.length()).sum(),
             lms,
+            imm,
         }
     }
 }
@@ -497,7 +509,7 @@ where
     type Output = ();
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
-        qp.submit_send(self.lms, wr_id)
+        qp.submit_send(self.lms, wr_id, self.imm)
     }
 
     fn should_resubmit(&self, e: &io::Error) -> bool {
@@ -532,7 +544,7 @@ impl<LW> QueuePairOp for QPRecv<'_, LW>
 where
     LW: LocalMrWriteAccess,
 {
-    type Output = usize;
+    type Output = (usize, Option<u32>);
 
     fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
         qp.submit_receive(self.lms, wr_id)
@@ -543,7 +555,7 @@ where
     }
 
     fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
-        wc.result()
+        wc.result_with_imm()
     }
 }
 

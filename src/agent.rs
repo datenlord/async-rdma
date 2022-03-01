@@ -37,7 +37,9 @@ pub(crate) struct Agent {
     /// Remote MR information receiver from agent thread
     remote_mr_recv: Mutex<Receiver<RemoteMr>>,
     /// Data receiver from agent thread
-    data_recv: Mutex<Receiver<(LocalMr, usize)>>,
+    data_recv: Mutex<Receiver<(LocalMr, usize, Option<u32>)>>,
+    /// Immediate data receiver from agent thread
+    imm_recv: Mutex<Receiver<u32>>,
     /// Join handle for the agent background thread
     handle: JoinHandle<io::Result<()>>,
     /// Agent thread resource
@@ -65,9 +67,11 @@ impl Agent {
         let (local_mr_send, local_mr_recv) = channel(1024);
         let (remote_mr_send, remote_mr_recv) = channel(1024);
         let (data_send, data_recv) = channel(1024);
+        let (imm_send, imm_recv) = channel(1024);
         let local_mr_recv = Mutex::new(local_mr_recv);
         let remote_mr_recv = Mutex::new(remote_mr_recv);
-        let data_recv_mutex = Mutex::new(data_recv);
+        let data_recv = Mutex::new(data_recv);
+        let imm_recv = Mutex::new(imm_recv);
         let inner = Arc::new(AgentInner {
             qp,
             response_waits,
@@ -80,17 +84,19 @@ impl Agent {
             local_mr_send,
             remote_mr_send,
             data_send,
+            imm_send,
             max_sr_data_len,
         )?;
 
         Ok(Self {
             inner,
-            data_recv: data_recv_mutex,
+            local_mr_recv,
+            remote_mr_recv,
+            data_recv,
+            imm_recv,
             handle,
             agent_thread,
             max_sr_data_len,
-            local_mr_recv,
-            remote_mr_recv,
         })
     }
 
@@ -153,7 +159,7 @@ impl Agent {
     }
 
     /// Send the content in the `lm` to the other side
-    pub(crate) async fn send_data(&self, lm: &LocalMr) -> io::Result<()> {
+    pub(crate) async fn send_data(&self, lm: &LocalMr, imm: Option<u32>) -> io::Result<()> {
         let mut start = 0;
         let lm_len = lm.length();
         while start < lm_len {
@@ -163,7 +169,7 @@ impl Agent {
             });
             let response = self
                 .inner
-                .send_request_append_data(kind, &[&lm.get(start..end)?])
+                .send_request_append_data(kind, &[&lm.get(start..end)?], imm)
                 .await?;
             if let ResponseKind::SendData(send_data_resp) = response {
                 if send_data_resp.status > 0 {
@@ -190,15 +196,25 @@ impl Agent {
     }
 
     /// Receive content sent from the other side and stored in the `LocalMr`
-    pub(crate) async fn receive_data(&self) -> io::Result<LocalMr> {
-        let (lmr, len) = self
+    pub(crate) async fn receive_data(&self) -> io::Result<(LocalMr, Option<u32>)> {
+        let (lmr, len, imm) = self
             .data_recv
             .lock()
             .await
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "data channel closed"))?;
-        lmr.take(0..len)
+        Ok((lmr.take(0..len)?, imm))
+    }
+
+    /// Receive content sent from the other side and stored in the `LocalMr`
+    pub(crate) async fn receive_imm(&self) -> io::Result<u32> {
+        self.imm_recv
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "imm data channel closed"))
     }
 }
 
@@ -212,7 +228,9 @@ struct AgentThread {
     /// The channel sender to send remote mr meta from the other side
     remote_mr_send: Sender<RemoteMr>,
     /// The channel sender to send data from the other side
-    data_send: Sender<(LocalMr, usize)>,
+    data_send: Sender<(LocalMr, usize, Option<u32>)>,
+    /// The channel sender to send imm data from the other side
+    imm_send: Sender<u32>,
     /// Max send/recv message length
     max_sr_data_len: usize,
 }
@@ -223,7 +241,8 @@ impl AgentThread {
         inner: Arc<AgentInner>,
         local_mr_send: Sender<LocalMr>,
         remote_mr_send: Sender<RemoteMr>,
-        data_send: Sender<(LocalMr, usize)>,
+        data_send: Sender<(LocalMr, usize, Option<u32>)>,
+        imm_send: Sender<u32>,
         max_sr_data_len: usize,
     ) -> io::Result<(Arc<Self>, JoinHandle<io::Result<()>>)> {
         let agent = Arc::new(Self {
@@ -231,6 +250,7 @@ impl AgentThread {
             local_mr_send,
             remote_mr_send,
             data_send,
+            imm_send,
             max_sr_data_len,
         });
         if max_sr_data_len == 0 {
@@ -262,11 +282,21 @@ impl AgentThread {
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
-            let sz = self
+            for i in header_buf.as_mut_slice() {
+                *i = 0_u8;
+            }
+            let (sz, imm) = self
                 .inner
                 .qp
                 .receive_sge(&[&mut header_buf, &mut data_buf])
                 .await?;
+            if header_buf.as_slice() == CLEAN_STATE && imm.is_some() {
+                debug!("write with immediate data : {:?}", imm);
+                // imm was checked by `is_some()`
+                #[allow(clippy::unwrap_used)]
+                let _task = tokio::spawn(Arc::<Self>::clone(&self).handle_write_imm(imm.unwrap()));
+                continue;
+            }
             let message = bincode::deserialize(header_buf.as_slice().get(..).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Other,
@@ -283,13 +313,13 @@ impl AgentThread {
                     format!("failed to deserialize {:?}", e),
                 )
             })?;
-            debug!("received message : {:?}, size = {}", message, sz);
+            debug!("message: {:?}", message);
             match message {
                 Message::Request(request) => match request.kind {
                     RequestKind::SendData(_) => {
                         // detach the task
                         let _task = tokio::spawn(
-                            Arc::<Self>::clone(&self).handle_send_req(request, data_buf),
+                            Arc::<Self>::clone(&self).handle_send_req(request, data_buf, imm),
                         );
                         // alignment 1 is always correct
                         data_buf = self.inner.allocator.alloc(unsafe {
@@ -309,6 +339,16 @@ impl AgentThread {
                 }
             };
         }
+    }
+
+    /// hadnle `write_with_imm` requests.
+    async fn handle_write_imm(self: Arc<Self>, imm: u32) -> io::Result<()> {
+        self.imm_send.send(imm).await.map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Data receiver has stopped, {:?}", e),
+            )
+        })
     }
 
     /// request handler
@@ -411,14 +451,22 @@ impl AgentThread {
     }
 
     /// handle the send request separately as we need to prepare a buf
-    async fn handle_send_req(self: Arc<Self>, request: Request, buf: LocalMr) -> io::Result<()> {
+    async fn handle_send_req(
+        self: Arc<Self>,
+        request: Request,
+        buf: LocalMr,
+        imm: Option<u32>,
+    ) -> io::Result<()> {
         if let RequestKind::SendData(param) = request.kind {
-            self.data_send.send((buf, param.len)).await.map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Data receiver has stopped, {:?}", e),
-                )
-            })?;
+            self.data_send
+                .send((buf, param.len, imm))
+                .await
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Data receiver has stopped, {:?}", e),
+                    )
+                })?;
             let response = Response {
                 request_id: request.request_id,
                 kind: ResponseKind::SendData(SendDataResponse { status: 0 }),
@@ -483,7 +531,7 @@ impl AgentInner {
 
     /// Send a request to the agent on the other side
     async fn send_request(&self, kind: RequestKind) -> io::Result<ResponseKind> {
-        self.send_request_append_data(kind, &[]).await
+        self.send_request_append_data(kind, &[], None).await
     }
 
     /// Send a request with data appended
@@ -491,6 +539,7 @@ impl AgentInner {
         &self,
         kind: RequestKind,
         data: &[&LocalMrSlice<'_>],
+        imm: Option<u32>,
     ) -> io::Result<ResponseKind> {
         let data_len: usize = data.iter().map(|l| l.length()).sum();
         assert!(data_len <= self.max_sr_data_len);
@@ -522,7 +571,7 @@ impl AgentInner {
         let header_buf = &header_buf.get(0..header_buf.length())?;
         let mut lms: Vec<&LocalMrSlice> = vec![header_buf];
         lms.extend(data);
-        self.qp.send_sge(&lms).await?;
+        self.qp.send_sge(&lms, imm).await?;
         rx.recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
@@ -560,6 +609,8 @@ lazy_static! {
         bincode::serialized_size(&message).unwrap().cast()
     };
 }
+/// Used for checking if `header_buf` is clean.
+const CLEAN_STATE: [u8; 40] = [0_u8; 40];
 
 lazy_static! {
     static ref REQUEST_HEADER_MAX_LEN: usize = {

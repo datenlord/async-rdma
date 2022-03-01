@@ -395,7 +395,7 @@ impl Rdma {
     /// use std::{alloc::Layout, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
     /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
-
+    ///
     ///
     /// struct Data(String);
     ///
@@ -432,7 +432,100 @@ impl Rdma {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
-            .send_data(lm)
+            .send_data(lm, None)
+            .await
+    }
+
+    /// Send the content in the `lm` with immediate date.
+    ///
+    /// Used with `receive_with_imm`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// mod send_with_imm {
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess};
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // put data into lmr
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send_with_imm(&lmr, 123).await?;
+    ///     rdma.send_with_imm(&lmr, 123).await?;
+    ///     rdma.send(&lmr).await?;
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let (lmr, imm) = rdma.receive_with_imm().await?;
+    ///     assert_eq!(imm, Some(123));
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let lmr = rdma.receive().await?;
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let (lmr, imm) = rdma.receive_with_imm().await?;
+    ///     assert_eq!(imm, None);
+    ///     // read data from mr
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let lmr = rdma.receive().await?;
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// #[test]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     let server_handle = std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    ///     server_handle.join().unwrap().unwrap();
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub async fn send_with_imm(&self, lm: &LocalMr, imm: u32) -> io::Result<()> {
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .send_data(lm, Some(imm))
             .await
     }
 
@@ -483,10 +576,176 @@ impl Rdma {
     /// ```
     #[inline]
     pub async fn receive(&self) -> io::Result<LocalMr> {
+        let (lmr, _) = self
+            .agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .receive_data()
+            .await?;
+        Ok(lmr)
+    }
+
+    /// Receive the content and stored in the returned memory region.
+    ///
+    /// Used with `send_with_imm`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// mod send_with_imm {
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess};
+    /// use async_rdma::{Rdma, RdmaListener};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // put data into lmr
+    ///     unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send_with_imm(&lmr, 123).await?;
+    ///     rdma.send_with_imm(&lmr, 123).await?;
+    ///     rdma.send(&lmr).await?;
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let (lmr, imm) = rdma.receive_with_imm().await?;
+    ///     assert_eq!(imm, Some(123));
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let lmr = rdma.receive().await?;
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let (lmr, imm) = rdma.receive_with_imm().await?;
+    ///     assert_eq!(imm, None);
+    ///     // read data from mr
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     let lmr = rdma.receive().await?;
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// #[test]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     let server_handle = std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    ///     server_handle.join().unwrap().unwrap();
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub async fn receive_with_imm(&self) -> io::Result<(LocalMr, Option<u32>)> {
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
             .receive_data()
+            .await
+    }
+
+    /// Receive the immediate data sent by `write_with_imm`.
+    ///
+    /// Used with `write_with_imm`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// mod write_with_imm {
+    ///     use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess};
+    ///     use async_rdma::{Rdma, RdmaListener};
+    ///     use portpicker::pick_unused_port;
+    ///     use std::{
+    ///         alloc::Layout,
+    ///         io,
+    ///         net::{Ipv4Addr, SocketAddrV4},
+    ///         time::Duration,
+    ///     };
+    ///
+    ///     static IMM_NUM: u32 = 123;
+    ///     struct Data(String);
+    ///
+    ///     static MSG: &str = "hello world";
+    ///
+    ///     async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///         let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///         let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///         let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
+    ///         let data = Data(MSG.to_string());
+    ///         unsafe { *(lmr.as_mut_ptr() as *mut Data) = data };
+    ///         // send the content of lmr to server with immediate data.
+    ///         rdma.write_with_imm(&lmr, &mut rmr, IMM_NUM).await?;
+    ///         // then send this mr to server to make server aware of this mr.
+    ///         rdma.send_remote_mr(rmr).await?;
+    ///         Ok(())
+    ///     }
+    ///
+    ///     #[tokio::main]
+    ///     async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///         let rdma_listener = RdmaListener::bind(addr).await?;
+    ///         let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///         // receive the immediate data sent by `write_with_imm`
+    ///         let imm = rdma.receive_write_imm().await?;
+    ///         assert_eq!(imm, IMM_NUM);
+    ///         let lmr = rdma.receive_local_mr().await?;
+    ///         // assert the content of lmr, which was `write` by client
+    ///         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///         Ok(())
+    ///     }
+    ///
+    ///     #[tokio::main]
+    ///     #[test]
+    ///     async fn main() {
+    ///         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///         let server_handle = std::thread::spawn(move || server(addr));
+    ///         tokio::time::sleep(Duration::new(1, 0)).await;
+    ///         client(addr)
+    ///             .await
+    ///             .map_err(|err| println!("{}", err))
+    ///             .unwrap();
+    ///         server_handle.join().unwrap().unwrap();
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub async fn receive_write_imm(&self) -> io::Result<u32> {
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .receive_imm()
             .await
     }
 
@@ -599,7 +858,80 @@ impl Rdma {
         LR: LocalMrReadAccess,
         RW: RemoteMrWriteAccess,
     {
-        self.qp.write(lm, rm).await
+        self.qp.write(lm, rm, None).await
+    }
+
+    /// Write content in the `lm` to `rm` and send a immediate data which
+    /// will consume a `rdma receive work request` in the receiver's `receive queue`.
+    /// The receiver can receive this immediate data by using `receive_write_imm`.
+    ///
+    /// Used with `receive_write_imm`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// mod write_with_imm {
+    ///     use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess};
+    ///     use async_rdma::{Rdma, RdmaListener};
+    ///     use portpicker::pick_unused_port;
+    ///     use std::{
+    ///         alloc::Layout,
+    ///         io,
+    ///         net::{Ipv4Addr, SocketAddrV4},
+    ///         time::Duration,
+    ///     };
+    ///
+    ///     static IMM_NUM: u32 = 123;
+    ///     struct Data(String);
+    ///
+    ///     static MSG: &str = "hello world";
+    ///
+    ///     async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///         let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///         let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///         let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
+    ///         let data = Data(MSG.to_string());
+    ///         unsafe { *(lmr.as_mut_ptr() as *mut Data) = data };
+    ///         // send the content of lmr to server with immediate data.
+    ///         rdma.write_with_imm(&lmr, &mut rmr, IMM_NUM).await?;
+    ///         // then send this mr to server to make server aware of this mr.
+    ///         rdma.send_remote_mr(rmr).await?;
+    ///         Ok(())
+    ///     }
+    ///
+    ///     #[tokio::main]
+    ///     async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///         let rdma_listener = RdmaListener::bind(addr).await?;
+    ///         let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///         // receive the immediate data sent by `write_with_imm`
+    ///         let imm = rdma.receive_write_imm().await?;
+    ///         assert_eq!(imm, IMM_NUM);
+    ///         let lmr = rdma.receive_local_mr().await?;
+    ///         // assert the content of lmr, which was `write` by client
+    ///         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+    ///         Ok(())
+    ///     }
+    ///
+    ///     #[tokio::main]
+    ///     #[test]
+    ///     async fn main() {
+    ///         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///         let server_handle = std::thread::spawn(move || server(addr));
+    ///         tokio::time::sleep(Duration::new(1, 0)).await;
+    ///         client(addr)
+    ///             .await
+    ///             .map_err(|err| println!("{}", err))
+    ///             .unwrap();
+    ///         server_handle.join().unwrap().unwrap();
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub async fn write_with_imm<LR, RW>(&self, lm: &LR, rm: &mut RW, imm: u32) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
+        self.qp.write(lm, rm, Some(imm)).await
     }
 
     /// Connect the remote endpoint and build rmda queue pair by TCP connection

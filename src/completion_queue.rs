@@ -8,6 +8,10 @@ use rdma_sys::{
 use std::{fmt::Debug, io, mem, ops::Sub, ptr::NonNull};
 use thiserror::Error;
 
+/// Indicator that `imm_data` is valid.
+/// Relevant for Receive Work Completions.
+static IBV_WC_WITH_IMM: u32 = 3;
+
 /// Complete Queue Structure
 #[derive(Debug)]
 pub(crate) struct CompletionQueue {
@@ -113,10 +117,30 @@ impl WorkCompletion {
         WorkRequestId(self.inner_wc.wr_id)
     }
 
-    /// Get work completion result, if success returns length, otherwise returns error
+    /// Get work completion result.
+    /// Returns the length on success otherwise returns an error.
     pub(crate) fn result(&self) -> Result<usize, WCError> {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
             Ok(self.inner_wc.byte_len.cast())
+        } else {
+            Err(WCError::from_u32(self.inner_wc.status).unwrap_or(WCError::UnexpectedErr))
+        }
+    }
+
+    /// Get work completion result and immediate data.
+    /// Returns the length and immediate date on success otherwise returns an error.
+    pub(crate) fn result_with_imm(&self) -> Result<(usize, Option<u32>), WCError> {
+        if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
+            let len: usize = self.inner_wc.byte_len.cast();
+            if self.inner_wc.wc_flags == IBV_WC_WITH_IMM {
+                // use union to get imm_data after check opcode.
+                Ok((
+                    len,
+                    Some(unsafe { self.inner_wc.imm_data_invalidated_rkey_union.imm_data }),
+                ))
+            } else {
+                Ok((self.inner_wc.byte_len.cast(), None))
+            }
         } else {
             Err(WCError::from_u32(self.inner_wc.status).unwrap_or(WCError::UnexpectedErr))
         }

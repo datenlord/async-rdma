@@ -41,13 +41,19 @@ impl SendWr {
     }
 
     /// create a new send work requet for "send"
-    pub(crate) fn new_send<LR>(lms: &[&LR], wr_id: WorkRequestId) -> Self
+    pub(crate) fn new_send<LR>(lms: &[&LR], wr_id: WorkRequestId, imm: Option<u32>) -> Self
     where
         LR: LocalMrReadAccess,
     {
         let mut sr = Self::new(lms, wr_id);
-        sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+        match imm {
+            None => sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND,
+            Some(imm_num) => {
+                sr.inner.opcode = ibv_wr_opcode::IBV_WR_SEND_WITH_IMM;
+                sr.inner.imm_data_invalidated_rkey_union.imm_data = imm_num;
+            }
+        }
         sr
     }
 
@@ -81,16 +87,29 @@ impl SendWr {
 
     /// create a new send work requet for "write"
     #[allow(clippy::as_conversions)] // Convert pointer to usize is safe for later ibv lib use
-    pub(crate) fn new_write<LR, RW>(lms: &[&LR], wr_id: WorkRequestId, rm: &mut RW) -> Self
+    pub(crate) fn new_write<LR, RW>(
+        lms: &[&LR],
+        wr_id: WorkRequestId,
+        rm: &mut RW,
+        imm: Option<u32>,
+    ) -> Self
     where
         LR: LocalMrReadAccess,
         RW: RemoteMrWriteAccess,
     {
         let mut sr = Self::new(lms, wr_id);
-        sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
         sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
         sr.inner.wr.rdma.remote_addr = rm.addr().cast();
         sr.inner.wr.rdma.rkey = rm.rkey();
+        match imm {
+            Some(imm_num) => {
+                sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE_WITH_IMM;
+                sr.inner.imm_data_invalidated_rkey_union.imm_data = imm_num;
+                sr.inner.wr.rdma.remote_addr = rm.addr().cast();
+                sr.inner.wr.rdma.rkey = rm.rkey().cast();
+            }
+            None => sr.inner.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE,
+        }
         sr
     }
 }

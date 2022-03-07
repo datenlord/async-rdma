@@ -21,6 +21,8 @@ use std::{
 };
 use tokio::{
     sync::{
+        // Using mpsc here bacause the `oneshot` Sender needs its own ownership when it performs a `send`.
+        // But we cann't get the ownership from LockFreeCuckooHash because of the principle of it.
         mpsc::{channel, Receiver, Sender},
         Mutex,
     },
@@ -543,8 +545,6 @@ impl AgentInner {
     ) -> io::Result<ResponseKind> {
         let data_len: usize = data.iter().map(|l| l.length()).sum();
         assert!(data_len <= self.max_sr_data_len);
-        // Using mpsc here bacause `oneshot` tx need it's ownership when `send`.
-        // But we cann't get it from LockFreeCuckooHash because of the principle of LockFreeCuckooHash.
         let (tx, mut rx) = channel(2);
         let mut req = Request {
             request_id: AgentRequestId::new(),

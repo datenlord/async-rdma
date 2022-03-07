@@ -576,12 +576,7 @@ impl Rdma {
     /// ```
     #[inline]
     pub async fn receive(&self) -> io::Result<LocalMr> {
-        let (lmr, _) = self
-            .agent
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
-            .receive_data()
-            .await?;
+        let (lmr, _) = self.receive_with_imm().await?;
         Ok(lmr)
     }
 

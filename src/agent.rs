@@ -292,7 +292,7 @@ impl AgentThread {
                 .qp
                 .receive_sge(&[&mut header_buf, &mut data_buf])
                 .await?;
-            if header_buf.as_slice() == CLEAN_STATE && imm.is_some() {
+            if imm.is_some() && header_buf.as_slice() == CLEAN_STATE {
                 debug!("write with immediate data : {:?}", imm);
                 // imm was checked by `is_some()`
                 #[allow(clippy::unwrap_used)]

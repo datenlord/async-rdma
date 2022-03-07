@@ -1,12 +1,17 @@
 use crate::completion_queue::{CompletionQueue, WorkCompletion, WorkRequestId};
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    // Using mpsc here bacause the `oneshot` Sender needs its own ownership when it performs a `send`.
+    // But we cann't get the ownership from LockFreeCuckooHash because of the principle of it.
+    sync::mpsc::{channel, Receiver, Sender},
+    time::timeout,
+};
 use tracing::{error, warn};
 
 /// Provided by the requester and used by the manager task to send
 /// the command response back to the requester.
-type Responder = mpsc::Sender<WorkCompletion>;
+type Responder = Sender<WorkCompletion>;
 
 /// Map holding the Request Id to `Responder`
 type ReqMap = Arc<LockFreeCuckooHash<WorkRequestId, Responder>>;
@@ -87,8 +92,8 @@ impl EventListener {
     }
 
     /// Register a new work request id
-    pub(crate) fn register(&self) -> (WorkRequestId, mpsc::Receiver<WorkCompletion>) {
-        let (tx, rx) = mpsc::channel(2);
+    pub(crate) fn register(&self) -> (WorkRequestId, Receiver<WorkCompletion>) {
+        let (tx, rx) = channel(2);
         let mut wr_id = WorkRequestId::new();
         loop {
             if self.req_map.insert_if_not_exists(wr_id, tx.clone()) {

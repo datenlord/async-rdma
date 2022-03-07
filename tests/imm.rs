@@ -30,16 +30,19 @@ mod send_with_imm {
     async fn server(addr: SocketAddrV4) -> io::Result<()> {
         let rdma_listener = RdmaListener::bind(addr).await?;
         let rdma = rdma_listener.accept(1, 1, 512).await?;
-        // receive the data sent by client and put it into an mr
+        // receive the data and imm sent by the client
         let (lmr, imm) = rdma.receive_with_imm().await?;
         assert_eq!(imm, Some(IMM_NUM));
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+        // receive the data in mr while avoiding the immediate data is ok.
         let lmr = rdma.receive().await?;
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+        // `receive_with_imm` works well even if the client didn't send any immediate data.
+        // the imm received will be a `None`.
         let (lmr, imm) = rdma.receive_with_imm().await?;
         assert_eq!(imm, None);
-        // read data from mr
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+        // compared to the above, using `receive` is a better choice.
         let lmr = rdma.receive().await?;
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
         Ok(())

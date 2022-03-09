@@ -1,11 +1,11 @@
 use async_rdma::*;
+use portpicker::pick_unused_port;
 use std::alloc::Layout;
-// use std::time::Duration;
-// use tokio::time::sleep;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 mod local_mr_slice {
     use crate::*;
-    async fn server(addr: &str) {
+    async fn server(addr: SocketAddrV4) {
         let rdmalistener = RdmaListener::bind(addr).await.unwrap();
         let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
         const LEN: usize = 4096;
@@ -33,113 +33,106 @@ mod local_mr_slice {
         assert_eq!(s5.as_slice(), b"hello");
     }
 
-    async fn client(addr: &str) {
+    async fn client(addr: SocketAddrV4) {
         let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test() {
-        let addr = "127.0.0.1:19000";
+        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
         tokio::join!(server(addr), client(addr));
     }
 }
 
 mod local_mr_slice_overbound {
     mod test1 {
-        use std::sync::Arc;
 
         use crate::*;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             #[allow(clippy::reversed_empty_ranges)]
             let _s1 = lmr.get(2..0).unwrap();
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19100";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }
 
     mod test2 {
-        use std::sync::Arc;
-
         use crate::*;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             let _s1 = lmr.get(0..0).unwrap();
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19101";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }
 
     mod test3 {
-        use std::sync::Arc;
-
         use crate::*;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             let _s1 = lmr.get(0..LEN + 1).unwrap();
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19102";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }
 }
 
 mod remote_mr_slice {
-    use std::{sync::Arc, time::Duration};
-
-    use tokio::time::sleep;
-
     use crate::*;
     const LEN: usize = 4096;
-    async fn server(addr: &str) {
+    async fn server(addr: SocketAddrV4) {
         let rdmalistener = RdmaListener::bind(addr).await.unwrap();
         let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
         let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
         rdma.send_local_mr(lmr).await.unwrap();
-        sleep(Duration::from_secs(1)).await;
     }
 
-    async fn client(addr: &str) {
+    async fn client(addr: SocketAddrV4) {
         let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-        let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+        let rmr = rdma.receive_remote_mr().await.unwrap();
         assert_eq!(rmr.length(), LEN);
         let s1 = rmr.get(0..LEN).unwrap();
         let s2_offset = 2048;
@@ -157,103 +150,92 @@ mod remote_mr_slice {
         assert_eq!(s3.addr(), rmr.addr() + s3_start);
         assert_eq!(s4.length(), 1);
         assert_eq!(s4.addr(), rmr.addr() + s4_pos);
-        sleep(Duration::from_secs(1)).await;
     }
 
-    #[tokio::test]
+    // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test() {
-        let addr = "127.0.0.1:19200";
+        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
         tokio::join!(server(addr), client(addr));
     }
 }
 
 mod remote_mr_slice_overbound {
     mod test1 {
-        use std::{sync::Arc, time::Duration};
-
-        use tokio::time::sleep;
-
         use crate::*;
         const LEN: usize = 4096;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             #[allow(clippy::reversed_empty_ranges)]
             let _s1 = rmr.get(2..0).unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19300";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }
 
     mod test2 {
-        use std::{sync::Arc, time::Duration};
-
-        use tokio::time::sleep;
-
         use crate::*;
         const LEN: usize = 4096;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..0).unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19301";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }
 
     mod test3 {
-        use std::{sync::Arc, time::Duration};
-        use tokio::time::sleep;
-
         use crate::*;
         const LEN: usize = 4096;
-        async fn server(addr: &str) {
+        async fn server(addr: SocketAddrV4) {
             let rdmalistener = RdmaListener::bind(addr).await.unwrap();
             let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
         }
 
-        async fn client(addr: &str) {
+        async fn client(addr: SocketAddrV4) {
             let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..LEN + 1).unwrap();
         }
 
-        #[tokio::test]
+        // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[should_panic]
         async fn test() {
-            let addr = "127.0.0.1:19302";
+            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
             tokio::join!(server(addr), client(addr));
         }
     }

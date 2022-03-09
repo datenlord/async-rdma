@@ -20,7 +20,8 @@ jobs:
           override: true
       - name: Run
         run: |
-          sudo apt-get install -y net-tools librdmacm-dev ibverbs-utils rdmacm-utils perftest
+          sudo apt update
+          sudo apt install -y net-tools librdmacm-dev ibverbs-utils rdmacm-utils perftest
           ./scripts/setup.sh
           ./scripts/run.sh
       - name: Setup tmate session

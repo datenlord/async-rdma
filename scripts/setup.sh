@@ -17,8 +17,15 @@ if [ -z "$HAS_RXE_MOD" ]; then
     sudo modprobe ib_core
     sudo modprobe rdma_ucm
 
-    export KERNEL_VERSION=5.11.20
-    export KERNEL_MAJOR_VERSION=`echo $KERNEL_VERSION | cut -d '.' -f 1`
+    export FULL_KERNEL_VERSION=`uname -r`
+    export KERNEL_MAJOR_VERSION=`echo $FULL_KERNEL_VERSION | cut -d '.' -f 1`
+    export LAST_VERSION_NUM=`echo ${FULL_KERNEL_VERSION%%-*} | cut -d '.' -f 3`
+    if LAST_VERSION_NUM==0
+    then 
+        export KERNEL_VERSION=`echo ${FULL_KERNEL_VERSION%.*}`
+    else
+        export KERNEL_VERSION=`echo ${FULL_KERNEL_VERSION%%-*}`
+    fi
     wget --timestamping https://cdn.kernel.org/pub/linux/kernel/v$KERNEL_MAJOR_VERSION.x/linux-$KERNEL_VERSION.tar.xz
     rm -rf linux-*/ rxe/ siw/ || echo "no kernel code directory"
     tar xf linux-$KERNEL_VERSION.tar.xz

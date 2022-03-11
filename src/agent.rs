@@ -1,3 +1,4 @@
+use crate::queue_pair::MAX_RECV_WR;
 use crate::{
     id,
     memory_region::{
@@ -18,6 +19,7 @@ use std::{
     io::{self, Cursor},
     mem,
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     sync::{
@@ -29,6 +31,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::{debug, trace};
+
+/// Maximum time for waiting for a response
+static RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// An agent for handling the dirty rdma request and async events
 #[derive(Debug)]
 pub(crate) struct Agent {
@@ -43,7 +48,7 @@ pub(crate) struct Agent {
     /// Immediate data receiver from agent thread
     imm_recv: Mutex<Receiver<u32>>,
     /// Join handle for the agent background thread
-    handle: JoinHandle<io::Result<()>>,
+    handles: Handles,
     /// Agent thread resource
     #[allow(dead_code)]
     agent_thread: Arc<AgentThread>,
@@ -53,7 +58,9 @@ pub(crate) struct Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        self.handle.abort();
+        for handle in &self.handles {
+            handle.abort();
+        }
     }
 }
 
@@ -81,7 +88,7 @@ impl Agent {
             allocator,
             max_sr_data_len,
         });
-        let (agent_thread, handle) = AgentThread::run(
+        let (agent_thread, handles) = AgentThread::run(
             Arc::<AgentInner>::clone(&inner),
             local_mr_send,
             remote_mr_send,
@@ -96,7 +103,7 @@ impl Agent {
             remote_mr_recv,
             data_recv,
             imm_recv,
-            handle,
+            handles,
             agent_thread,
             max_sr_data_len,
         })
@@ -237,6 +244,9 @@ struct AgentThread {
     max_sr_data_len: usize,
 }
 
+/// handles of receiver tasks
+type Handles = Vec<JoinHandle<io::Result<()>>>;
+
 impl AgentThread {
     /// Spawn a main task to tokio thread pool
     fn run(
@@ -246,7 +256,7 @@ impl AgentThread {
         data_send: Sender<(LocalMr, usize, Option<u32>)>,
         imm_send: Sender<u32>,
         max_sr_data_len: usize,
-    ) -> io::Result<(Arc<Self>, JoinHandle<io::Result<()>>)> {
+    ) -> io::Result<(Arc<Self>, Handles)> {
         let agent = Arc::new(Self {
             inner,
             local_mr_send,
@@ -264,10 +274,11 @@ impl AgentThread {
                 ),
             ))
         } else {
-            Ok((
-                Arc::<AgentThread>::clone(&agent),
-                tokio::spawn(agent.main()),
-            ))
+            let mut handles = Vec::new();
+            for _ in 0..MAX_RECV_WR {
+                handles.push(tokio::spawn(Arc::<AgentThread>::clone(&agent).main()));
+            }
+            Ok((Arc::<AgentThread>::clone(&agent), handles))
         }
     }
 
@@ -572,9 +583,15 @@ impl AgentInner {
         let mut lms: Vec<&LocalMrSlice> = vec![header_buf];
         lms.extend(data);
         self.qp.send_sge(&lms, imm).await?;
-        rx.recv()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+        match tokio::time::timeout(RESPONSE_TIMEOUT, rx.recv()).await {
+            Ok(resp) => {
+                resp.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout for waiting for a response.",
+            )),
+        }
     }
 
     /// Send a response to the other side

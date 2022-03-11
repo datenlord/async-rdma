@@ -376,7 +376,7 @@ impl Rdma {
     fn qp_handshake(&mut self, remote: QueuePairEndpoint) -> io::Result<()> {
         self.qp.modify_to_rtr(remote, 0, 1, 0x12)?;
         debug!("rtr");
-        self.qp.modify_to_rts(0x12, 6, 7, 0, 1)?;
+        self.qp.modify_to_rts(0x12, 6, 6, 0, 1)?;
         debug!("rts");
         Ok(())
     }

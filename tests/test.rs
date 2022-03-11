@@ -62,49 +62,55 @@ mod test1 {
         test_server_client("127.0.0.1:18000", server, client)
     }
 }
-// FIXME:
-// This test has a certain probability of being blocked,
-// a task cannot recvieved data, and then cannot exit normally.
-// mod test2 {
-//     use crate::*;
-//     use std::{alloc::Layout, sync::Arc};
 
-//     async fn server(rdma: Rdma) -> io::Result<()> {
-//         let rdma = Arc::new(rdma);
-//         let mut handles = vec![];
-//         for _ in 0..10 {
-//             let rdma_clone = rdma.clone();
-//             handles.push(tokio::spawn(async move {
-//                 let lm = rdma_clone.receive().await.unwrap();
-//                 assert_eq!(unsafe { *(lm.as_ptr() as *mut i32) }, 5);
-//                 assert_eq!(lm.length(), 4);
-//             }));
-//         }
-//         for handle in handles {
-//             handle.await.unwrap();
-//         }
-//         Ok(())
-//     }
+mod test2 {
+    use crate::*;
+    use async_rdma::MrAccess;
+    use std::{alloc::Layout, sync::Arc, time::Duration};
 
-//     async fn client(rdma: Rdma) -> io::Result<()> {
-//         let rdma = Arc::new(rdma);
-//         let mut handles = vec![];
-//         for _ in 0..10 {
-//             let rdma_clone = rdma.clone();
-//             handles.push(tokio::spawn(async move {
-//                 let lm = rdma_clone.alloc_local_mr(Layout::new::<i32>()).unwrap();
-//                 unsafe { *(lm.as_ptr() as *mut i32) = 5 };
-//                 rdma_clone.send(&lm).await.unwrap();
-//             }));
-//         }
-//         for handle in handles {
-//             handle.await.unwrap();
-//         }
-//         Ok(())
-//     }
+    async fn server(rdma: Rdma) -> io::Result<()> {
+        let rdma = Arc::new(rdma);
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let rdma_clone = rdma.clone();
+            handles.push(tokio::spawn(async move {
+                let lm = rdma_clone.receive().await.unwrap();
+                assert_eq!(unsafe { *(lm.as_ptr() as *mut i32) }, 5);
+                assert_eq!(lm.length(), 4);
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        tokio::time::sleep(Duration::new(3, 0)).await;
+        Ok(())
+    }
 
-//     #[test]
-//     fn test() -> io::Result<()> {
-//         test_server_client("127.0.0.1:18001", server, client)
-//     }
-// }
+    async fn client(rdma: Rdma) -> io::Result<()> {
+        let rdma = Arc::new(rdma);
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let rdma_clone = rdma.clone();
+            // `send` is faster than `receive` because the workflow of `receive` operation is
+            // more complex. If we run server and client in the same machine like this test and
+            // `send` without `sleep`, the receiver will be too busy to response sender.
+            // So the sender's RDMA netdev will retry again and again which make the situation worse.
+            // You can skip this `sleep` if your receiver's machine is fast enough.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            handles.push(tokio::spawn(async move {
+                let lm = rdma_clone.alloc_local_mr(Layout::new::<i32>()).unwrap();
+                unsafe { *(lm.as_ptr() as *mut i32) = 5 };
+                rdma_clone.send(&lm).await.unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test() -> io::Result<()> {
+        test_server_client("127.0.0.1:18001", server, client)
+    }
+}

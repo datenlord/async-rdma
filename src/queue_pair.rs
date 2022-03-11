@@ -32,6 +32,15 @@ use tokio::{
 };
 use tracing::debug;
 
+/// Maximum value of `send_wr`
+pub(crate) static MAX_SEND_WR: u32 = 10;
+/// Maximum value of `recv_wr`
+pub(crate) static MAX_RECV_WR: u32 = 10;
+/// Maximum value of `send_sge`
+pub(crate) static MAX_SEND_SGE: u32 = 10;
+/// Maximum value of `recv_sge`
+pub(crate) static MAX_RECV_SGE: u32 = 10;
+
 /// Queue pair initialized attribute
 struct QueuePairInitAttr {
     /// Internal `ibv_qp_init_attr` structure
@@ -45,10 +54,10 @@ impl Default for QueuePairInitAttr {
         qp_init_attr.send_cq = ptr::null_mut::<ibv_cq>().cast();
         qp_init_attr.recv_cq = ptr::null_mut::<ibv_cq>().cast();
         qp_init_attr.srq = ptr::null_mut::<ibv_cq>().cast();
-        qp_init_attr.cap.max_send_wr = 10;
-        qp_init_attr.cap.max_recv_wr = 10;
-        qp_init_attr.cap.max_send_sge = 10;
-        qp_init_attr.cap.max_recv_sge = 10;
+        qp_init_attr.cap.max_send_wr = MAX_SEND_WR;
+        qp_init_attr.cap.max_recv_wr = MAX_RECV_WR;
+        qp_init_attr.cap.max_send_sge = MAX_SEND_SGE;
+        qp_init_attr.cap.max_recv_sge = MAX_RECV_SGE;
         qp_init_attr.cap.max_inline_data = 0;
         qp_init_attr.qp_type = rdma_sys::ibv_qp_type::IBV_QPT_RC;
         qp_init_attr.sq_sig_all = 0_i32;
@@ -248,6 +257,16 @@ impl QueuePair {
     }
 
     /// modify the queue pair state to ready to send
+    ///
+    /// `timeout`: Value representing the transport (ACK) timeout for use by the remote, expressed as (4.096 μS*2Local ACK Timeout).
+    /// Calculated by REQ sender, based on (2 * `PacketLifeTime` + Local CA’s ACK delay).;
+    ///
+    /// `retry_cnt`: The Error retry counter is decremented each time the requester must retry a packet due to a Local Ack Timeout,
+    /// NAK-Sequence Error, or Implied NAK.
+    ///
+    /// `rnr_retry`:The RNR NAK retry counter is decremented each time the responder returns an RNR NAK.
+    /// If the requester’s RNR NAK retry counter is zero, and an RNR NAK packet is received, an RNR NAK retry error occurs.
+    /// An exception to the following is if the RNR NAK retry counter is set to 7. This value indicates infinite retry and the counter is not decremented
     pub(crate) fn modify_to_rts(
         &self,
         timeout: u8,

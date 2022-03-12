@@ -20,8 +20,16 @@ mod send_with_imm {
         unsafe { std::ptr::write(lmr.as_mut_ptr() as *mut Data, Data(MSG.to_string())) };
         // send the content of lmr to server
         rdma.send_with_imm(&lmr, IMM_NUM).await?;
+        // `send` is faster than `receive` because the workflow of `receive` operation is
+        // more complex. If we run server and client in the same machine like this test and
+        // `send` without `sleep`, the receiver will be too busy to response sender.
+        // So the sender's RDMA netdev will retry again and again which make the situation worse.
+        // You can skip this `sleep` if your receiver's machine is fast enough.
+        tokio::time::sleep(Duration::from_millis(1)).await;
         rdma.send_with_imm(&lmr, IMM_NUM).await?;
+        tokio::time::sleep(Duration::from_millis(1)).await;
         rdma.send(&lmr).await?;
+        tokio::time::sleep(Duration::from_millis(1)).await;
         rdma.send(&lmr).await?;
         Ok(())
     }

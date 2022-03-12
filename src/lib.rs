@@ -55,7 +55,7 @@
 //! async fn main() {
 //!     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
 //!     std::thread::spawn(move || server(addr));
-//!     tokio::time::sleep(Duration::new(1, 0)).await;
+//!     tokio::time::sleep(Duration::from_secs(3)).await;
 //!     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
 //! }
 //! ```
@@ -427,7 +427,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -455,11 +455,11 @@ impl Rdma {
     ///     net::{Ipv4Addr, SocketAddrV4},
     ///     time::Duration,
     /// };
-    /// 
+    ///
     /// struct Data(String);
     /// static IMM_NUM: u32 = 123;
     /// static MSG: &str = "hello world";
-    /// 
+    ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
@@ -472,7 +472,7 @@ impl Rdma {
     ///     rdma.send(&lmr).await?;
     ///     Ok(())
     /// }
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
@@ -500,7 +500,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     let server_handle = std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr)
     ///         .await
     ///         .map_err(|err| println!("{}", err))
@@ -560,7 +560,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -585,11 +585,11 @@ impl Rdma {
     ///     net::{Ipv4Addr, SocketAddrV4},
     ///     time::Duration,
     /// };
-    /// 
+    ///
     /// struct Data(String);
     /// static IMM_NUM: u32 = 123;
     /// static MSG: &str = "hello world";
-    /// 
+    ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
@@ -602,7 +602,7 @@ impl Rdma {
     ///     rdma.send(&lmr).await?;
     ///     Ok(())
     /// }
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
@@ -630,7 +630,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     let server_handle = std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr)
     ///         .await
     ///         .map_err(|err| println!("{}", err))
@@ -700,7 +700,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     let server_handle = std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr)
     ///         .await
     ///         .map_err(|err| println!("{}", err))
@@ -760,7 +760,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -816,7 +816,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -884,7 +884,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     let server_handle = std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr)
     ///         .await
     ///         .map_err(|err| println!("{}", err))
@@ -928,7 +928,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1010,7 +1010,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1060,7 +1060,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1120,7 +1120,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1180,7 +1180,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1249,7 +1249,7 @@ impl Rdma {
     /// async fn main() {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```
@@ -1305,7 +1305,7 @@ impl Rdma {
     /// {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
-    ///     tokio::time::sleep(Duration::new(1, 0)).await;
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
     ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
     /// }
     /// ```

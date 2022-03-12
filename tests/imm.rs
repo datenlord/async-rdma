@@ -45,6 +45,8 @@ mod send_with_imm {
         // compared to the above, using `receive` is a better choice.
         let lmr = rdma.receive().await?;
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+        // wait for the agent thread to send all reponses to the remote.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(())
     }
     #[tokio::main]
@@ -52,7 +54,7 @@ mod send_with_imm {
     async fn main() {
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
         let server_handle = std::thread::spawn(move || server(addr));
-        tokio::time::sleep(Duration::new(1, 0)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
         client(addr)
             .await
             .map_err(|err| println!("{}", err))
@@ -98,6 +100,8 @@ mod write_with_imm {
         let lmr = rdma.receive_local_mr().await?;
         // assert the content of lmr, which was `write` by client
         unsafe { assert_eq!(MSG.to_string(), *(*(lmr.as_ptr() as *const Data)).0) };
+        // wait for the agent thread to send all reponses to the remote.
+        tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(())
     }
 
@@ -106,7 +110,7 @@ mod write_with_imm {
     async fn main() {
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
         let server_handle = std::thread::spawn(move || server(addr));
-        tokio::time::sleep(Duration::new(1, 0)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
         client(addr)
             .await
             .map_err(|err| println!("{}", err))

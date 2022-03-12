@@ -56,7 +56,7 @@ rdma link | grep $RXE_DEV
 
 # Cargo run async-rdma
 cargo build
-cargo test
+RUST_BACKTRACE=full cargo test
 timeout 3 target/debug/examples/server &
 sleep 1
 target/debug/examples/client

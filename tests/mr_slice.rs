@@ -3,6 +3,7 @@ use std::alloc::Layout;
 // use std::time::Duration;
 // use tokio::time::sleep;
 
+
 mod local_mr_slice {
     use crate::*;
     async fn server(addr: &str) {
@@ -157,7 +158,8 @@ mod remote_mr_slice {
         assert_eq!(s3.addr(), rmr.addr() + s3_start);
         assert_eq!(s4.length(), 1);
         assert_eq!(s4.addr(), rmr.addr() + s4_pos);
-        sleep(Duration::from_secs(1)).await;
+        // wait for the agent thread to send all reponses to the remote.
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]

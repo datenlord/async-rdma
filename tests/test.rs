@@ -82,6 +82,7 @@ mod test2 {
         for handle in handles {
             handle.await.unwrap();
         }
+        // wait for the agent thread to send all reponses to the remote.
         tokio::time::sleep(Duration::new(3, 0)).await;
         Ok(())
     }

@@ -2,6 +2,7 @@ use async_rdma::*;
 use portpicker::pick_unused_port;
 use std::alloc::Layout;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::time::Duration;
 
 mod local_mr_slice {
     use crate::*;
@@ -150,6 +151,8 @@ mod remote_mr_slice {
         assert_eq!(s3.addr(), rmr.addr() + s3_start);
         assert_eq!(s4.length(), 1);
         assert_eq!(s4.addr(), rmr.addr() + s4_pos);
+        // wait for the agent thread to send all reponses to the remote.
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     // #[tokio::test] has a default single-threaded test runtime that may cause a dead lock.

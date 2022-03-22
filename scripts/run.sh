@@ -54,13 +54,18 @@ sudo rdma link delete $SIW_DEV
 sudo rdma link add $RXE_DEV type rxe netdev $ETH_DEV
 rdma link | grep $RXE_DEV
 
-# Cargo run async-rdma
-cargo build
-cargo test
-timeout 3 target/debug/examples/server &
-sleep 1
-target/debug/examples/client
-sleep 1
+# Cargo run async-rdma with unlimited locked-memory
+sudo env "PATH=$PATH" bash -c "
+    ulimit -l unlimited &&
+    rustup default $1 && 
+    cargo build
+    cargo test
+    cargo run --example rpc
+    timeout 3 target/debug/examples/server &
+    sleep 1
+    target/debug/examples/client
+    sleep 1
+"
 
 # Test soft-roce
 ibv_rc_pingpong -d $RXE_DEV -g 0 &

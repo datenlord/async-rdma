@@ -26,7 +26,7 @@ if [ -z "$HAS_RXE_MOD" ]; then
     else
         export KERNEL_VERSION=`echo ${FULL_KERNEL_VERSION%%-*}`
     fi
-    wget --timestamping https://cdn.kernel.org/pub/linux/kernel/v$KERNEL_MAJOR_VERSION.x/linux-$KERNEL_VERSION.tar.xz
+    wget -q https://cdn.kernel.org/pub/linux/kernel/v$KERNEL_MAJOR_VERSION.x/linux-$KERNEL_VERSION.tar.xz
     rm -rf linux-*/ rxe/ siw/ || echo "no kernel code directory"
     tar xf linux-$KERNEL_VERSION.tar.xz
 

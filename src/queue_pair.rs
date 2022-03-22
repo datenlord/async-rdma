@@ -30,7 +30,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, Sleep},
 };
-use tracing::debug;
+use tracing::error;
 
 /// Maximum value of `send_wr`
 pub(crate) static MAX_SEND_WR: u32 = 10;
@@ -210,6 +210,10 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
+            error!(
+                "open_device, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -246,11 +250,11 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC
             | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
-        debug!(
-            "modify qp to rtr, err info : {:?}",
-            io::Error::from_raw_os_error(0_i32.sub(errno))
-        );
         if errno != 0_i32 {
+            error!(
+                "modify qp to rtr, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -290,6 +294,10 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
+            error!(
+                "modify qp to rts, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -305,6 +313,10 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
+            error!(
+                "submit_send, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -320,6 +332,10 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
+            error!(
+                "submit_receive, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -336,6 +352,10 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
+            error!(
+                "submit_read, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())
@@ -358,6 +378,10 @@ impl QueuePair {
         self.event_listener.cq.req_notify(false)?;
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
+            error!(
+                "submit_write, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())

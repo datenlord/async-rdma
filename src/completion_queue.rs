@@ -7,6 +7,7 @@ use rdma_sys::{
 };
 use std::{fmt::Debug, io, mem, ops::Sub, ptr::NonNull};
 use thiserror::Error;
+use tracing::error;
 
 /// Indicator that `imm_data` is valid.
 /// Relevant for Receive Work Completions.
@@ -49,6 +50,10 @@ impl CompletionQueue {
             ibv_req_notify_cq(self.inner_cq.as_ptr(), if solicited_only { 1 } else { 0 })
         };
         if errno != 0_i32 {
+            error!(
+                "req_notify, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(())

@@ -23,7 +23,7 @@ jobs:
           sudo apt update
           sudo apt install -y net-tools librdmacm-dev ibverbs-utils rdmacm-utils perftest
           ./scripts/setup.sh
-          ./scripts/run.sh
+          ./scripts/run.sh  ${{ env.CI_RUST_TOOLCHAIN }}
       - name: Setup tmate session
         if: ${{ failure() }}
         uses: mxschmitt/action-tmate@v3

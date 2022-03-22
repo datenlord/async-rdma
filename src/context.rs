@@ -8,7 +8,7 @@ use rdma_sys::{
     ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
 use std::{ffi::CStr, fmt::Debug, io, ops::Sub, ptr::NonNull, sync::Arc};
-use tracing::warn;
+use tracing::{error, warn};
 
 /// RDMA device context
 pub(crate) struct Context {
@@ -71,11 +71,19 @@ impl Context {
         let mut errno =
             unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index.cast(), gid.as_mut()) };
         if errno != 0_i32 {
+            error!(
+                "open_device, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
         errno = unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
         if errno != 0_i32 {
+            error!(
+                "open_device, err info : {:?}",
+                io::Error::from_raw_os_error(0_i32.sub(errno))
+            );
             return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
         }
         Ok(Context {

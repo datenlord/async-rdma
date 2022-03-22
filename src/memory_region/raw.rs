@@ -6,6 +6,7 @@ use rdma_sys::{ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr};
 use std::fmt::Debug;
 use std::io;
 use std::{ptr::NonNull, sync::Arc};
+use tracing::error;
 
 /// Raw Memory Region
 pub(crate) struct RawMemoryRegion {
@@ -50,7 +51,14 @@ impl RawMemoryRegion {
     ) -> io::Result<Self> {
         let inner_mr =
             NonNull::new(unsafe { ibv_reg_mr(pd.as_ptr(), addr.cast(), len, access.0.cast()) })
-                .ok_or_else(io::Error::last_os_error)?;
+                .ok_or_else(|| {
+                    let err = io::Error::last_os_error();
+                    error!(
+                "ibv_reg_mr err, arguments:\n pd:{:?},\n addr:{:?},\n len:{:?},\n access:{:?}\n, err info:{:?}",
+                pd, addr, len, access, err
+            );
+                           err
+                })?;
         Ok(Self {
             inner_mr,
             addr,

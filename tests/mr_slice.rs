@@ -1,15 +1,15 @@
 use async_rdma::*;
 use std::alloc::Layout;
-// use std::time::Duration;
-// use tokio::time::sleep;
+use std::time::Duration;
+mod test_utilities;
+use std::io;
+use test_utilities::test_server_client;
 
+const LEN: usize = 4096;
 
 mod local_mr_slice {
-    use crate::*;
-    async fn server(addr: &str) {
-        let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-        let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
-        const LEN: usize = 4096;
+    use super::*;
+    async fn server(rdma: Rdma) -> io::Result<()> {
         let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
         assert_eq!(lmr.length(), LEN);
         let s1 = lmr.get(0..LEN).unwrap();
@@ -32,115 +32,91 @@ mod local_mr_slice {
         let mut s5 = lmr.get_mut(0..hello.len()).unwrap();
         s5.as_mut_slice().copy_from_slice(hello.as_bytes());
         assert_eq!(s5.as_slice(), b"hello");
+        Ok(())
     }
 
-    async fn client(addr: &str) {
-        let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
+    async fn client(_rdma: Rdma) -> io::Result<()> {
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test() {
-        let addr = "127.0.0.1:19000";
-        tokio::join!(server(addr), client(addr));
+    #[test]
+    fn main() {
+        test_server_client(server, client);
     }
 }
 
 mod local_mr_slice_overbound {
+    use super::*;
     mod test1 {
-        use std::sync::Arc;
-
-        use crate::*;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
-            const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             #[allow(clippy::reversed_empty_ranges)]
             let _s1 = lmr.get(2..0).unwrap();
+            Ok(())
         }
 
-        async fn client(addr: &str) {
-            let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
+        async fn client(_rdma: Rdma) -> io::Result<()> {
+            Ok(())
         }
 
-        #[tokio::test]
+        #[test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19100";
-            tokio::join!(server(addr), client(addr));
+        fn main() {
+            test_server_client(server, client);
         }
     }
 
     mod test2 {
-        use std::sync::Arc;
-
-        use crate::*;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
-            const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             let _s1 = lmr.get(0..0).unwrap();
+            Ok(())
         }
 
-        async fn client(addr: &str) {
-            let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
+        async fn client(_rdma: Rdma) -> io::Result<()> {
+            Ok(())
         }
-
-        #[tokio::test]
+        #[test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19101";
-            tokio::join!(server(addr), client(addr));
+        fn main() {
+            test_server_client(server, client);
         }
     }
 
     mod test3 {
-        use std::sync::Arc;
-
-        use crate::*;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
-            const LEN: usize = 4096;
-            let lmr = Arc::new(rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap());
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
+            let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
             assert_eq!(lmr.length(), LEN);
             let _s1 = lmr.get(0..LEN + 1).unwrap();
+            Ok(())
         }
 
-        async fn client(addr: &str) {
-            let _rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
+        async fn client(_rdma: Rdma) -> io::Result<()> {
+            Ok(())
         }
 
-        #[tokio::test]
+        #[test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19102";
-            tokio::join!(server(addr), client(addr));
+        fn main() {
+            test_server_client(server, client);
         }
     }
 }
 
 mod remote_mr_slice {
-    use std::{sync::Arc, time::Duration};
-
-    use tokio::time::sleep;
-
-    use crate::*;
-    const LEN: usize = 4096;
-    async fn server(addr: &str) {
-        let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-        let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
+    use super::*;
+    async fn server(rdma: Rdma) -> io::Result<()> {
         let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
-        rdma.send_local_mr(lmr).await.unwrap();
-        sleep(Duration::from_secs(1)).await;
+        rdma.send_local_mr(lmr).await
     }
 
-    async fn client(addr: &str) {
-        let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-        let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+    async fn client(rdma: Rdma) -> io::Result<()> {
+        let rmr = rdma.receive_remote_mr().await.unwrap();
         assert_eq!(rmr.length(), LEN);
         let s1 = rmr.get(0..LEN).unwrap();
         let s2_offset = 2048;
@@ -160,103 +136,77 @@ mod remote_mr_slice {
         assert_eq!(s4.addr(), rmr.addr() + s4_pos);
         // wait for the agent thread to send all reponses to the remote.
         tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(())
     }
-
-    #[tokio::test]
-    async fn test() {
-        let addr = "127.0.0.1:19200";
-        tokio::join!(server(addr), client(addr));
+    #[test]
+    fn main() {
+        test_server_client(server, client);
     }
 }
 
 mod remote_mr_slice_overbound {
+    use super::*;
     mod test1 {
-        use std::{sync::Arc, time::Duration};
-
-        use tokio::time::sleep;
-
-        use crate::*;
-        const LEN: usize = 4096;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
-            rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
+            rdma.send_local_mr(lmr).await
         }
 
-        async fn client(addr: &str) {
-            let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+        async fn client(rdma: Rdma) -> io::Result<()> {
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             #[allow(clippy::reversed_empty_ranges)]
             let _s1 = rmr.get(2..0).unwrap();
+            Ok(())
         }
 
-        #[tokio::test]
+        #[test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19300";
-            tokio::join!(server(addr), client(addr));
+        fn main() {
+            test_server_client(server, client);
         }
     }
 
     mod test2 {
-        use std::{sync::Arc, time::Duration};
-
-        use tokio::time::sleep;
-
-        use crate::*;
-        const LEN: usize = 4096;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
-            rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
+            rdma.send_local_mr(lmr).await
         }
 
-        async fn client(addr: &str) {
-            let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+        async fn client(rdma: Rdma) -> io::Result<()> {
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..0).unwrap();
+            Ok(())
         }
 
-        #[tokio::test]
+        #[test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19301";
-            tokio::join!(server(addr), client(addr));
+        fn main() {
+            test_server_client(server, client);
         }
     }
 
     mod test3 {
-        use std::{sync::Arc, time::Duration};
-        use tokio::time::sleep;
-
-        use crate::*;
-        const LEN: usize = 4096;
-        async fn server(addr: &str) {
-            let rdmalistener = RdmaListener::bind(addr).await.unwrap();
-            let rdma = rdmalistener.accept(1, 1, 128).await.unwrap();
+        use super::*;
+        async fn server(rdma: Rdma) -> io::Result<()> {
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
-            rdma.send_local_mr(lmr).await.unwrap();
-            sleep(Duration::from_secs(1)).await;
+            rdma.send_local_mr(lmr).await
         }
 
-        async fn client(addr: &str) {
-            let rdma = Rdma::connect(addr, 1, 1, 512).await.unwrap();
-            let rmr = Arc::new(rdma.receive_remote_mr().await.unwrap());
+        async fn client(rdma: Rdma) -> io::Result<()> {
+            let rmr = rdma.receive_remote_mr().await.unwrap();
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..LEN + 1).unwrap();
+            Ok(())
         }
 
-        #[tokio::test]
         #[should_panic]
-        async fn test() {
-            let addr = "127.0.0.1:19302";
-            tokio::join!(server(addr), client(addr));
+        #[test]
+        fn main() {
+            test_server_client(server, client);
         }
     }
 }

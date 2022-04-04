@@ -29,6 +29,7 @@ thiserror = "1.0.30"
 tokio = {version = "1.15", features = ["full", "tracing"]}
 tracing = "0.1"
 tracing-subscriber = "0.3.9"
+tikv-jemalloc-sys = {version = "0.4.3", features = ["unprefixed_malloc_on_supported_platforms"]}
 
 [dev-dependencies]
 portpicker = "0.1.1"

@@ -3,17 +3,19 @@ use crate::{
     protection_domain::ProtectionDomain,
 };
 use libc::{c_void, size_t};
+use num_traits::ToPrimitive;
 use rdma_sys::ibv_access_flags;
 use std::mem;
 use std::{alloc::Layout, io, ptr, sync::Arc};
-use tikv_jemalloc_sys::{self, extent_hooks_t};
+use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ARENA};
 use tracing::error;
 
-
+/// Get default extent hooks from arena0
+static DEFAULT_ARENA_INDEX:u32 = 0;
 
 lazy_static! {
     static ref ORIGIN_HOOKS: extent_hooks_t = {
-        get_default_hooks_impl().unwrap()
+        get_default_hooks_impl(DEFAULT_ARENA_INDEX).unwrap()
     };
 }
 // static MALLCTL_ARENAS_ALL:c_int	= 4096;
@@ -29,8 +31,10 @@ impl MrAllocator {
     /// Create a new MR allocator
     pub(crate) fn new(pd: Arc<ProtectionDomain>) -> Self {
         get_je();
+        let ind = create_arena().unwrap();
         println!("static ref hooks {:?}", (*ORIGIN_HOOKS).alloc);
-        set_extent_hooks().unwrap();
+        set_extent_hooks(ind).unwrap();
+        let _ttt = unsafe { tikv_jemalloc_sys::mallocx(1024, MALLOCX_ARENA(ind.to_usize().unwrap())) };
         Self { pd }
     }
 
@@ -54,10 +58,10 @@ impl MrAllocator {
 
 
 #[allow(trivial_casts)]
-fn get_default_hooks_impl() -> io::Result<extent_hooks_t> {
+fn get_default_hooks_impl(arena_ind:u32) -> io::Result<extent_hooks_t> {
     // read default alloc impl
     let mut hooks: *mut extent_hooks_t = ptr::null_mut();
-    let key = "arena.0.extent_hooks\0";
+    let key = format!("arena.{}.extent_hooks\0", arena_ind);
     mem::forget(hooks);
     let mut hooks_len = mem::size_of_val(&hooks);
     let errno = unsafe {
@@ -80,9 +84,8 @@ fn get_default_hooks_impl() -> io::Result<extent_hooks_t> {
 }
 
 #[allow(trivial_casts)]
-fn set_extent_hooks() -> io::Result<()> {
-    let key = "arenas.create\0";
-    let mut aid = 0_u32;
+fn set_extent_hooks(arena_ind:u32) -> io::Result<()> {
+    let key = format!("arena.{}.extent_hooks\0", arena_ind);
     let mut hooks = extent_hooks_t {
         alloc: Some(extent_alloc_hook),
         dalloc: Some(extent_dalloc_hook),
@@ -96,31 +99,43 @@ fn set_extent_hooks() -> io::Result<()> {
     };
     mem::forget(hooks);
     let hooks_len: size_t = mem::size_of_val(&&hooks);
-    let mut aid_len: size_t = mem::size_of_val(&aid);
-    // let errno = unsafe {
-    //     tikv_jemalloc_sys::mallctl(
-    //         key.as_ptr() as *const _,
-    //         ptr::null_mut(),
-    //         ptr::null_mut(),
-    //         &mut hooks as *mut _ as *mut c_void,
-    //         hooks_len,
-    //     )
-    // };
     let errno = unsafe {
         tikv_jemalloc_sys::mallctl(
             key.as_ptr() as *const _,
-            &mut aid as *mut _ as *mut c_void,
-            &mut aid_len,
+            ptr::null_mut(),
+            ptr::null_mut(),
             &mut &mut hooks as *mut _ as *mut c_void,
             hooks_len,
         )
     };
-    println!("aid : {}", aid);
+    println!("arena<{}> set hooks success", arena_ind);
     if errno != 0_i32 {
         error!("set extent hooks failed");
         return Err(io::Error::from_raw_os_error(errno));
     }
     Ok(())
+}
+
+#[allow(trivial_casts)]
+fn create_arena() -> io::Result<u32> {
+    let key = "arenas.create\0";
+    let mut aid = 0_u32;
+    let mut aid_len: size_t = mem::size_of_val(&aid);
+    let errno = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            key.as_ptr() as *const _,
+            &mut aid as *mut _ as *mut c_void,
+            &mut aid_len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if errno != 0_i32 {
+        error!("set extent hooks failed");
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    println!("create arena success aid : {}", aid);
+    Ok(aid)
 }
 
 #[allow(trivial_casts)]
@@ -142,26 +157,6 @@ fn get_je() {
     }
     println!("allocated {}", allocated);
 }
-
-// /// Fetch a jemalloc internal value.
-// #[allow(trivial_casts)]
-// unsafe fn mallctl_read<T: Default>(name: &str) -> io::Result<T> {
-//     let key = CString::new(name).unwrap();
-//     let mut old: T = T::default();
-//     let mut oldlen: size_t = size_of::<T>();
-//     let errno =
-//     tikv_jemalloc_sys::mallctl(key.as_ptr(),
-//             ((&mut old) as *mut T) as *mut c_void,
-//             &mut oldlen as *mut _,
-//             ptr::null_mut(),
-//             0);
-//     if errno != 0_i32 {
-//         error!("can not read je internal values");
-//         return Err(io::Error::from_raw_os_error(errno));
-//     }
-//     Ok(old)
-// }
-
 
 unsafe extern "C" fn extent_alloc_hook(
     a: *mut extent_hooks_t,
@@ -193,6 +188,7 @@ unsafe extern "C" fn extent_dalloc_hook(
 mod tests {
     use crate::RdmaBuilder;
     use std::{alloc::Layout, io};
+    use super::*;
     
     #[tokio::test]
     async fn test1() -> io::Result<()> {
@@ -206,5 +202,13 @@ mod tests {
             mrs.push(mr);
         }
         Ok(())
+    }
+
+    #[test]
+    fn je() {
+        get_je();
+        let ind = create_arena().unwrap();
+        println!("static ref hooks {:?}", (*ORIGIN_HOOKS).alloc);
+        set_extent_hooks(ind).unwrap();
     }
 }

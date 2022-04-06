@@ -9,6 +9,13 @@ use std::{alloc::Layout, io, ptr, sync::Arc};
 use tikv_jemalloc_sys::{self, extent_hooks_t};
 use tracing::error;
 
+
+
+lazy_static! {
+    static ref ORIGIN_HOOKS: extent_hooks_t = {
+        get_default_hooks_impl().unwrap()
+    };
+}
 // static MALLCTL_ARENAS_ALL:c_int	= 4096;
 
 /// Memory region allocator
@@ -21,12 +28,8 @@ pub(crate) struct MrAllocator {
 impl MrAllocator {
     /// Create a new MR allocator
     pub(crate) fn new(pd: Arc<ProtectionDomain>) -> Self {
-        unsafe {
-            let c = tikv_jemalloc_sys::malloc(Layout::new::<char>().size()*10000 ) as *mut char;
-            *c = 'c';
-            println!("char :{}", *c);
-        };
         get_je();
+        println!("static ref hooks {:?}", (*ORIGIN_HOOKS).alloc);
         set_extent_hooks().unwrap();
         Self { pd }
     }
@@ -49,11 +52,37 @@ impl MrAllocator {
     }
 }
 
+
+#[allow(trivial_casts)]
+fn get_default_hooks_impl() -> io::Result<extent_hooks_t> {
+    // read default alloc impl
+    let mut hooks: *mut extent_hooks_t = ptr::null_mut();
+    let key = "arena.0.extent_hooks\0";
+    mem::forget(hooks);
+    let mut hooks_len = mem::size_of_val(&hooks);
+    let errno = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            key.as_ptr() as *const _,
+            &mut hooks as *mut _ as *mut c_void,
+            &mut hooks_len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+
+    let hooksd = unsafe { *hooks };
+    println!("get original hooks  {:?}", hooksd.alloc);
+    if errno != 0_i32 {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+
+    Ok(hooksd)
+}
+
 #[allow(trivial_casts)]
 fn set_extent_hooks() -> io::Result<()> {
-    // let key = CString::new(format!("arena.{}.extent_hooks", MALLCTL_ARENAS_ALL)).unwrap();
-    let _ = get_default_hooks_impl().expect("get default hooks failed");
-    let key = "arena.0.extent_hooks\0";
+    let key = "arenas.create\0";
+    let mut aid = 0_u32;
     let mut hooks = extent_hooks_t {
         alloc: Some(extent_alloc_hook),
         dalloc: Some(extent_dalloc_hook),
@@ -65,70 +94,33 @@ fn set_extent_hooks() -> io::Result<()> {
         split: None,
         merge: None,
     };
-    let hooks_len: size_t = mem::size_of_val(&hooks);
+    mem::forget(hooks);
+    let hooks_len: size_t = mem::size_of_val(&&hooks);
+    let mut aid_len: size_t = mem::size_of_val(&aid);
+    // let errno = unsafe {
+    //     tikv_jemalloc_sys::mallctl(
+    //         key.as_ptr() as *const _,
+    //         ptr::null_mut(),
+    //         ptr::null_mut(),
+    //         &mut hooks as *mut _ as *mut c_void,
+    //         hooks_len,
+    //     )
+    // };
     let errno = unsafe {
         tikv_jemalloc_sys::mallctl(
             key.as_ptr() as *const _,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut hooks as *mut _ as *mut c_void,
+            &mut aid as *mut _ as *mut c_void,
+            &mut aid_len,
+            &mut &mut hooks as *mut _ as *mut c_void,
             hooks_len,
         )
     };
+    println!("aid : {}", aid);
     if errno != 0_i32 {
         error!("set extent hooks failed");
         return Err(io::Error::from_raw_os_error(errno));
     }
     Ok(())
-}
-
-unsafe extern "C" fn extent_alloc_hook(
-    a: *mut extent_hooks_t,
-    b: *mut c_void,
-    c: usize,
-    d: usize,
-    e: *mut i32,
-    f: *mut i32,
-    g: u32,
-) -> *mut c_void {
-    let default_alloc_hook = (get_default_hooks_impl().unwrap()).alloc.unwrap();
-    println!("my extent alloc hook");
-    default_alloc_hook(a, b, c, d, e, f, g)
-}
-
-unsafe extern "C" fn extent_dalloc_hook(
-    a: *mut extent_hooks_t,
-    b: *mut c_void,
-    c: usize,
-    d: i32,
-    e: u32,
-) -> i32 {
-    let default_dalloc_hook = (get_default_hooks_impl().unwrap()).dalloc.unwrap();
-    println!("my extent dalloc hook");
-    default_dalloc_hook(a, b, c, d, e)
-}
-
-#[allow(trivial_casts)]
-fn get_default_hooks_impl() -> io::Result<extent_hooks_t> {
-    // read default alloc impl
-    let key = "arena.0.extent_hooks\0";
-    let mut default_hooks = extent_hooks_t::default();
-    let mut hooks_len = mem::size_of_val(&default_hooks);
-
-    let errno = unsafe {
-        tikv_jemalloc_sys::mallctl(
-            key.as_ptr() as *const _,
-            &mut default_hooks as *mut _ as *mut c_void,
-            &mut hooks_len,
-            ptr::null_mut(),
-            0,
-        )
-    };
-    if errno != 0_i32 {
-        error!("can not read default hooks impl");
-        return Err(io::Error::from_raw_os_error(errno));
-    }
-    Ok(default_hooks)
 }
 
 #[allow(trivial_casts)]
@@ -170,17 +162,44 @@ fn get_je() {
 //     Ok(old)
 // }
 
+
+unsafe extern "C" fn extent_alloc_hook(
+    a: *mut extent_hooks_t,
+    b: *mut c_void,
+    c: usize,
+    d: usize,
+    e: *mut i32,
+    f: *mut i32,
+    g: u32,
+) -> *mut c_void {
+    println!("my extent alloc hook {:?}", (*a).alloc);
+    let origin_alloc = (*ORIGIN_HOOKS).alloc.unwrap();
+    origin_alloc(a, b, c, d, e, f, g)
+}
+
+unsafe extern "C" fn extent_dalloc_hook(
+    a: *mut extent_hooks_t,
+    b: *mut c_void,
+    c: usize,
+    d: i32,
+    e: u32,
+) -> i32 {
+    println!("my extent dalloc hook");
+    let origin_dalloc = (*ORIGIN_HOOKS).dalloc.unwrap();
+    origin_dalloc(a, b, c, d, e)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::RdmaBuilder;
     use std::{alloc::Layout, io};
-
+    
     #[tokio::test]
     async fn test1() -> io::Result<()> {
         let rdma = RdmaBuilder::default()
-            .set_port_num(1)
-            .set_gid_index(1)
-            .build()?;
+        .set_port_num(1)
+        .set_gid_index(1)
+        .build()?;
         let mut mrs = vec![];
         for _ in 0_i32..2_i32 {
             let mr = rdma.alloc_local_mr(Layout::new::<[u8; 4096]>())?;

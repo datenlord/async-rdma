@@ -2,6 +2,7 @@ use super::local::LocalMrReadAccess;
 use super::MrAccess;
 use crate::protection_domain::ProtectionDomain;
 use clippy_utilities::Cast;
+use libc::c_void;
 use rdma_sys::{ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr};
 use std::fmt::Debug;
 use std::io;
@@ -83,6 +84,7 @@ unsafe impl Send for RawMemoryRegion {}
 impl Drop for RawMemoryRegion {
     fn drop(&mut self) {
         let errno = unsafe { ibv_dereg_mr(self.inner_mr.as_ptr()) };
+        unsafe { tikv_jemalloc_sys::free(self.addr as *mut c_void) };
         assert_eq!(errno, 0_i32);
     }
 }

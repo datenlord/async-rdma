@@ -128,6 +128,7 @@ impl WorkCompletion {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
             Ok(self.inner_wc.byte_len.cast())
         } else {
+            error!("error wc wrid : {}", self.inner_wc.wr_id);
             Err(WCError::from_u32(self.inner_wc.status).unwrap_or(WCError::UnexpectedErr))
         }
     }

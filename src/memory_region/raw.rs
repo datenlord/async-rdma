@@ -83,6 +83,7 @@ unsafe impl Send for RawMemoryRegion {}
 
 impl Drop for RawMemoryRegion {
     fn drop(&mut self) {
+        println!("dereg_mr {:?}", &self);
         let errno = unsafe { ibv_dereg_mr(self.inner_mr.as_ptr()) };
         unsafe { tikv_jemalloc_sys::free(self.addr as *mut c_void) };
         assert_eq!(errno, 0_i32);

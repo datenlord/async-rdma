@@ -311,6 +311,15 @@ impl QueuePair {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut sr = SendWr::new_send(lms, wr_id, imm);
         self.event_listener.cq.req_notify(false)?;
+        for lm in lms {
+            println!(
+                "POST_SEND addr {}, len {}, lkey {} wrid: {}",
+                lm.addr(),
+                lm.length(),
+                lm.lkey(),
+                sr.as_ref().wr_id,
+            );
+        }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             error!(
@@ -330,6 +339,15 @@ impl QueuePair {
         let mut rr = RecvWr::new_recv(lms, wr_id);
         let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
         self.event_listener.cq.req_notify(false)?;
+        for lm in lms {
+            println!(
+                "POST_SEND addr {}, len {}, lkey {} wrid: {}",
+                lm.addr(),
+                lm.length(),
+                lm.lkey(),
+                rr.as_ref().wr_id,
+            );
+        }
         let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             error!(
@@ -350,6 +368,15 @@ impl QueuePair {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut sr = SendWr::new_read(lms, wr_id, rm);
         self.event_listener.cq.req_notify(false)?;
+        for lm in lms {
+            println!(
+                "POST_SEND addr {}, len {}, lkey {} wrid: {}",
+                lm.addr(),
+                lm.length(),
+                lm.lkey(),
+                sr.as_ref().wr_id,
+            );
+        }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             error!(
@@ -376,6 +403,16 @@ impl QueuePair {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut sr = SendWr::new_write(lms, wr_id, rm, imm);
         self.event_listener.cq.req_notify(false)?;
+        for lm in lms {
+            println!("```````````````````````````````````````");
+            println!(
+                "POST_SEND addr {}, len {}, lkey {} wrid: {}",
+                lm.addr(),
+                lm.length(),
+                lm.lkey(),
+                sr.as_ref().wr_id,
+            );
+        }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             error!(

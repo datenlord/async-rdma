@@ -41,12 +41,21 @@ pub trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
 /// Local Memory Region
 #[derive(Debug)]
 pub struct LocalMr {
+    /// `LocalMr take()` may change `addr`, use `origin_addr` when `free()`
+    origin_addr: usize,
     /// The start address of this mr
     addr: usize,
     /// The length of this mr
     len: usize,
     /// The raw mr where this local mr comes from.
     raw: Arc<RawMemoryRegion>,
+}
+
+impl Drop for LocalMr {
+    fn drop(&mut self) {
+        println!("DROP LocalMr {:?}", self);
+        unsafe { tikv_jemalloc_sys::free(self.origin_addr as _) }
+    }
 }
 
 impl MrAccess for LocalMr {
@@ -78,7 +87,12 @@ impl LocalMrWriteAccess for LocalMr {}
 impl LocalMr {
     /// New Local Mr
     pub(crate) fn new(addr: usize, len: usize, raw: Arc<RawMemoryRegion>) -> Self {
-        Self { addr, len, raw }
+        Self {
+            origin_addr: addr,
+            addr,
+            len,
+            raw,
+        }
     }
 
     /// Get a local mr slice

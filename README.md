@@ -4,7 +4,7 @@ A framework for writing RDMA applications with high-level abstraction and asynch
 
 [![Crates.io][crates-badge]][crates-url]
 [![Docs][docs-badge]][docs-url]
-[![MIT licensed][gpl-badge]][gpl-url]
+[![GPL licensed][gpl-badge]][gpl-url]
 [![Build Status][actions-badge]][actions-url]
 
 [crates-badge]: https://img.shields.io/crates/v/async-rdma.svg

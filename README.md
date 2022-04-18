@@ -2,9 +2,15 @@
 
 A framework for writing RDMA applications with high-level abstraction and asynchronous APIs.
 
+[![Crates.io][crates-badge]][crates-url]
+[![Docs][docs-badge]][docs-url]
 [![MIT licensed][gpl-badge]][gpl-url]
 [![Build Status][actions-badge]][actions-url]
 
+[crates-badge]: https://img.shields.io/crates/v/async-rdma.svg
+[crates-url]: https://crates.io/crates/async-rdma
+[docs-badge]: https://docs.rs/async-rdma/badge.svg
+[docs-url]: https://docs.rs/async-rdma/
 [gpl-badge]: https://img.shields.io/badge/license-GPLv3.0-blue.svg
 [gpl-url]: https://github.com/datenlord/async-rdma/blob/master/LICENSE
 [actions-badge]: https://github.com/datenlord/async-rdma/actions/workflows/ci.yml/badge.svg

@@ -6,6 +6,7 @@ A framework for writing RDMA applications with high-level abstraction and asynch
 [![Docs][docs-badge]][docs-url]
 [![GPL licensed][gpl-badge]][gpl-url]
 [![Build Status][actions-badge]][actions-url]
+[![Gitter](https://badges.gitter.im/datenlord/async-rdma.svg)](https://gitter.im/datenlord/async-rdma?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 
 [crates-badge]: https://img.shields.io/crates/v/async-rdma.svg
 [crates-url]: https://crates.io/crates/async-rdma

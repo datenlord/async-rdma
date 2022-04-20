@@ -1,5 +1,7 @@
 # async-rdma
 
+[![Join the chat at https://gitter.im/datenlord/async-rdma](https://badges.gitter.im/datenlord/async-rdma.svg)](https://gitter.im/datenlord/async-rdma?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 A framework for writing RDMA applications with high-level abstraction and asynchronous APIs.
 
 [![Crates.io][crates-badge]][crates-url]

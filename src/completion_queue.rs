@@ -62,13 +62,10 @@ impl CompletionQueue {
     /// Poll `num_entries` work completions from CQ
     pub(crate) fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
         let mut ans: Vec<WorkCompletion> = Vec::with_capacity(num_entries);
-
-        // The capacity equals to the length
-        unsafe { ans.set_len(num_entries) };
-
         let poll_res =
             unsafe { ibv_poll_cq(self.as_ptr(), num_entries.cast(), ans.as_mut_ptr().cast()) };
         if poll_res >= 0_i32 {
+            assert!(num_entries >= poll_res.cast());
             let poll_res = poll_res.cast();
 
             // the length equals to the poll results length
@@ -79,7 +76,10 @@ impl CompletionQueue {
             assert_eq!(ans.capacity(), poll_res);
             Ok(ans)
         } else {
-            Err(io::Error::new(io::ErrorKind::WouldBlock, ""))
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "nothing completed",
+            ))
         }
     }
 
@@ -89,7 +89,7 @@ impl CompletionQueue {
         polled
             .into_iter()
             .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, ""))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "nothing completed"))
     }
 
     /// Get the internal event channel
@@ -128,6 +128,7 @@ impl WorkCompletion {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
             Ok(self.inner_wc.byte_len.cast())
         } else {
+            error!("error wc wrid : {}", self.inner_wc.wr_id);
             Err(WCError::from_u32(self.inner_wc.status).unwrap_or(WCError::UnexpectedErr))
         }
     }

@@ -1,0 +1,5 @@
+[env]
+# `narenas` is the maximum number of arenas to use for automatic multiplexing of threads and arenas. 
+# The default is four times the number of CPUs, or one if there is a single CPU.
+# `async-rdma` doesn't need that many antomatic arenas so we set it to 1.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1"

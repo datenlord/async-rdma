@@ -6,7 +6,7 @@ use rdma_sys::{ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr};
 use std::fmt::Debug;
 use std::io;
 use std::{ptr::NonNull, sync::Arc};
-use tracing::error;
+use tracing::{debug, error};
 
 /// Raw Memory Region
 pub(crate) struct RawMemoryRegion {
@@ -17,7 +17,7 @@ pub(crate) struct RawMemoryRegion {
     /// the len of the raw memory region
     len: usize,
     /// the protection domain the raw memory region belongs to
-    _pd: Arc<ProtectionDomain>,
+    pd: Arc<ProtectionDomain>,
 }
 
 impl MrAccess for RawMemoryRegion {
@@ -63,15 +63,19 @@ impl RawMemoryRegion {
             inner_mr,
             addr,
             len,
-            _pd: Arc::<ProtectionDomain>::clone(pd),
+            pd: Arc::<ProtectionDomain>::clone(pd),
         })
     }
 }
 
 impl Debug for RawMemoryRegion {
+    #[allow(clippy::as_conversions)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Local")
+        f.debug_struct("RawMemoryRegion")
             .field("inner_mr", &self.inner_mr)
+            .field("addr", &(self.addr as usize))
+            .field("len", &self.len)
+            .field("pd", &self.pd)
             .finish()
     }
 }
@@ -82,6 +86,7 @@ unsafe impl Send for RawMemoryRegion {}
 
 impl Drop for RawMemoryRegion {
     fn drop(&mut self) {
+        debug!("dereg_mr {:?}", &self);
         let errno = unsafe { ibv_dereg_mr(self.inner_mr.as_ptr()) };
         assert_eq!(errno, 0_i32);
     }

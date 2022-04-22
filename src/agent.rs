@@ -295,9 +295,7 @@ impl AgentThread {
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
-            for i in header_buf.as_mut_slice() {
-                *i = 0_u8;
-            }
+            unsafe { std::ptr::write_bytes(header_buf.as_mut_ptr(), 0_u8, header_buf.length()) };
             let (sz, imm) = self
                 .inner
                 .qp

@@ -94,3 +94,10 @@ impl<'de> Deserialize<'de> for Gid {
         <[u8; 16] as Deserialize<'de>>::deserialize(deserializer).map(Self::from_raw)
     }
 }
+
+#[test]
+fn repr_check() {
+    use std::mem::{align_of, size_of};
+    assert_eq!(size_of::<Gid>(), size_of::<ibv_gid>());
+    assert_eq!(align_of::<Gid>(), align_of::<ibv_gid>());
+}

@@ -76,7 +76,6 @@ impl Context {
             let errno =
                 unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index, gid.as_mut_ptr()) };
             if errno != 0_i32 {
-                assert_ne!(errno, i32::MIN);
                 let err = io::Error::from_raw_os_error(errno.wrapping_neg());
                 error!("open_device, err info : {:?}", err);
                 return Err(err);

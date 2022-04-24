@@ -5,8 +5,9 @@ use crate::{
 use clippy_utilities::Cast;
 use rdma_sys::{
     ibv_close_device, ibv_context, ibv_free_device_list, ibv_get_device_list, ibv_get_device_name,
-    ibv_open_device, ibv_port_attr, ibv_query_gid,
+    ibv_gid, ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
+use std::mem::MaybeUninit;
 use std::{ffi::CStr, fmt::Debug, io, ops::Sub, ptr::NonNull, sync::Arc};
 use tracing::{error, warn};
 
@@ -67,18 +68,26 @@ impl Context {
         let inner_ctx =
             NonNull::new(unsafe { ibv_open_device(*dev) }).ok_or_else(io::Error::last_os_error)?;
         unsafe { ibv_free_device_list(dev_list_ptr) };
-        let mut gid = Gid::default();
-        let mut errno =
-            unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index.cast(), gid.as_mut()) };
-        if errno != 0_i32 {
-            error!(
-                "open_device, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
-        }
+
+        let gid = {
+            let mut gid = MaybeUninit::<ibv_gid>::uninit();
+            let gid_index = gid_index.cast();
+            // SAFETY: ffi
+            let errno =
+                unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index, gid.as_mut_ptr()) };
+            if errno != 0_i32 {
+                assert_ne!(errno, i32::MIN);
+                let err = io::Error::from_raw_os_error(errno.wrapping_neg());
+                error!("open_device, err info : {:?}", err);
+                return Err(err);
+            }
+            // SAFETY: ffi init
+            Gid::from(unsafe { gid.assume_init() })
+        };
+
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
-        errno = unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
+        let errno =
+            unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
         if errno != 0_i32 {
             error!(
                 "open_device, err info : {:?}",

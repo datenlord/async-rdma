@@ -1,3 +1,4 @@
+use crate::hashmap_extension::HashMapExtension;
 use crate::queue_pair::MAX_RECV_WR;
 use crate::rmr_manager::RemoteMrManager;
 use crate::RemoteMrReadAccess;
@@ -12,8 +13,8 @@ use crate::{
     queue_pair::QueuePair,
 };
 use clippy_utilities::Cast;
-use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::SystemTime;
 use std::{
     alloc::Layout,
@@ -74,7 +75,7 @@ impl Agent {
         allocator: Arc<MrAllocator>,
         max_sr_data_len: usize,
     ) -> io::Result<Self> {
-        let response_waits = Arc::new(LockFreeCuckooHash::new());
+        let response_waits = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let rmr_manager = RemoteMrManager::new();
         let (local_mr_send, local_mr_recv) = channel(1024);
         let (remote_mr_send, remote_mr_recv) = channel(1024);
@@ -327,35 +328,38 @@ impl AgentThread {
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
-            unsafe { std::ptr::write_bytes(header_buf.as_mut_ptr(), 0_u8, header_buf.length()) };
+            unsafe {
+                std::ptr::write_bytes(header_buf.as_mut_ptr_unchecked(), 0_u8, header_buf.length());
+            }
             let (sz, imm) = self
                 .inner
                 .qp
                 .receive_sge(&[&mut header_buf, &mut data_buf])
                 .await?;
-            if imm.is_some() && header_buf.as_slice() == CLEAN_STATE {
+            if imm.is_some() && header_buf.as_slice_unchecked() == CLEAN_STATE {
                 debug!("write with immediate data : {:?}", imm);
                 // imm was checked by `is_some()`
                 #[allow(clippy::unwrap_used)]
                 let _task = tokio::spawn(Arc::<Self>::clone(&self).handle_write_imm(imm.unwrap()));
                 continue;
             }
-            let message = bincode::deserialize(header_buf.as_slice().get(..).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "{:?} is out of range, the length is {:?}",
-                        0..sz,
-                        header_buf.length()
-                    ),
-                )
-            })?)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to deserialize {:?}", e),
-                )
-            })?;
+            let message =
+                bincode::deserialize(header_buf.as_slice_unchecked().get(..).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!(
+                            "{:?} is out of range, the length is {:?}",
+                            0..sz,
+                            header_buf.length()
+                        ),
+                    )
+                })?)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize {:?}", e),
+                    )
+                })?;
             debug!("message: {:?}", message);
             match message {
                 Message::Request(request) => match request.kind {
@@ -491,11 +495,11 @@ impl AgentThread {
     /// response handler
     async fn handle_response(self: Arc<Self>, response: Response) -> io::Result<()> {
         trace!("handle response");
-        let guard = pin();
         let sender = self
             .inner
             .response_waits
-            .remove_with_guard(&response.request_id, &guard)
+            .lock()
+            .remove(&response.request_id)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Other,
@@ -610,24 +614,19 @@ impl AgentInner {
         let data_len: usize = data.iter().map(|l| l.length()).sum();
         assert!(data_len <= self.max_sr_data_len);
         let (tx, mut rx) = channel(2);
-        let mut req = Request {
-            request_id: AgentRequestId::new(),
+        let req_id = self
+            .response_waits
+            .lock()
+            .insert_until_success(tx, AgentRequestId::new);
+        let req = Request {
+            request_id: req_id,
             kind,
         };
-        while !self
-            .response_waits
-            .insert_if_not_exists(req.request_id, tx.clone())
-        {
-            req = Request {
-                request_id: AgentRequestId::new(),
-                kind,
-            };
-        }
         let mut header_buf = self
             .allocator
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1) })?;
-        let cursor = Cursor::new(header_buf.as_mut_slice());
+        let cursor = Cursor::new(header_buf.as_mut_slice_unchecked());
         let message = Message::Request(req);
         // FIXME: serialize udpate
         bincode::serialize_into(cursor, &message)
@@ -654,7 +653,7 @@ impl AgentInner {
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(*RESPONSE_HEADER_MAX_LEN, 1) })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let cursor = Cursor::new(header.as_mut_slice());
+        let cursor = Cursor::new(header.as_mut_slice_unchecked());
         let message = Message::Response(response);
         let msz = bincode::serialized_size(&message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
@@ -767,7 +766,8 @@ lazy_static! {
 }
 
 /// The map for the task waiters, these tasks have submitted the RDMA request but haven't got the result
-type ResponseWaitsMap = Arc<LockFreeCuckooHash<AgentRequestId, Sender<io::Result<ResponseKind>>>>;
+type ResponseWaitsMap =
+    Arc<parking_lot::Mutex<HashMap<AgentRequestId, Sender<io::Result<ResponseKind>>>>>;
 
 /// The Id for each RDMA request
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]

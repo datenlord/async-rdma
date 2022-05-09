@@ -193,6 +193,6 @@ where
     ibv_sge {
         addr: lmr.addr().cast(),
         length: lmr.length().cast(),
-        lkey: lmr.lkey(),
+        lkey: lmr.lkey_unchecked(),
     }
 }

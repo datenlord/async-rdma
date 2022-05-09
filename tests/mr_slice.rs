@@ -31,7 +31,7 @@ mod local_mr_slice {
         assert_eq!(s4.addr(), lmr.addr() + s4_pos);
         let mut s5 = lmr.get_mut(0..hello.len()).unwrap();
         s5.as_mut_slice().copy_from_slice(hello.as_bytes());
-        assert_eq!(s5.as_slice(), b"hello");
+        assert_eq!(*s5.as_slice(), b"hello");
         Ok(())
     }
 
@@ -147,6 +147,7 @@ mod remote_mr_slice {
 mod remote_mr_slice_overbound {
     use super::*;
     mod test1 {
+
         use super::*;
         async fn server(rdma: Rdma) -> io::Result<()> {
             let lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>()).unwrap();
@@ -155,6 +156,8 @@ mod remote_mr_slice_overbound {
 
         async fn client(rdma: Rdma) -> io::Result<()> {
             let rmr = rdma.receive_remote_mr().await.unwrap();
+            // wait for the agent thread to send all reponses to the remote.
+            tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(rmr.length(), LEN);
             #[allow(clippy::reversed_empty_ranges)]
             let _s1 = rmr.get(2..0).unwrap();
@@ -177,6 +180,8 @@ mod remote_mr_slice_overbound {
 
         async fn client(rdma: Rdma) -> io::Result<()> {
             let rmr = rdma.receive_remote_mr().await.unwrap();
+            // wait for the agent thread to send all reponses to the remote.
+            tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..0).unwrap();
             Ok(())
@@ -198,6 +203,8 @@ mod remote_mr_slice_overbound {
 
         async fn client(rdma: Rdma) -> io::Result<()> {
             let rmr = rdma.receive_remote_mr().await.unwrap();
+            // wait for the agent thread to send all reponses to the remote.
+            tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(rmr.length(), LEN);
             let _s1 = rmr.get(0..LEN + 1).unwrap();
             Ok(())

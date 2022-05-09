@@ -49,7 +49,7 @@ impl Server {
             .map_err(|err| println!("{}", &err))
             .unwrap();
         //write data to lmr
-        unsafe { *(lmr_sync.as_mut_ptr() as *mut Request) = Request::Sync };
+        unsafe { *(*lmr_sync.as_mut_ptr() as *mut Request) = Request::Sync };
         rdma.send(&lmr_sync)
             .await
             .map_err(|err| println!("{}", &err))
@@ -68,7 +68,7 @@ impl Server {
             Self::sync_with_client(&rdma).await;
             let resp = unsafe {
                 // get 'Request' from lmr
-                let req = &*(lmr_req.as_ptr() as *const Request);
+                let req = &*(*lmr_req.as_ptr() as *const Request);
                 Self::process_request(req)
             };
             // alloc a lmr for client to 'read' 'Response'
@@ -77,7 +77,7 @@ impl Server {
                 .map_err(|err| println!("{}", &err))
                 .unwrap();
             // put 'Response' into lmr
-            unsafe { *(lmr_resp.as_mut_ptr() as *mut Response) = resp };
+            unsafe { *(*lmr_resp.as_mut_ptr() as *mut Response) = resp };
             Self::sync_with_client(&rdma).await;
             // send the metadata of lmr to client to 'read'
             rdma.send_local_mr(lmr_resp)
@@ -95,7 +95,7 @@ impl Server {
                 .await
                 .map(|lmr_req| unsafe {
                     //get `Request` from mr
-                    let req = &*(lmr_req.as_ptr() as *const Request);
+                    let req = &*(*lmr_req.as_ptr() as *const Request);
                     Self::process_request(req)
                 })
                 .map_err(|err| println!("{}", &err))
@@ -105,7 +105,7 @@ impl Server {
                 .map_err(|err| println!("{}", &err))
                 .unwrap();
             // put `Response` into a new mr and send it to client
-            unsafe { *(lmr_resp.as_mut_ptr() as *mut Response) = resp };
+            unsafe { *(*lmr_resp.as_mut_ptr() as *mut Response) = resp };
             rdma.send(&lmr_resp)
                 .await
                 .map_err(|err| println!("{}", &err))
@@ -128,7 +128,7 @@ impl Server {
 
 fn transmute_lmr_to_string(lmr: &LocalMr) -> String {
     unsafe {
-        let resp = &*(lmr.as_ptr() as *const Response);
+        let resp = &*(*lmr.as_ptr() as *const Response);
         match resp {
             Response::Echo { msg } => msg.to_string(),
             _ => panic!("invalid input : {:?}", resp),
@@ -164,7 +164,7 @@ impl Client {
             .map_err(|err| println!("{}", &err))
             .unwrap();
         //write data to lmr
-        unsafe { *(lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
+        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
         // send request to server by rdma `send`
         self.rdma_stub
             .send(&lmr_req)
@@ -196,7 +196,7 @@ impl Client {
             .map_err(|err| println!("{}", &err))
             .unwrap();
         // put data into lmr
-        unsafe { *(lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
+        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
         // request a remote mr located in the server
         let mut rmr_req = self
             .rdma_stub
@@ -249,7 +249,7 @@ impl Client {
             .receive()
             .await
             .map(|lmr_resp| unsafe {
-                let resp = &*(lmr_resp.as_ptr() as *const Response);
+                let resp = &*(*lmr_resp.as_ptr() as *const Response);
                 if let Response::Sync = resp {
                 } else {
                     panic!("invalid response");

@@ -11,7 +11,7 @@ async fn server(rdma: Rdma) -> io::Result<()> {
         let rdma_clone = rdma.clone();
         handles.push(tokio::spawn(async move {
             let lm = rdma_clone.receive().await.unwrap();
-            assert_eq!(unsafe { *(lm.as_ptr() as *mut i32) }, 5);
+            assert_eq!(unsafe { *(*lm.as_ptr() as *mut i32) }, 5);
             assert_eq!(lm.length(), 4);
         }));
     }
@@ -36,7 +36,7 @@ async fn client(rdma: Rdma) -> io::Result<()> {
         tokio::time::sleep(Duration::from_millis(1)).await;
         handles.push(tokio::spawn(async move {
             let lm = rdma_clone.alloc_local_mr(Layout::new::<i32>()).unwrap();
-            unsafe { *(lm.as_ptr() as *mut i32) = 5 };
+            unsafe { *(*lm.as_ptr() as *mut i32) = 5 };
             rdma_clone.send(&lm).await.unwrap();
         }));
     }

@@ -15,21 +15,21 @@ use tracing::debug;
 
 async fn send_lmr_to_server(rdma: &Rdma) {
     let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(lmr.as_mut_ptr() as *mut char) = 'h' };
+    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'h' };
     rdma.send_local_mr(lmr).await.unwrap();
 }
 
 async fn request_then_write(rdma: &Rdma) {
     let mut rmr = rdma.request_remote_mr(Layout::new::<char>()).await.unwrap();
     let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(lmr.as_mut_ptr() as *mut char) = 'e' };
+    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'e' };
     rdma.write(&lmr, &mut rmr).await.unwrap();
     rdma.send_remote_mr(rmr).await.unwrap();
 }
 
 async fn send_data_to_server(rdma: &Rdma) {
     let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(lmr.as_mut_ptr() as *mut char) = 'y' };
+    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'y' };
     rdma.send(&lmr).await.unwrap();
 }
 

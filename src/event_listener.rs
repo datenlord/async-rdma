@@ -1,7 +1,11 @@
-use crate::completion_queue::{CompletionQueue, WorkCompletion, WorkRequestId};
+use crate::{
+    completion_queue::{CompletionQueue, WorkCompletion, WorkRequestId},
+    hashmap_extension::HashMapExtension,
+    lock_utilities::ArcRwLockGuard,
+    memory_region::local::RwLocalMrInner,
+};
 use clippy_utilities::Cast;
-use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
-use std::{io, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 use tokio::{
     // Using mpsc here bacause the `oneshot` Sender needs its own ownership when it performs a `send`.
     // But we cann't get the ownership from LockFreeCuckooHash because of the principle of it.
@@ -14,8 +18,17 @@ use tracing::{error, warn};
 /// the command response back to the requester.
 type Responder = Sender<WorkCompletion>;
 
+/// `Arc`s of `LocalMrInner`s that are being used by RDMA ops
+pub(crate) type LmrInners = Vec<Arc<RwLocalMrInner>>;
+
+/// `ArcRwLockGuard` of locked `RwLocalMrInner`.
+///
+/// Insert them into `ReqMap` before RDMA ops and remove when the corresponding
+/// `LocalMrInner`'s RDMA operation is done to ensure that mr will not be misused during ops.
+pub(crate) type LmrGuards = Vec<ArcRwLockGuard>;
+
 /// Map holding the Request Id to `Responder`
-type ReqMap = Arc<LockFreeCuckooHash<WorkRequestId, Responder>>;
+type ReqMap = Arc<parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>>;
 
 /// Event listener timeout, default is 1 sec
 static EVENT_LISTENER_TIMEOUT: Duration = Duration::from_secs(1);
@@ -34,8 +47,10 @@ pub(crate) struct EventListener {
 impl EventListener {
     /// Create a `EventListner`
     pub(crate) fn new(cq: Arc<CompletionQueue>) -> EventListener {
-        let req_map = Arc::new(LockFreeCuckooHash::new());
-        let req_map_move = Arc::<LockFreeCuckooHash<WorkRequestId, Responder>>::clone(&req_map);
+        let req_map = ReqMap::default();
+        let req_map_move = Arc::<
+            parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>,
+        >::clone(&req_map);
         Self {
             req_map,
             _poller_handle: Self::start(Arc::<CompletionQueue>::clone(&cq), req_map_move),
@@ -72,9 +87,9 @@ impl EventListener {
                     match cq.poll_cq_multiple(&mut wc_buf) {
                         Ok(_) => {
                             while let Some(wc) = wc_buf.pop() {
-                                match req_map.remove_with_guard(&wc.wr_id(), &pin()) {
-                                    Some(resp) => {
-                                        resp.try_send(wc).unwrap_or_else(|e| {
+                                match req_map.lock().remove(&wc.wr_id()) {
+                                    Some(v) => {
+                                        v.0.try_send(wc).unwrap_or_else(|e| {
                                             warn!("The waiting task is dropped, {:?}", e);
                                         });
                                     }
@@ -106,16 +121,62 @@ impl EventListener {
         })
     }
 
-    /// Register a new work request id
-    pub(crate) fn register(&self) -> (WorkRequestId, Receiver<WorkCompletion>) {
+    /// Register a new work request id and hold the `LocalMrInner`s to prevent mrs from being
+    /// droped before the RDMA operations done.
+    pub(crate) fn register(
+        &self,
+        inners: &[Arc<RwLocalMrInner>],
+        is_write: bool,
+    ) -> io::Result<(WorkRequestId, Receiver<WorkCompletion>)> {
         let (tx, rx) = channel(2);
-        let mut wr_id = WorkRequestId::new();
-        loop {
-            if self.req_map.insert_if_not_exists(wr_id, tx.clone()) {
-                break;
+        let mut guards = vec![];
+        for inner in inners {
+            if is_write {
+                match inner.try_write_arc() {
+                    Some(write_guard) => {
+                        guards.push(ArcRwLockGuard::RwLockWriteGuard(write_guard));
+                    }
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("{:?} is locked by other ops", &inner),
+                        ))
+                    }
+                }
+            } else {
+                match inner.try_read_arc() {
+                    Some(read_guard) => {
+                        guards.push(ArcRwLockGuard::RwLockReadGuard(read_guard));
+                    }
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("{:?} is locked by other ops", &inner),
+                        ))
+                    }
+                }
             }
-            wr_id = WorkRequestId::new();
         }
-        (wr_id, rx)
+        let wr_id = self
+            .req_map
+            .lock()
+            .insert_until_success((tx, inners.to_owned(), guards), WorkRequestId::new);
+        Ok((wr_id, rx))
+    }
+
+    /// Register `LocalMrInner`s before read data from them
+    pub(crate) fn register_for_read(
+        &self,
+        inners: &[Arc<RwLocalMrInner>],
+    ) -> io::Result<(WorkRequestId, Receiver<WorkCompletion>)> {
+        self.register(inners, false)
+    }
+
+    /// Register `LocalMrInner`s before write data into them
+    pub(crate) fn register_for_write(
+        &self,
+        inners: &[Arc<RwLocalMrInner>],
+    ) -> io::Result<(WorkRequestId, Receiver<WorkCompletion>)> {
+        self.register(inners, true)
     }
 }

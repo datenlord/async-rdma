@@ -1136,7 +1136,7 @@ impl Rdma {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
     ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
     ///     // receive the metadata of the lmr that had been requested by client
-    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     let _lmr = rdma.receive_local_mr().await?;
     ///     // do something with lmr like getting data from it.
     ///     Ok(())
     /// }
@@ -1244,16 +1244,20 @@ impl Rdma {
     /// # Examples
     /// ```
     /// use async_rdma::{Rdma, RdmaListener};
-    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
-    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
     ///
     /// struct Data(String);
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     // request a mr located in server.
-    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     let lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
     ///     // do something with rmr like `write` data into it.
     ///     // then send the metadata of this lmr to server to make server aware of this mr.
     ///     rdma.send_local_mr(lmr).await?;
@@ -1265,7 +1269,7 @@ impl Rdma {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
     ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
     ///     // receive the metadata of rmr sent by client
-    ///     let rmr = rdma.receive_remote_mr().await?;
+    ///     let _rmr = rdma.receive_remote_mr().await?;
     ///     // do something with lmr like getting data from it.
     ///     // wait for the agent thread to send all reponses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1276,7 +1280,10 @@ impl Rdma {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
     ///     tokio::time::sleep(Duration::from_secs(3)).await;
-    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
     /// }
     /// ```
     #[inline]
@@ -1371,9 +1378,13 @@ impl Rdma {
     /// # Examples
     /// ```
     /// use async_rdma::{Rdma, RdmaListener};
-    /// use std::{alloc::Layout, sync::Arc, io, time::Duration, net::{Ipv4Addr, SocketAddrV4}};
     /// use portpicker::pick_unused_port;
-    /// use crate::async_rdma::{ LocalMrWriteAccess, LocalMrReadAccess };
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
     ///
     /// struct Data(String);
     ///
@@ -1392,7 +1403,7 @@ impl Rdma {
     ///     let rdma_listener = RdmaListener::bind(addr).await?;
     ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
     ///     // receive the metadata of the lmr that had been requested by client
-    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     let _lmr = rdma.receive_local_mr().await?;
     ///     // do something with lmr like getting data from it.
     ///     // wait for the agent thread to send all reponses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1403,7 +1414,10 @@ impl Rdma {
     ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
     ///     std::thread::spawn(move || server(addr));
     ///     tokio::time::sleep(Duration::from_secs(3)).await;
-    ///     client(addr).await.map_err(|err| println!("{}", err)).unwrap();
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
     /// }
     /// ```
     #[inline]

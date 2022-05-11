@@ -6,7 +6,7 @@ mod raw;
 pub(crate) mod remote;
 pub(crate) use raw::RawMemoryRegion;
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
+use std::{fmt::Debug, time::SystemTime};
 
 /// Rdma Memory Region Access
 pub trait MrAccess: Sync + Send + Debug {
@@ -18,16 +18,6 @@ pub trait MrAccess: Sync + Send + Debug {
 
     /// Get the remote key
     fn rkey(&self) -> u32;
-
-    /// Get the token
-    #[inline]
-    fn token(&self) -> MrToken {
-        MrToken {
-            addr: self.addr(),
-            len: self.length(),
-            rkey: self.rkey(),
-        }
-    }
 }
 
 /// Memory region token used for the remote access
@@ -39,4 +29,6 @@ pub struct MrToken {
     pub len: usize,
     /// The rkey
     pub rkey: u32,
+    /// Deadline for timeout
+    pub ddl: SystemTime,
 }

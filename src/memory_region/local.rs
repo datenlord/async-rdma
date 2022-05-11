@@ -1,8 +1,14 @@
+use super::{raw::RawMemoryRegion, MrAccess, MrToken};
 use clippy_utilities::OverflowArithmetic;
+use std::{
+    fmt::Debug,
+    io,
+    ops::Range,
+    slice,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
-
-use super::{raw::RawMemoryRegion, MrAccess};
-use std::{fmt::Debug, io, ops::Range, slice, sync::Arc};
 
 /// Local memory region trait
 pub trait LocalMrReadAccess: MrAccess {
@@ -21,7 +27,24 @@ pub trait LocalMrReadAccess: MrAccess {
 
     /// Get the local key
     fn lkey(&self) -> u32;
+
+    /// New a token with specified timeout
+    #[inline]
+    fn token_with_timeout(&self, timeout: Duration) -> Option<MrToken> {
+        SystemTime::now().checked_add(timeout).map_or_else(
+            || None,
+            |ddl| {
+                Some(MrToken {
+                    addr: self.addr(),
+                    len: self.length(),
+                    rkey: self.rkey(),
+                    ddl,
+                })
+            },
+        )
+    }
 }
+
 /// Writable local mr trait
 pub trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     /// Get the memory region start mut addr

@@ -1,10 +1,20 @@
 use super::{MrAccess, MrToken};
 use crate::agent::AgentInner;
 use clippy_utilities::OverflowArithmetic;
-use std::{io, ops::Range, sync::Arc};
+use std::{io, ops::Range, sync::Arc, time::SystemTime};
 
 /// Remote Memory Region Accrss
-pub trait RemoteMrReadAccess: MrAccess {}
+pub trait RemoteMrReadAccess: MrAccess {
+    /// Check if this `rmr` timeout.
+    /// Return `true` if it times out, `false` otherwise.
+    #[inline]
+    fn timeout_check(&self) -> bool {
+        SystemTime::now() >= self.token().ddl
+    }
+
+    /// Get the token of this `rmr`
+    fn token(&self) -> MrToken;
+}
 /// Writable Remote mr trait
 pub trait RemoteMrWriteAccess: MrAccess + RemoteMrReadAccess {}
 
@@ -32,14 +42,14 @@ impl MrAccess for RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl RemoteMrReadAccess for RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
         self.token
     }
 }
-
-impl RemoteMrReadAccess for RemoteMr {}
 impl RemoteMrWriteAccess for RemoteMr {}
 
 impl Drop for RemoteMr {
@@ -70,6 +80,7 @@ impl RemoteMr {
                 addr: self.addr().overflow_add(i.start),
                 len: i.end.overflow_sub(i.start),
                 rkey: self.rkey(),
+                ddl: self.token.ddl,
             };
             Ok(RemoteMrSlice::new_from_token(self, slice_token))
         }
@@ -86,6 +97,7 @@ impl RemoteMr {
                 addr: self.addr().overflow_add(i.start),
                 len: i.end.overflow_sub(i.start),
                 rkey: self.rkey(),
+                ddl: self.token.ddl,
             };
             Ok(RemoteMrSliceMut::new_from_token(self, slice_token))
         }
@@ -107,14 +119,14 @@ impl MrAccess for &RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl RemoteMrReadAccess for &RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
         self.token
     }
 }
-
-impl RemoteMrReadAccess for &RemoteMr {}
 
 impl MrAccess for &mut RemoteMr {
     #[inline]
@@ -131,13 +143,13 @@ impl MrAccess for &mut RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
-
+}
+impl RemoteMrReadAccess for &mut RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
         self.token
     }
 }
-impl RemoteMrReadAccess for &mut RemoteMr {}
 impl RemoteMrWriteAccess for &mut RemoteMr {}
 
 /// Remote memory region slice
@@ -174,14 +186,13 @@ impl MrAccess for RemoteMrSlice<'_> {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
-    #[inline]
+impl RemoteMrReadAccess for RemoteMrSlice<'_> {
     fn token(&self) -> MrToken {
         self.token
     }
 }
-
-impl RemoteMrReadAccess for RemoteMrSlice<'_> {}
 /// Mutable remote memory region slice
 #[derive(Debug)]
 pub struct RemoteMrSliceMut<'a> {
@@ -208,11 +219,6 @@ impl MrAccess for RemoteMrSliceMut<'_> {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
-
-    #[inline]
-    fn token(&self) -> MrToken {
-        self.token
-    }
 }
 
 impl<'a> RemoteMrSliceMut<'a> {
@@ -223,5 +229,9 @@ impl<'a> RemoteMrSliceMut<'a> {
     }
 }
 
-impl RemoteMrReadAccess for RemoteMrSliceMut<'_> {}
+impl RemoteMrReadAccess for RemoteMrSliceMut<'_> {
+    fn token(&self) -> MrToken {
+        self.token
+    }
+}
 impl RemoteMrWriteAccess for RemoteMrSliceMut<'_> {}

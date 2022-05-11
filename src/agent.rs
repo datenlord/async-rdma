@@ -1,4 +1,6 @@
 use crate::queue_pair::MAX_RECV_WR;
+use crate::rmr_manager::RemoteMrManager;
+use crate::RemoteMrReadAccess;
 use crate::{
     id,
     memory_region::{
@@ -12,9 +14,9 @@ use crate::{
 use clippy_utilities::{Cast, OverflowArithmetic};
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 use std::{
     alloc::Layout,
-    collections::HashMap,
     fmt::Debug,
     io::{self, Cursor},
     mem,
@@ -30,10 +32,11 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 /// Maximum time for waiting for a response
 static RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// An agent for handling the dirty rdma request and async events
 #[derive(Debug)]
 pub(crate) struct Agent {
@@ -72,7 +75,7 @@ impl Agent {
         max_sr_data_len: usize,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(LockFreeCuckooHash::new());
-        let mr_own = Arc::new(Mutex::new(HashMap::new()));
+        let rmr_manager = RemoteMrManager::new();
         let (local_mr_send, local_mr_recv) = channel(1024);
         let (remote_mr_send, remote_mr_recv) = channel(1024);
         let (data_send, data_recv) = channel(1024);
@@ -84,7 +87,7 @@ impl Agent {
         let inner = Arc::new(AgentInner {
             qp,
             response_waits,
-            mr_own,
+            rmr_manager,
             allocator,
             max_sr_data_len,
         });
@@ -109,21 +112,33 @@ impl Agent {
         })
     }
 
-    /// Allocate a remote memory region
-    pub(crate) async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMr> {
-        self.inner.request_remote_mr(layout).await
+    /// Allocate a remote memory region with timeout
+    pub(crate) async fn request_remote_mr_with_timeout(
+        &self,
+        layout: Layout,
+        timeout: Duration,
+    ) -> io::Result<RemoteMr> {
+        self.inner
+            .request_remote_mr_with_timeout(layout, timeout)
+            .await
     }
 
     /// Send a local memory region metadata to the other side
-    pub(crate) async fn send_local_mr(&self, mr: LocalMr) -> io::Result<()> {
-        // Have checked the type in the if condition
-        let token = mr.token();
-        if self.inner.mr_own.lock().await.insert(token, mr).is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("the MR {:?} should be send multiple times", token),
-            ));
-        }
+    pub(crate) async fn send_local_mr_with_timeout(
+        &self,
+        mr: LocalMr,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        let token = mr.token_with_timeout(timeout).map_or_else(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "wrong timeout value, duration is too long",
+                ))
+            },
+            Ok,
+        )?;
+        self.inner.rmr_manager.record_mr(token, mr, timeout).await?;
         let kind = RequestKind::SendMR(SendMRRequest {
             kind: SendMRKind::Local(token),
         });
@@ -138,13 +153,30 @@ impl Agent {
             kind: SendMRKind::Remote(mr.token()),
         });
         // this response is not important
-        let _ = self.inner.send_request(request).await?;
+        let resp_kind = self.inner.send_request(request).await?;
         // using `mem::forget` here to skip the destructor of `mr` to prevent double free.
         // both of the destructor of remote mr and `send_remote_mr` will free this mr at the remote.
         // it's safe because the space taken by the variable `mr` will be reclaimed after forget.
         #[allow(clippy::mem_forget)]
         mem::forget(mr);
-        Ok(())
+        match resp_kind {
+            ResponseKind::SendMR(smr) => match smr.kind {
+                SendMRResponseKind::Success => Ok(()),
+                SendMRResponseKind::Timeout => {
+                    Err(io::Error::new(io::ErrorKind::Other, "this rmr is timeout"))
+                }
+                SendMRResponseKind::RemoteAgentErr => Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "remote agent is in an error state",
+                )),
+            },
+            ResponseKind::AllocMR(_) | ResponseKind::ReleaseMR(_) | ResponseKind::SendData(_) => {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "received wrong response, expect SendMR response",
+                ))
+            }
+        }
     }
 
     /// Receive a local memory region metadata from the other side
@@ -367,59 +399,80 @@ impl AgentThread {
         debug!("handle request");
         let response = match request.kind {
             RequestKind::AllocMR(param) => {
+                // TODO: error handling
                 let mr = self.inner.allocator.alloc(
                     &Layout::from_size_align(param.size, param.align)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
                 )?;
-                let token = mr.token();
-                let response = AllocMRResponse { token };
+                let token = mr.token_with_timeout(param.timeout).map_or_else(
+                    || {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "wrong timeout value, duration is too long",
+                        ))
+                    },
+                    Ok,
+                )?;
                 // the MR is newly created, it's impossible to find it in the map
-                let _old = self.inner.mr_own.lock().await.insert(token, mr);
+                #[allow(clippy::unreachable)]
+                self.inner
+                    .rmr_manager
+                    .record_mr(token, mr, param.timeout)
+                    .await
+                    .map_or_else(
+                        |err| unreachable!("{:?}", err),
+                        |_| debug!("record mr requested by remote end {:?}", token),
+                    );
+                let response = AllocMRResponse { token };
                 ResponseKind::AllocMR(response)
             }
             RequestKind::ReleaseMR(param) => {
-                self.inner
-                    .mr_own
-                    .lock()
-                    .await
-                    .remove(&param.token)
-                    .map_or_else(
-                        || debug!("{:?} already released", param.token),
-                        |lmr| debug!("release {:?}", lmr),
-                    );
+                self.inner.rmr_manager.release_mr(&param.token).map_or_else(
+                    |err| {
+                        debug!(
+                            "{:?} already released by `rmr_manager`. {:?}",
+                            param.token, err
+                        );
+                    },
+                    |lmr| debug!("release {:?}", lmr),
+                );
+                // TODO: error handling
                 ResponseKind::ReleaseMR(ReleaseMRResponse { status: 0 })
             }
             RequestKind::SendMR(param) => {
-                match param.kind {
-                    SendMRKind::Local(token) => {
-                        assert!(self
-                            .remote_mr_send
-                            .send(RemoteMr::new_from_token(
-                                token,
-                                Arc::<AgentInner>::clone(&self.inner)
-                            ))
-                            .await
-                            .is_ok());
-                    }
-                    SendMRKind::Remote(token) => {
-                        let mr =
-                            self.inner
-                                .mr_own
-                                .lock()
-                                .await
-                                .remove(&token)
-                                .ok_or_else(|| {
-                                    io::Error::new(
-                                        io::ErrorKind::Other,
-                                        format!("the token {:?} is not registered", token),
-                                    )
-                                })?;
-                        assert!(self.local_mr_send.send(mr).await.is_ok());
-                    }
-                }
-                ResponseKind::SendMR(SendMRResponse {})
+                let kind = match param.kind {
+                    SendMRKind::Local(token) => self
+                        .remote_mr_send
+                        .send(RemoteMr::new_from_token(
+                            token,
+                            Arc::<AgentInner>::clone(&self.inner),
+                        ))
+                        .await
+                        .map_or_else(
+                            |err| {
+                                error!("Agent remote_mr channel error {:?}", err);
+                                SendMRResponseKind::RemoteAgentErr
+                            },
+                            |_| SendMRResponseKind::Success,
+                        ),
+                    SendMRKind::Remote(token) => match self.inner.rmr_manager.release_mr(&token) {
+                        Ok(mr) => self.local_mr_send.send(mr).await.map_or_else(
+                            |err| {
+                                error!("Agent local_mr channel error {:?}", err);
+                                SendMRResponseKind::RemoteAgentErr
+                            },
+                            |_| SendMRResponseKind::Success,
+                        ),
+                        Err(err) => {
+                            debug!("{:?}", err);
+                            SendMRResponseKind::Timeout
+                        }
+                    },
+                };
+                ResponseKind::SendMR(SendMRResponse { kind })
             }
             RequestKind::SendData(_) => {
+                // TODO: error handling
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Should not reach here, SendData is handled separately",
@@ -500,8 +553,8 @@ pub(crate) struct AgentInner {
     qp: Arc<QueuePair>,
     /// The map holding the waiters that waits the response
     response_waits: ResponseWaitsMap,
-    /// The Mrs owned by this agent
-    mr_own: Arc<Mutex<HashMap<MrToken, LocalMr>>>,
+    /// Remote memory region manager
+    rmr_manager: RemoteMrManager,
     /// MR allocator that creating new memory regions
     allocator: Arc<MrAllocator>,
     /// Max message length
@@ -509,14 +562,16 @@ pub(crate) struct AgentInner {
 }
 
 impl AgentInner {
-    /// Request a remote MR from the other side
-    pub(crate) async fn request_remote_mr(
+    /// Request a `RemoteMr` with timeout from the other side
+    pub(crate) async fn request_remote_mr_with_timeout(
         self: &Arc<Self>,
         layout: Layout,
+        timeout: Duration,
     ) -> io::Result<RemoteMr> {
         let request = AllocMRRequest {
             size: layout.size(),
             align: layout.align(),
+            timeout,
         };
         let kind = RequestKind::AllocMR(request);
         let response = self.send_request(kind).await?;
@@ -625,36 +680,45 @@ lazy_static! {
     };
 }
 /// Used for checking if `header_buf` is clean.
-const CLEAN_STATE: [u8; 40] = [0_u8; 40];
+const CLEAN_STATE: [u8; 52] = [0_u8; 52];
 
 lazy_static! {
     static ref REQUEST_HEADER_MAX_LEN: usize = {
-        let mut request_kind = vec![];
-        request_kind.push(RequestKind::AllocMR(AllocMRRequest { size: 0, align: 0 }));
-        request_kind.push(RequestKind::ReleaseMR(ReleaseMRRequest {
-            token: MrToken {
-                addr: 0,
-                len: 0,
-                rkey: 0,
-            },
-        }));
-        request_kind.push(RequestKind::SendMR(SendMRRequest {
-            kind: SendMRKind::Local(MrToken {
-                addr: 0,
-                len: 0,
-                rkey: 0,
+        let request_kind = vec![
+            RequestKind::AllocMR(AllocMRRequest {
+                size: 0,
+                align: 0,
+                timeout: Duration::from_secs(1),
             }),
-        }));
-        request_kind.push(RequestKind::SendMR(SendMRRequest {
-            kind: SendMRKind::Remote(MrToken {
-                addr: 0,
-                len: 0,
-                rkey: 0,
+            RequestKind::ReleaseMR(ReleaseMRRequest {
+                token: MrToken {
+                    addr: 0,
+                    len: 0,
+                    rkey: 0,
+                    ddl: SystemTime::now(),
+                },
             }),
-        }));
-        request_kind.push(RequestKind::SendData(SendDataRequest { len: 0 }));
+            RequestKind::SendMR(SendMRRequest {
+                kind: SendMRKind::Local(MrToken {
+                    addr: 0,
+                    len: 0,
+                    rkey: 0,
+                    ddl: SystemTime::now(),
+                }),
+            }),
+            RequestKind::SendMR(SendMRRequest {
+                kind: SendMRKind::Remote(MrToken {
+                    addr: 0,
+                    len: 0,
+                    rkey: 0,
+                    ddl: SystemTime::now(),
+                }),
+            }),
+            RequestKind::SendData(SendDataRequest { len: 0 }),
+        ];
+
         #[allow(clippy::unwrap_used)]
-        request_kind
+        let max = request_kind
             .into_iter()
             .map(|kind| {
                 #[allow(clippy::unwrap_used)]
@@ -666,20 +730,25 @@ lazy_static! {
                 .cast()
             })
             .max()
-            .unwrap()
+            .unwrap();
+        // check CLEAN_STATE len
+        assert_eq!(max, CLEAN_STATE.len(), "make sure the length of CLEAN_STATE equals to max");
+        max
     };
     static ref RESPONSE_HEADER_MAX_LEN: usize = {
-        let mut response_kind = vec![];
-        response_kind.push(ResponseKind::AllocMR(AllocMRResponse {
-            token: MrToken {
-                addr: 0,
-                len: 0,
-                rkey: 0,
-            },
-        }));
-        response_kind.push(ResponseKind::ReleaseMR(ReleaseMRResponse { status: 0 }));
-        response_kind.push(ResponseKind::SendMR(SendMRResponse {}));
-        response_kind.push(ResponseKind::SendData(SendDataResponse { status: 0 }));
+        let response_kind = vec![
+            ResponseKind::AllocMR(AllocMRResponse {
+                token: MrToken {
+                    addr: 0,
+                    len: 0,
+                    rkey: 0,
+                    ddl: SystemTime::now(),
+                },
+            }),
+            ResponseKind::ReleaseMR(ReleaseMRResponse { status: 0 }),
+            ResponseKind::SendMR(SendMRResponse { kind: SendMRResponseKind::Success }),
+            ResponseKind::SendData(SendDataResponse { status: 0 }),
+        ];
         #[allow(clippy::unwrap_used)]
         response_kind
             .into_iter()
@@ -718,6 +787,8 @@ struct AllocMRRequest {
     size: usize,
     /// Alignment
     align: usize,
+    /// Validity period
+    timeout: Duration,
 }
 
 /// Response to the alloc MR request
@@ -759,8 +830,21 @@ struct SendMRRequest {
 
 /// Response to the request of sending MR
 #[derive(Debug, Serialize, Deserialize)]
-struct SendMRResponse {}
+struct SendMRResponse {
+    /// The kinds of Response to the request of sending MR
+    kind: SendMRResponseKind,
+}
 
+/// The kinds of Response to the request of sending MR
+#[derive(Debug, Serialize, Deserialize)]
+enum SendMRResponseKind {
+    /// Remote end received `Mr` successfully
+    Success,
+    /// The `Mr` sent to remote was timeout and has been dropped
+    Timeout,
+    /// The RDMA Agent of remote end is in an error state
+    RemoteAgentErr,
+}
 /// Request to send data
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 struct SendDataRequest {
@@ -799,6 +883,7 @@ struct Request {
 
 /// Response type enumeration
 #[derive(Serialize, Deserialize, Debug)]
+#[allow(variant_size_differences)]
 enum ResponseKind {
     /// Allocate MR
     AllocMR(AllocMRResponse),

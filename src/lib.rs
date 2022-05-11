@@ -141,6 +141,8 @@ mod mr_allocator;
 mod protection_domain;
 /// Queue Pair
 mod queue_pair;
+/// Remote memory region manager
+mod rmr_manager;
 /// Work Request wrapper
 mod work_request;
 
@@ -158,6 +160,7 @@ use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
 use rdma_sys::ibv_access_flags;
+use rmr_manager::DEFAULT_RMR_TIMEOUT;
 use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1094,7 +1097,9 @@ impl Rdma {
         self.allocator.alloc(&layout)
     }
 
-    /// Request a remote memory region
+    /// Request a remote memory region with default timeout value.
+    ///
+    /// **Note**: The operation of this memory region will fail after timeout.
     ///
     /// Used with `send_mr`, `receive_local_mr`, `read` and `write`.
     /// Application scenario such as: client uses `request_remote_mr` to apply for
@@ -1148,8 +1153,74 @@ impl Rdma {
     /// ```
     #[inline]
     pub async fn request_remote_mr(&self, layout: Layout) -> io::Result<RemoteMr> {
+        self.request_remote_mr_with_timeout(layout, DEFAULT_RMR_TIMEOUT)
+            .await
+    }
+
+    /// Request a remote memory region with customized timeout value.
+    /// The rest is consistent with `request_remote_mr`.
+    ///
+    /// **Note**: The operation of this memory region will fail after timeout.
+    ///
+    /// Used with `send_mr`, `receive_local_mr`, `read` and `write`.
+    /// Application scenario such as: client uses `request_remote_mr` to apply for
+    /// a remote mr from server, and makes server aware of this mr by `send_mr` to server.
+    /// For server, this mr is a local mr, which can be received through `receive_local_mr`.
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener, RemoteMrReadAccess};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // request a mr located in server.
+    ///     let rmr = rdma
+    ///         .request_remote_mr_with_timeout(Layout::new::<Data>(), Duration::from_secs(1))
+    ///         .await?;
+    ///     assert!(!rmr.timeout_check());
+    ///     // do something with rmr like `write` data into it.
+    ///     // then send the metadata of rmr to server to make server aware of this mr.
+    ///     rdma.send_remote_mr(rmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the metadata of the lmr that had been requested by client
+    ///     let _lmr = rdma.receive_local_mr().await?;
+    ///     // do something with lmr like getting data from it.
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn request_remote_mr_with_timeout(
+        &self,
+        layout: Layout,
+        timeout: Duration,
+    ) -> io::Result<RemoteMr> {
         if let Some(ref agent) = self.agent {
-            agent.request_remote_mr(layout).await
+            agent.request_remote_mr_with_timeout(layout, timeout).await
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -1158,7 +1229,9 @@ impl Rdma {
         }
     }
 
-    /// Send a local memory region metadata to remote
+    /// Send a local memory region metadata to remote with default timeout value
+    ///
+    /// **Note**: The operation of this memory region will fail after timeout.
     ///
     /// Used with `receive_remote_mr`
     ///
@@ -1208,8 +1281,75 @@ impl Rdma {
     /// ```
     #[inline]
     pub async fn send_local_mr(&self, mr: LocalMr) -> io::Result<()> {
+        self.send_local_mr_with_timeout(mr, DEFAULT_RMR_TIMEOUT)
+            .await
+    }
+
+    /// Send a local memory region metadata with timeout to remote with customized timeout value.
+    ///
+    /// **Note**: The operation of this memory region will fail after timeout.
+    ///
+    /// Used with `receive_remote_mr`
+    ///
+    /// Application scenario such as: client uses `alloc_local_mr` to alloc a local mr, and
+    /// makes server aware of this mr by `send_local_mr` to server.
+    /// For server, this mr is a remote mr, which can be received through `receive_remote_mr`.
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{Rdma, RdmaListener, RemoteMrReadAccess};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     // request a mr located in server.
+    ///     let lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
+    ///     // do something with rmr like `write` data into it.
+    ///     // then send the metadata of this lmr to server to make server aware of this mr.
+    ///     rdma.send_local_mr_with_timeout(lmr, Duration::from_secs(1))
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the metadata of rmr sent by client
+    ///     let rmr = rdma.receive_remote_mr().await?;
+    ///     assert!(!rmr.timeout_check());
+    ///     // do something with lmr like getting data from it.
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn send_local_mr_with_timeout(
+        &self,
+        mr: LocalMr,
+        timeout: Duration,
+    ) -> io::Result<()> {
         if let Some(ref agent) = self.agent {
-            agent.send_local_mr(mr).await
+            agent.send_local_mr_with_timeout(mr, timeout).await
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,

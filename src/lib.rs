@@ -148,6 +148,7 @@ mod work_request;
 
 use agent::Agent;
 use clippy_utilities::Cast;
+use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
 use event_listener::EventListener;
@@ -208,6 +209,9 @@ pub struct RdmaBuilder {
     gid_index: usize,
     /// Device port number
     port_num: u8,
+    /// Maximum number of completion queue entries (CQE) to poll at a time.
+    /// The higher the concurrency, the bigger this value should be and more memory allocated at a time.
+    max_cqe: i32,
 }
 
 impl RdmaBuilder {
@@ -233,6 +237,7 @@ impl RdmaBuilder {
             self.dev_name.as_deref(),
             self.access,
             self.cq_size,
+            self.max_cqe,
             self.port_num,
             self.gid_index,
         )
@@ -325,9 +330,10 @@ impl Default for RdmaBuilder {
                 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
                 | ibv_access_flags::IBV_ACCESS_REMOTE_READ
                 | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC,
-            cq_size: 16,
+            cq_size: DEFAULT_CQ_SIZE,
             gid_index: 0,
             port_num: 1,
+            max_cqe: DEFAULT_MAX_CQE,
         }
     }
 }
@@ -355,12 +361,13 @@ impl Rdma {
         dev_name: Option<&str>,
         access: ibv_access_flags,
         cq_size: u32,
+        max_cqe: i32,
         port_num: u8,
         gid_index: usize,
     ) -> io::Result<Self> {
         let ctx = Arc::new(Context::open(dev_name, port_num, gid_index)?);
         let ec = ctx.create_event_channel()?;
-        let cq = Arc::new(ctx.create_completion_queue(cq_size, ec)?);
+        let cq = Arc::new(ctx.create_completion_queue(cq_size, ec, max_cqe)?);
         let event_listener = EventListener::new(cq);
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(Arc::<ProtectionDomain>::clone(&pd)));

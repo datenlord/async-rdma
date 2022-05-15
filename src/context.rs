@@ -111,8 +111,9 @@ impl Context {
         &self,
         cq_size: u32,
         event_channel: EventChannel,
+        max_cqe: i32,
     ) -> io::Result<CompletionQueue> {
-        CompletionQueue::create(self, cq_size, event_channel)
+        CompletionQueue::create(self, cq_size, event_channel, max_cqe)
     }
 
     /// Create a protection domain

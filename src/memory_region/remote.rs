@@ -1,6 +1,5 @@
 use super::{MrAccess, MrToken};
 use crate::agent::AgentInner;
-use clippy_utilities::OverflowArithmetic;
 use std::{io, ops::Range, sync::Arc, time::SystemTime};
 
 /// Remote Memory Region Accrss
@@ -77,8 +76,8 @@ impl RemoteMr {
             Err(io::Error::new(io::ErrorKind::Other, "wrong range of rmr"))
         } else {
             let slice_token = MrToken {
-                addr: self.addr().overflow_add(i.start),
-                len: i.end.overflow_sub(i.start),
+                addr: self.addr().wrapping_add(i.start),
+                len: i.end.wrapping_sub(i.start),
                 rkey: self.rkey(),
                 ddl: self.token.ddl,
             };
@@ -94,8 +93,8 @@ impl RemoteMr {
             Err(io::Error::new(io::ErrorKind::Other, "wrong range of rmr"))
         } else {
             let slice_token = MrToken {
-                addr: self.addr().overflow_add(i.start),
-                len: i.end.overflow_sub(i.start),
+                addr: self.addr().wrapping_add(i.start),
+                len: i.end.wrapping_sub(i.start),
                 rkey: self.rkey(),
                 ddl: self.token.ddl,
             };

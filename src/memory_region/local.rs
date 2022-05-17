@@ -1,5 +1,4 @@
 use super::{raw::RawMemoryRegion, MrAccess, MrToken};
-use clippy_utilities::OverflowArithmetic;
 use std::{
     fmt::Debug,
     io,
@@ -130,7 +129,7 @@ impl LocalMr {
         } else {
             Ok(LocalMrSlice::new(
                 self,
-                self.addr().overflow_add(i.start),
+                self.addr().wrapping_add(i.start),
                 i.len(),
             ))
         }
@@ -145,7 +144,7 @@ impl LocalMr {
         } else {
             Ok(LocalMrSliceMut::new(
                 self,
-                self.addr().overflow_add(i.start),
+                self.addr().wrapping_add(i.start),
                 i.len(),
             ))
         }
@@ -158,8 +157,8 @@ impl LocalMr {
         if i.start >= i.end || i.end > self.length() {
             Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
         } else {
-            self.addr = self.addr.overflow_add(i.start);
-            self.len = i.end.overflow_sub(i.start);
+            self.addr = self.addr.wrapping_add(i.start);
+            self.len = i.end.wrapping_sub(i.start);
             Ok(self)
         }
     }

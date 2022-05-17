@@ -1,4 +1,3 @@
-use clippy_utilities::OverflowArithmetic;
 use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,5 +15,5 @@ pub(crate) fn random_u64() -> u64 {
     let rand = rand::thread_rng().gen::<u32>();
     let left: u64 = time.into();
     let right: u64 = rand.into();
-    left.overflow_shl(32) | right
+    left.wrapping_shl(32) | right
 }

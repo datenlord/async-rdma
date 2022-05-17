@@ -11,7 +11,7 @@ use crate::{
     mr_allocator::MrAllocator,
     queue_pair::QueuePair,
 };
-use clippy_utilities::{Cast, OverflowArithmetic};
+use clippy_utilities::Cast;
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -204,9 +204,9 @@ impl Agent {
         let mut start = 0;
         let lm_len = lm.length();
         while start < lm_len {
-            let end = (start.overflow_add(self.max_sr_data_len)).min(lm_len);
+            let end = (start.saturating_add(self.max_sr_data_len)).min(lm_len);
             let kind = RequestKind::SendData(SendDataRequest {
-                len: end.overflow_sub(start),
+                len: end.wrapping_sub(start),
             });
             let response = self
                 .inner

@@ -3,13 +3,14 @@ use crate::{
     protection_domain::ProtectionDomain,
     LocalMrReadAccess,
 };
-use clippy_utilities::{Cast, OverflowArithmetic};
+use clippy_utilities::Cast;
 use libc::{c_void, size_t};
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
 use parking_lot::{Mutex, MutexGuard};
 use rdma_sys::ibv_access_flags;
 use std::collections::BTreeMap;
 use std::mem;
+use std::ops::Bound::Included;
 use std::{alloc::Layout, io, ptr, sync::Arc};
 use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA};
 use tracing::{debug, error};
@@ -262,18 +263,20 @@ fn init_je_statics(pd: Arc<ProtectionDomain>) -> io::Result<u32> {
 /// Look up `raw_mr` info by addr
 fn lookup_raw_mr(arena_ind: u32, addr: usize) -> Option<Arc<RawMemoryRegion>> {
     EXTENT_TOKEN_MAP.map_read(|map| {
-        map.range(..addr.overflow_add(1)).next_back().map_or_else(
-            || {
-                debug!("no related item. addr {}, arena_ind {}", addr, arena_ind);
-                None
-            },
-            |(_, item)| {
-                debug!("lookup addr {}, item {:?}", addr, item);
-                assert_eq!(arena_ind, item.arena_ind);
-                assert!(addr >= item.addr && addr < item.addr.overflow_add(item.len));
-                Some(Arc::<RawMemoryRegion>::clone(&item.raw_mr))
-            },
-        )
+        map.range((Included(&0), Included(&addr)))
+            .next_back()
+            .map_or_else(
+                || {
+                    debug!("no related item. addr {}, arena_ind {}", addr, arena_ind);
+                    None
+                },
+                |(_, item)| {
+                    debug!("lookup addr {}, item {:?}", addr, item);
+                    assert_eq!(arena_ind, item.arena_ind);
+                    assert!(addr >= item.addr && addr < item.addr.wrapping_add(item.len));
+                    Some(Arc::<RawMemoryRegion>::clone(&item.raw_mr))
+                },
+            )
     })
 }
 
@@ -388,7 +391,7 @@ unsafe extern "C" fn extent_merge_hook(
         remove_item_after_lock(map, addr_a);
         remove_item_after_lock(map, addr_b);
         // so we only need to register a new `raw_mr`
-        register_extent_mr_default(addr_a, size_a.overflow_add(size_b), arena_ind).map_or_else(
+        register_extent_mr_default(addr_a, size_a.wrapping_add(size_b), arena_ind).map_or_else(
             || {
                 error!("register_extent_mr failed");
                 1_i32
@@ -607,7 +610,7 @@ mod tests {
         let item = lookup_raw_mr(arena_ind, addr_a as usize).unwrap();
         assert_eq!(item.addr(), addr_a as usize);
         assert_eq!(item.as_ptr(), addr_a as *const u8);
-        assert_eq!(item.length(), size_a.overflow_add(size_b));
+        assert_eq!(item.length(), size_a.wrapping_add(size_b));
         res
     }
 

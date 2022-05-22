@@ -1,11 +1,13 @@
-use crate::{context::Context, event_channel::EventChannel, id};
+use crate::{
+    context::Context, error_utilities::log_ret_last_os_err, event_channel::EventChannel, id,
+};
 use clippy_utilities::Cast;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use rdma_sys::{
     ibv_cq, ibv_create_cq, ibv_destroy_cq, ibv_poll_cq, ibv_req_notify_cq, ibv_wc, ibv_wc_status,
 };
-use std::{fmt::Debug, io, mem, ops::Sub, ptr::NonNull};
+use std::{fmt::Debug, io, mem, ptr::NonNull};
 use thiserror::Error;
 use tracing::error;
 
@@ -44,6 +46,12 @@ impl CompletionQueue {
 
     /// Create a new completion queue and bind to the event channel `ec`, `cq_size` is the buffer
     /// size of the completion queue
+    ///
+    /// On failure of `ibv_create_cq`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid cqe, channel or `comp_vector`
+    ///
+    /// `ENOMEM`    Not enough resources to complete this operation
     pub(crate) fn create(
         ctx: &Context,
         cq_size: u32,
@@ -59,7 +67,7 @@ impl CompletionQueue {
                 0,
             )
         })
-        .ok_or(io::ErrorKind::Other)?;
+        .ok_or_else(log_ret_last_os_err)?;
         Ok(Self {
             ec,
             inner_cq,
@@ -73,11 +81,8 @@ impl CompletionQueue {
             ibv_req_notify_cq(self.inner_cq.as_ptr(), if solicited_only { 1 } else { 0 })
         };
         if errno != 0_i32 {
-            error!(
-                "req_notify, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            let err = log_ret_last_os_err();
+            return Err(err);
         }
         Ok(())
     }

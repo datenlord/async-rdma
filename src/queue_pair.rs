@@ -1,5 +1,6 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
+    error_utilities::{log_last_os_err, log_ret_last_os_err},
     event_listener::EventListener,
     gid::Gid,
     memory_region::{
@@ -19,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     io,
-    ops::Sub,
     pin::Pin,
     ptr::{self, NonNull},
     sync::Arc,
@@ -30,7 +30,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, Sleep},
 };
-use tracing::{debug, error};
+use tracing::debug;
 
 /// Maximum value of `send_wr`
 pub(crate) static MAX_SEND_WR: u32 = 10;
@@ -116,11 +116,21 @@ impl QueuePairBuilder {
     }
 
     /// Create a queue pair
+    ///
+    /// On failure of `ibv_create_qp`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid pd, `send_cq`, `recv_cq`, srq or invalid value provided in `max_send_wr`, `max_recv_wr`, `max_send_sge`, `max_recv_sge` or in `max_inline_data`
+    ///
+    /// `ENOMEM`    Not enough resources to complete this operation
+    ///
+    /// `ENOSYS`    QP with this Transport Service Type isn't supported by this RDMA device
+    ///
+    /// `EPERM`     Not enough permissions to create a QP with this Transport Service Type
     pub(crate) fn build(mut self) -> io::Result<QueuePair> {
         let inner_qp = NonNull::new(unsafe {
             rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut self.qp_init_attr.qp_init_attr_inner)
         })
-        .ok_or(io::ErrorKind::Other)?;
+        .ok_or_else(log_ret_last_os_err)?;
         Ok(QueuePair {
             pd: Arc::<ProtectionDomain>::clone(&self.pd),
             inner_qp,
@@ -198,6 +208,12 @@ impl QueuePair {
     }
 
     /// modify the queue pair state to init
+    ///
+    /// On failure of `ibv_modify_qp`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
+    ///
+    /// `ENOMEM`    Not enough resources to complete this operation
     pub(crate) fn modify_to_init(&self, flag: ibv_access_flags, port_num: u8) -> io::Result<()> {
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.pkey_index = 0;
@@ -210,16 +226,18 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
-            error!(
-                "open_device, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
 
     /// modify the queue pair state to ready to receive
+    ///
+    /// On failure of `ibv_modify_qp`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
+    ///
+    /// `ENOMEM`    Not enough resources to complete this operation
     pub(crate) fn modify_to_rtr(
         &self,
         remote: QueuePairEndpoint,
@@ -251,11 +269,7 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
-            error!(
-                "modify qp to rtr, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
@@ -271,6 +285,12 @@ impl QueuePair {
     /// `rnr_retry`:The RNR NAK retry counter is decremented each time the responder returns an RNR NAK.
     /// If the requester’s RNR NAK retry counter is zero, and an RNR NAK packet is received, an RNR NAK retry error occurs.
     /// An exception to the following is if the RNR NAK retry counter is set to 7. This value indicates infinite retry and the counter is not decremented
+    ///
+    /// On failure of `ibv_modify_qp`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
+    ///
+    /// `ENOMEM`    Not enough resources to complete this operation
     pub(crate) fn modify_to_rts(
         &self,
         timeout: u8,
@@ -294,16 +314,20 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
-            error!(
-                "modify qp to rts, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
 
     /// submit a send request
+    ///
+    /// On failure of `ibv_post_send`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in wr
+    ///
+    /// `ENOMEM`    Send Queue is full or not enough resources to complete this operation
+    ///
+    /// `EFAULT`    Invalid value provided in qp
     fn submit_send<LR>(&self, lms: &[&LR], wr_id: WorkRequestId, imm: Option<u32>) -> io::Result<()>
     where
         LR: LocalMrReadAccess,
@@ -322,16 +346,20 @@ impl QueuePair {
         }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            error!(
-                "submit_send, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
 
     /// submit a receive request
+    ///
+    /// On failure of `ibv_post_recv`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in wr
+    ///
+    /// `ENOMEM`    Send Queue is full or not enough resources to complete this operation
+    ///
+    /// `EFAULT`    Invalid value provided in qp
     fn submit_receive<LW>(&self, lms: &[&mut LW], wr_id: WorkRequestId) -> io::Result<()>
     where
         LW: LocalMrWriteAccess,
@@ -350,16 +378,20 @@ impl QueuePair {
         }
         let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            error!(
-                "submit_receive, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
 
     /// submit a read request
+    ///
+    /// On failure of `ibv_post_send`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in wr
+    ///
+    /// `ENOMEM`    Send Queue is full or not enough resources to complete this operation
+    ///
+    /// `EFAULT`    Invalid value provided in qp
     fn submit_read<LW, RR>(&self, lms: &[&mut LW], rm: &RR, wr_id: WorkRequestId) -> io::Result<()>
     where
         LW: LocalMrWriteAccess,
@@ -379,16 +411,20 @@ impl QueuePair {
         }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            error!(
-                "submit_read, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
 
     /// submit a write request
+    ///
+    /// On failure of `ibv_post_send`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in wr
+    ///
+    /// `ENOMEM`    Send Queue is full or not enough resources to complete this operation
+    ///
+    /// `EFAULT`    Invalid value provided in qp
     fn submit_write<LR, RW>(
         &self,
         lms: &[&LR],
@@ -414,11 +450,7 @@ impl QueuePair {
         }
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
-            error!(
-                "submit_write, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err());
         }
         Ok(())
     }
@@ -528,7 +560,9 @@ unsafe impl Send for QueuePair {}
 impl Drop for QueuePair {
     fn drop(&mut self) {
         let errno = unsafe { ibv_destroy_qp(self.as_ptr()) };
-        assert_eq!(errno, 0_i32);
+        if errno != 0_i32 {
+            log_last_os_err();
+        }
     }
 }
 

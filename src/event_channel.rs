@@ -1,3 +1,4 @@
+use crate::error_utilities::{log_last_os_err, log_ret_last_os_err};
 use crate::Context;
 use rdma_sys::{ibv_comp_channel, ibv_create_comp_channel, ibv_destroy_comp_channel};
 use std::os::unix::prelude::{AsRawFd, RawFd};
@@ -22,7 +23,7 @@ impl EventChannel {
     /// Create a new `EventChannel`
     pub(crate) fn new(ctx: Arc<Context>) -> io::Result<Self> {
         let inner_ec = NonNull::new(unsafe { ibv_create_comp_channel(ctx.as_ptr()) })
-            .ok_or(io::ErrorKind::Other)?;
+            .ok_or_else(log_ret_last_os_err)?;
         Ok(Self {
             _ctx: ctx,
             inner_ec,
@@ -42,6 +43,8 @@ unsafe impl Send for EventChannel {}
 impl Drop for EventChannel {
     fn drop(&mut self) {
         let errno = unsafe { ibv_destroy_comp_channel(self.as_ptr()) };
-        assert_eq!(errno, 0_i32);
+        if errno != 0_i32 {
+            log_last_os_err();
+        }
     }
 }

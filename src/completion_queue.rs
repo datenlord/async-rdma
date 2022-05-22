@@ -13,6 +13,12 @@ use tracing::error;
 /// Relevant for Receive Work Completions.
 static IBV_WC_WITH_IMM: u32 = 3;
 
+/// Minimum number of entries CQ will support
+pub(crate) const DEFAULT_CQ_SIZE: u32 = 16_u32;
+
+/// Default maximum number of completion queue entries (CQE) to poll at a time.
+pub(crate) static DEFAULT_MAX_CQE: i32 = 4_i32;
+
 /// Complete Queue Structure
 #[derive(Debug)]
 pub(crate) struct CompletionQueue {
@@ -20,6 +26,9 @@ pub(crate) struct CompletionQueue {
     ec: EventChannel,
     /// Real Completion Queue
     inner_cq: NonNull<ibv_cq>,
+    /// Maximum number of completion queue entries (CQE) to poll at a time.
+    /// The higher the concurrency, the bigger this value should be and more memory allocated at a time.
+    max_cqe: i32,
 }
 
 impl CompletionQueue {
@@ -28,9 +37,19 @@ impl CompletionQueue {
         self.inner_cq.as_ptr()
     }
 
+    /// Get `max_cqe`
+    pub(crate) fn max_cqe(&self) -> i32 {
+        self.max_cqe
+    }
+
     /// Create a new completion queue and bind to the event channel `ec`, `cq_size` is the buffer
     /// size of the completion queue
-    pub(crate) fn create(ctx: &Context, cq_size: u32, ec: EventChannel) -> io::Result<Self> {
+    pub(crate) fn create(
+        ctx: &Context,
+        cq_size: u32,
+        ec: EventChannel,
+        max_cqe: i32,
+    ) -> io::Result<Self> {
         let inner_cq = NonNull::new(unsafe {
             ibv_create_cq(
                 ctx.as_ptr(),
@@ -41,7 +60,11 @@ impl CompletionQueue {
             )
         })
         .ok_or(io::ErrorKind::Other)?;
-        Ok(Self { ec, inner_cq })
+        Ok(Self {
+            ec,
+            inner_cq,
+            max_cqe,
+        })
     }
 
     /// Request notification on next complete event arrive
@@ -59,37 +82,34 @@ impl CompletionQueue {
         Ok(())
     }
 
-    /// Poll `num_entries` work completions from CQ
-    pub(crate) fn poll(&self, num_entries: usize) -> io::Result<Vec<WorkCompletion>> {
-        let mut ans: Vec<WorkCompletion> = Vec::with_capacity(num_entries);
-        let poll_res =
-            unsafe { ibv_poll_cq(self.as_ptr(), num_entries.cast(), ans.as_mut_ptr().cast()) };
-        if poll_res >= 0_i32 {
-            assert!(num_entries >= poll_res.cast());
-            let poll_res = poll_res.cast();
-
-            // the length equals to the poll results length
-            unsafe { ans.set_len(poll_res) };
-            ans.shrink_to(poll_res);
-
-            assert_eq!(ans.len(), poll_res);
-            assert_eq!(ans.capacity(), poll_res);
-            Ok(ans)
+    /// Poll work completions from CQ up to `DEFAULT_CQ_SIZE` at a time
+    pub(crate) fn poll_cq_multiple(&self, wc_buf: &mut Vec<WorkCompletion>) -> io::Result<()> {
+        if wc_buf.capacity() < self.max_cqe.cast() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "wc_buf is not big enough, {} required and currently {}",
+                    self.max_cqe,
+                    wc_buf.capacity()
+                ),
+            ));
+        }
+        let cqe_num =
+            unsafe { ibv_poll_cq(self.as_ptr(), self.max_cqe, wc_buf.as_mut_ptr().cast()) };
+        if cqe_num > 0_i32 {
+            // this buffer will be used by RDMA NIC and it's len will not increase when NIC push data into it,
+            // so we need set it's len manually.
+            // Safety: NIC will return the length it has used and make sure the data is valid.
+            unsafe {
+                wc_buf.set_len(cqe_num.cast());
+            }
+            Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "nothing completed",
             ))
         }
-    }
-
-    /// Poll one work completion from CQ
-    pub(crate) fn poll_single(&self) -> io::Result<WorkCompletion> {
-        let polled = self.poll(1)?;
-        polled
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "nothing completed"))
     }
 
     /// Get the internal event channel

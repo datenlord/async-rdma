@@ -1,6 +1,7 @@
 use crate::completion_queue::{CompletionQueue, WorkCompletion, WorkRequestId};
+use clippy_utilities::Cast;
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash};
-use std::{sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 use tokio::{
     // Using mpsc here bacause the `oneshot` Sender needs its own ownership when it performs a `send`.
     // But we cann't get the ownership from LockFreeCuckooHash because of the principle of it.
@@ -43,8 +44,10 @@ impl EventListener {
     }
 
     /// Start the polling task
+    #[allow(clippy::unreachable)]
     fn start(cq: Arc<CompletionQueue>, req_map: ReqMap) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn(async move {
+            let mut wc_buf: Vec<WorkCompletion> = Vec::with_capacity(cq.max_cqe().cast());
             let async_fd = match cq.event_channel().async_fd() {
                 Ok(fd) => fd,
                 Err(e) => {
@@ -65,20 +68,32 @@ impl EventListener {
                         }
                     }
                 }
-                while let Ok(wc) = cq.poll_single() {
-                    if let Some(resp) = req_map.remove_with_guard(&wc.wr_id(), &pin()) {
-                        resp
-                    } else {
-                        error!(
-                            "Failed to get the responser for the request {:?}",
-                            &wc.wr_id()
-                        );
-                        return;
+                loop {
+                    match cq.poll_cq_multiple(&mut wc_buf) {
+                        Ok(_) => {
+                            while let Some(wc) = wc_buf.pop() {
+                                match req_map.remove_with_guard(&wc.wr_id(), &pin()) {
+                                    Some(resp) => {
+                                        resp.try_send(wc).unwrap_or_else(|e| {
+                                            warn!("The waiting task is dropped, {:?}", e);
+                                        });
+                                    }
+                                    None => {
+                                        error!(
+                                            "Failed to get the responser for the request {:?}",
+                                            &wc.wr_id()
+                                        );
+                                    }
+                                };
+                            }
+                        }
+                        Err(err) => {
+                            if err.kind() == io::ErrorKind::WouldBlock {
+                                break;
+                            }
+                            unreachable!("get unreachable error: {:?}", err);
+                        }
                     }
-                    .try_send(wc)
-                    .unwrap_or_else(|e| {
-                        warn!("The waiting task is dropped, {:?}", e);
-                    });
                 }
                 if let Err(e) = cq.req_notify(false) {
                     error!(

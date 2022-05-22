@@ -123,6 +123,9 @@ mod agent;
 mod completion_queue;
 /// The rmda device context
 mod context;
+
+/// Error handling utilities
+mod error_utilities;
 /// The event channel that notifies the completion or error of a request
 mod event_channel;
 /// The driver to poll the completion queue

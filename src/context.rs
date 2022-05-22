@@ -1,3 +1,4 @@
+use crate::error_utilities::{log_last_os_err, log_ret_last_os_err_with_note};
 use crate::{
     completion_queue::CompletionQueue, event_channel::EventChannel, gid::Gid,
     protection_domain::ProtectionDomain,
@@ -8,8 +9,8 @@ use rdma_sys::{
     ibv_gid, ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
 use std::mem::MaybeUninit;
-use std::{ffi::CStr, fmt::Debug, io, ops::Sub, ptr::NonNull, sync::Arc};
-use tracing::{error, warn};
+use std::{ffi::CStr, fmt::Debug, io, ptr::NonNull, sync::Arc};
+use tracing::warn;
 
 /// RDMA device context
 pub(crate) struct Context {
@@ -37,11 +38,22 @@ impl Context {
     }
 
     /// Create a new context based on the provided device name, port number and gid index
+    ///
+    /// On failure of `ibv_get_device_list`, errno indicates the failure reason:
+    ///
+    /// `EPERM`     Permission denied.
+    ///
+    /// `ENOMEM`    Insufficient memory to complete the operation.
+    ///
+    /// `ENOSYS`    No kernel support for RDMA.
     pub(crate) fn open(dev_name: Option<&str>, port_num: u8, gid_index: usize) -> io::Result<Self> {
         let mut num_devs: i32 = 0;
+        // ibv_get_device_list() returns the array of available RDMA devices on success, returns NULL and sets errno
+        // if the request fails. If no devices are found, then num_devices is set to 0, and non-NULL is returned.
         let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
         if dev_list_ptr.is_null() {
-            return Err(io::Error::last_os_error());
+            let err = log_ret_last_os_err_with_note("This is a basic verb that shouldn't fail, check if the module ib_uverbs is loaded.");
+            return Err(err);
         }
         let dev_list = unsafe { std::slice::from_raw_parts(dev_list_ptr, num_devs.cast()) };
         let dev = if let Some(dev_name_inner) = dev_name {
@@ -49,7 +61,10 @@ impl Context {
                 .iter()
                 .find(|iter_dev| -> bool {
                     let name = unsafe { ibv_get_device_name(**iter_dev) };
-                    assert!(!name.is_null());
+                    if name.is_null() {
+                        warn!("get null dev name");
+                        return false;
+                    }
                     let name = unsafe { CStr::from_ptr(name) }.to_str();
                     if name.is_err() {
                         warn!("Device name {:?} is not valid", name);
@@ -65,8 +80,8 @@ impl Context {
         } else {
             dev_list.get(0).ok_or(io::ErrorKind::NotFound)?
         };
-        let inner_ctx =
-            NonNull::new(unsafe { ibv_open_device(*dev) }).ok_or_else(io::Error::last_os_error)?;
+        let inner_ctx = NonNull::new(unsafe { ibv_open_device(*dev) })
+            .ok_or_else(|| log_ret_last_os_err_with_note("ibv_open_device failed"))?;
         unsafe { ibv_free_device_list(dev_list_ptr) };
 
         let gid = {
@@ -76,9 +91,7 @@ impl Context {
             let errno =
                 unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index, gid.as_mut_ptr()) };
             if errno != 0_i32 {
-                let err = io::Error::from_raw_os_error(errno.wrapping_neg());
-                error!("open_device, err info : {:?}", err);
-                return Err(err);
+                return Err(log_ret_last_os_err_with_note("ibv_query_gid failed"));
             }
             // SAFETY: ffi init
             Gid::from(unsafe { gid.assume_init() })
@@ -88,11 +101,7 @@ impl Context {
         let errno =
             unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
         if errno != 0_i32 {
-            error!(
-                "open_device, err info : {:?}",
-                io::Error::from_raw_os_error(0_i32.sub(errno))
-            );
-            return Err(io::Error::from_raw_os_error(0_i32.sub(errno)));
+            return Err(log_ret_last_os_err_with_note("ibv_query_port failed"));
         }
         Ok(Context {
             inner_ctx,
@@ -139,7 +148,9 @@ impl Context {
 impl Drop for Context {
     fn drop(&mut self) {
         let errno = unsafe { ibv_close_device(self.as_ptr()) };
-        assert_eq!(errno, 0_i32);
+        if errno != 0_i32 {
+            log_last_os_err();
+        }
     }
 }
 

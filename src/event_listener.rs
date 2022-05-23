@@ -33,6 +33,11 @@ type ReqMap = Arc<parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInner
 /// Event listener timeout, default is 1 sec
 static EVENT_LISTENER_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Time to wait for being canceled.
+/// Only used in `cancel_safety` test.
+#[cfg(feature = "cancel_safety_test")]
+static DELAY_FOR_CANCEL_SAFETY_TEST: Duration = Duration::from_secs(1);
+
 /// The event listener that polls the completion queue events
 #[derive(Debug)]
 pub(crate) struct EventListener {
@@ -86,6 +91,9 @@ impl EventListener {
                 loop {
                     match cq.poll_cq_multiple(&mut wc_buf) {
                         Ok(_) => {
+                            #[cfg(feature = "cancel_safety_test")]
+                            // only used in cancel_safety test for waiting to be canceled
+                            tokio::time::sleep(DELAY_FOR_CANCEL_SAFETY_TEST).await;
                             while let Some(wc) = wc_buf.pop() {
                                 match req_map.lock().remove(&wc.wr_id()) {
                                     Some(v) => {

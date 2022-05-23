@@ -1,3 +1,4 @@
+#![cfg(feature = "cancel_safety_test")]
 use async_rdma::LocalMrReadAccess;
 use async_rdma::LocalMrWriteAccess;
 use async_rdma::Rdma;
@@ -6,19 +7,31 @@ mod test_utilities;
 use test_utilities::test_server_client;
 
 async fn client(rdma: Rdma) -> io::Result<()> {
-    const LEN: usize = 600 * 1024 * 1024;
+    const LEN: usize = 10;
     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; LEN]>())?;
     let mut rmr = rdma
         .request_remote_mr(Layout::new::<[u8; LEN]>())
         .await
         .unwrap();
-    let _ = tokio::time::timeout(Duration::from_nanos(100), rdma.write(&lmr, &mut rmr)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rdma.write(&lmr, &mut rmr))
+            .await
+            .is_err()
+    );
     assert!(!lmr.is_writeable());
     assert!(lmr.is_readable());
+    assert!(rdma.read(&mut lmr, &rmr).await.is_err());
+    assert!(rdma.write(&lmr, &mut rmr).await.is_ok());
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let _ = tokio::time::timeout(Duration::from_nanos(100), rdma.read(&mut lmr, &rmr)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rdma.read(&mut lmr, &rmr))
+            .await
+            .is_err()
+    );
     assert!(!lmr.is_writeable());
     assert!(!lmr.is_readable());
+    assert!(rdma.read(&mut lmr, &rmr).await.is_err());
+    assert!(rdma.write(&lmr, &mut rmr).await.is_err());
     rdma.send_remote_mr(rmr).await?;
     Ok(())
 }

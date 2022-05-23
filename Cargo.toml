@@ -35,3 +35,6 @@ parking_lot = {version = "0.12.0", features = ["arc_lock", "send_guard"]}
 [dev-dependencies]
 portpicker = "0.1.1"
 minstant = "0.1"
+
+[features]
+cancel_safety_test = [] # only used for cancel_safety test

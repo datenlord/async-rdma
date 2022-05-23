@@ -60,6 +60,7 @@ sudo env "PATH=$PATH" bash -c "
     rustup default $1 && 
     cargo build
     cargo test
+    cargo test --package async-rdma --test cancel_safety --features cancel_safety_test
     cargo run --example rpc
     timeout 3 target/debug/examples/server &
     sleep 1

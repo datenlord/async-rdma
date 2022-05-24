@@ -128,6 +128,9 @@ impl MrAllocator {
 
     /// Alloc memory for RDMA operations from jemalloc
     fn alloc_from_je(&self, layout: &Layout) -> Option<*mut u8> {
+        // SAFETY: unsoundness
+        // BUG: unsound internal api
+        // Exporting uninitialized memory
         let addr = unsafe {
             tikv_jemalloc_sys::mallocx(
                 layout.size(),
@@ -161,6 +164,8 @@ fn get_default_hooks_impl(arena_ind: u32) -> extent_hooks_t {
     let hooks_ptr: *mut *mut extent_hooks_t = &mut hooks;
     let key = format!("arena.{}.extent_hooks\0", arena_ind);
     let mut hooks_len = mem::size_of_val(&hooks);
+    // SAFETY: ?
+    // TODO: check safety
     let errno = unsafe {
         tikv_jemalloc_sys::mallctl(
             key.as_ptr().cast(),
@@ -176,15 +181,21 @@ fn get_default_hooks_impl(arena_ind: u32) -> extent_hooks_t {
             io::Error::from_raw_os_error(errno)
         );
     }
+    // SAFETY: ?
+    // TODO: check safety
     unsafe { *hooks }
 }
 
 /// Set custom extent hooks
 fn set_extent_hooks(arena_ind: u32) -> io::Result<()> {
     let key = format!("arena.{}.extent_hooks\0", arena_ind);
+    // SAFETY: ?
+    // TODO: check safety
     let mut hooks_ptr: *mut extent_hooks_t = unsafe { &mut RDMA_EXTENT_HOOKS };
     let hooks_ptr_ptr: *mut *mut extent_hooks_t = &mut hooks_ptr;
     let hooks_len: size_t = mem::size_of_val(&hooks_ptr_ptr);
+    // SAFETY: ?
+    // TODO: check safety
     let errno = unsafe {
         tikv_jemalloc_sys::mallctl(
             key.as_ptr().cast(),
@@ -208,6 +219,8 @@ fn create_arena() -> io::Result<u32> {
     let mut aid = 0_u32;
     let aid_ptr: *mut u32 = &mut aid;
     let mut aid_len: size_t = mem::size_of_val(&aid);
+    // SAFETY: ?
+    // TODO: check safety
     let errno = unsafe {
         tikv_jemalloc_sys::mallctl(
             key.as_ptr().cast(),
@@ -592,6 +605,8 @@ mod tests {
     /// Check if the default extent hooks are the same as custom hooks
     fn check_hooks(arena_ind: u32) {
         let hooks = get_default_hooks_impl(arena_ind);
+        // SAFETY: ?
+        // TODO: check safety
         unsafe {
             assert_eq!(hooks.alloc, RDMA_EXTENT_HOOKS.alloc);
             assert_eq!(hooks.dalloc, RDMA_EXTENT_HOOKS.dalloc);
@@ -609,6 +624,8 @@ mod tests {
 
         check_hooks(allocator.arena_ind);
         // set test hooks
+        // SAFETY: ?
+        // TODO: check safety
         unsafe {
             RDMA_EXTENT_HOOKS = extent_hooks_t {
                 alloc: Some(extent_alloc_hook_for_test),
@@ -656,6 +673,8 @@ mod tests {
         let ind = init_je_statics(pd).unwrap();
         let thread = thread::spawn(move || {
             let layout = Layout::new::<char>();
+            // SAFETY: ?
+            // TODO: check safety
             let addr = unsafe {
                 tikv_jemalloc_sys::mallocx(
                     layout.size(),
@@ -663,6 +682,8 @@ mod tests {
                 )
             };
             assert_ne!(addr, ptr::null_mut());
+            // SAFETY: ?
+            // TODO: check safety
             unsafe {
                 *(addr.cast::<char>()) = 'c';
                 assert_eq!(*(addr.cast::<char>()), 'c');
@@ -674,6 +695,8 @@ mod tests {
             }
         });
         let layout = Layout::new::<char>();
+        // SAFETY: ?
+        // TODO: check safety
         let addr = unsafe {
             tikv_jemalloc_sys::mallocx(
                 layout.size(),
@@ -681,6 +704,8 @@ mod tests {
             )
         };
         assert_ne!(addr, ptr::null_mut());
+        // SAFETY: ?
+        // TODO: check safety
         unsafe {
             *(addr.cast::<char>()) = 'c';
             assert_eq!(*(addr.cast::<char>()), 'c');

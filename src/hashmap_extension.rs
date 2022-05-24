@@ -61,6 +61,8 @@ fn insert_if_not_exists_test() {
 fn key_gen() -> i32 {
     /// Increase from 0
     static mut NUM: i32 = 0_i32;
+    // SAFETY: unsoundness
+    // BUG: unsound internal api
     unsafe {
         NUM = NUM.wrapping_add(1_i32);
         NUM

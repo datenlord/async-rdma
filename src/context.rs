@@ -50,21 +50,29 @@ impl Context {
         let mut num_devs: i32 = 0;
         // ibv_get_device_list() returns the array of available RDMA devices on success, returns NULL and sets errno
         // if the request fails. If no devices are found, then num_devices is set to 0, and non-NULL is returned.
+        // SAFETY: ffi
+        // TODO: check safety
         let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
         if dev_list_ptr.is_null() {
             let err = log_ret_last_os_err_with_note("This is a basic verb that shouldn't fail, check if the module ib_uverbs is loaded.");
             return Err(err);
         }
+        // SAFETY: ?
+        // TODO: check safety
         let dev_list = unsafe { std::slice::from_raw_parts(dev_list_ptr, num_devs.cast()) };
         let dev = if let Some(dev_name_inner) = dev_name {
             dev_list
                 .iter()
                 .find(|iter_dev| -> bool {
+                    // SAFETY: ffi
+                    // TODO: check safety
                     let name = unsafe { ibv_get_device_name(**iter_dev) };
                     if name.is_null() {
                         warn!("get null dev name");
                         return false;
                     }
+                    // SAFETY: ?
+                    // TODO: check safety
                     let name = unsafe { CStr::from_ptr(name) }.to_str();
                     if name.is_err() {
                         warn!("Device name {:?} is not valid", name);
@@ -80,8 +88,12 @@ impl Context {
         } else {
             dev_list.get(0).ok_or(io::ErrorKind::NotFound)?
         };
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_ctx = NonNull::new(unsafe { ibv_open_device(*dev) })
             .ok_or_else(|| log_ret_last_os_err_with_note("ibv_open_device failed"))?;
+        // SAFETY: ffi
+        // TODO: check safety
         unsafe { ibv_free_device_list(dev_list_ptr) };
 
         let gid = {
@@ -97,6 +109,7 @@ impl Context {
             Gid::from(unsafe { gid.assume_init() })
         };
 
+        // SAFETY: POD FFI type
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
         let errno =
             unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
@@ -147,6 +160,8 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_close_device(self.as_ptr()) };
         if errno != 0_i32 {
             log_last_os_err();

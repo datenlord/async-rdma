@@ -49,6 +49,7 @@ struct QueuePairInitAttr {
 
 impl Default for QueuePairInitAttr {
     fn default() -> Self {
+        // SAFETY: POD FFI type
         let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
         qp_init_attr.qp_context = ptr::null_mut::<libc::c_void>().cast();
         qp_init_attr.send_cq = ptr::null_mut::<ibv_cq>().cast();
@@ -127,6 +128,8 @@ impl QueuePairBuilder {
     ///
     /// `EPERM`     Not enough permissions to create a QP with this Transport Service Type
     pub(crate) fn build(mut self) -> io::Result<QueuePair> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_qp = NonNull::new(unsafe {
             rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut self.qp_init_attr.qp_init_attr_inner)
         })
@@ -201,6 +204,8 @@ impl QueuePair {
     /// get queue pair endpoint
     pub(crate) fn endpoint(&self) -> QueuePairEndpoint {
         QueuePairEndpoint {
+            // SAFETY: ?
+            // TODO: check safety
             qp_num: unsafe { (*self.as_ptr()).qp_num },
             lid: self.pd.ctx.get_lid(),
             gid: self.pd.ctx.get_gid(),
@@ -215,6 +220,7 @@ impl QueuePair {
     ///
     /// `ENOMEM`    Not enough resources to complete this operation
     pub(crate) fn modify_to_init(&self, flag: ibv_access_flags, port_num: u8) -> io::Result<()> {
+        // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.pkey_index = 0;
         attr.port_num = port_num;
@@ -224,6 +230,8 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_STATE
             | ibv_qp_attr_mask::IBV_QP_PORT
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -245,6 +253,7 @@ impl QueuePair {
         max_dest_rd_atomic: u8,
         min_rnr_timer: u8,
     ) -> io::Result<()> {
+        // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
         attr.path_mtu = self.pd.ctx.get_active_mtu();
@@ -267,6 +276,8 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_RQ_PSN
             | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC
             | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -299,6 +310,7 @@ impl QueuePair {
         start_psn: u32,
         max_rd_atomic: u8,
     ) -> io::Result<()> {
+        // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
         attr.timeout = timeout;
@@ -312,6 +324,8 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_RNR_RETRY
             | ibv_qp_attr_mask::IBV_QP_SQ_PSN
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -344,6 +358,8 @@ impl QueuePair {
                 sr.as_ref().wr_id,
             );
         }
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -376,6 +392,8 @@ impl QueuePair {
                 rr.as_ref().wr_id,
             );
         }
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -409,6 +427,8 @@ impl QueuePair {
                 sr.as_ref().wr_id,
             );
         }
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -448,6 +468,8 @@ impl QueuePair {
                 sr.as_ref().wr_id,
             );
         }
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
@@ -563,6 +585,8 @@ unsafe impl Send for QueuePair {}
 
 impl Drop for QueuePair {
     fn drop(&mut self) {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_destroy_qp(self.as_ptr()) };
         if errno != 0_i32 {
             log_last_os_err();

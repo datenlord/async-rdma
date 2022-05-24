@@ -23,6 +23,8 @@ impl ProtectionDomain {
 
     /// Create a protection domain
     pub(crate) fn create(ctx: &Arc<Context>) -> io::Result<Self> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_pd =
             NonNull::new(unsafe { ibv_alloc_pd(ctx.as_ptr()) }).ok_or_else(log_ret_last_os_err)?;
         Ok(Self {
@@ -39,6 +41,8 @@ impl ProtectionDomain {
 
 impl Drop for ProtectionDomain {
     fn drop(&mut self) {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_dealloc_pd(self.as_ptr()) };
         if errno != 0_i32 {
             log_last_os_err();

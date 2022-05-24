@@ -32,6 +32,7 @@ impl SendWr {
                 sge_from_mr(lm)
             })
             .collect();
+        // SAFETY: POD FFI type
         let mut inner = unsafe { std::mem::zeroed::<ibv_send_wr>() };
         inner.next = std::ptr::null_mut();
         inner.wr_id = wr_id.into();
@@ -72,6 +73,7 @@ impl SendWr {
                 sge_from_mr(lm)
             })
             .collect();
+        // SAFETY: POD FFI type
         let mut inner = unsafe { std::mem::zeroed::<ibv_send_wr>() };
         inner.next = std::ptr::null_mut();
         inner.wr_id = wr_id.into();
@@ -149,6 +151,7 @@ impl RecvWr {
                 sge_from_mr(lm)
             })
             .collect();
+        // SAFETY: POD FFI type
         let mut inner = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
         inner.next = std::ptr::null_mut();
         inner.wr_id = wr_id.into();

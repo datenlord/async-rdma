@@ -14,10 +14,12 @@ struct MemoryWindow {
 impl MemoryWindow {
     /// Create a new memory windows
     fn create(pd: &Arc<ProtectionDomain>) -> io::Result<Self> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_mw = unsafe { ibv_alloc_mw(pd.as_ptr(), ibv_mw_type::IBV_MW_TYPE_1) }
             .ok_or_else(io::Error::last_os_error)?;
         if inner_mw.is_null() {
-            dbg!(io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
         Ok(Self { inner_mw })
     }

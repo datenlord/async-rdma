@@ -22,6 +22,8 @@ impl EventChannel {
 
     /// Create a new `EventChannel`
     pub(crate) fn new(ctx: Arc<Context>) -> io::Result<Self> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_ec = NonNull::new(unsafe { ibv_create_comp_channel(ctx.as_ptr()) })
             .ok_or_else(log_ret_last_os_err)?;
         Ok(Self {
@@ -32,6 +34,8 @@ impl EventChannel {
 
     /// Get the event channel fd and wrap it into Tokio `AsyncFd`
     pub(crate) fn async_fd(&self) -> io::Result<AsyncFd<RawFd>> {
+        // SAFETY: ?
+        // TODO: check safety
         AsyncFd::new(unsafe { *self.as_ptr() }.fd.as_raw_fd())
     }
 }
@@ -42,6 +46,8 @@ unsafe impl Send for EventChannel {}
 
 impl Drop for EventChannel {
     fn drop(&mut self) {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_destroy_comp_channel(self.as_ptr()) };
         if errno != 0_i32 {
             log_last_os_err();

@@ -1,16 +1,15 @@
-use crate::error_utilities::{log_last_os_err, log_ret_last_os_err_with_note};
+use crate::device::DeviceList;
+use crate::error_utilities::{log_last_os_err, log_ret, log_ret_last_os_err_with_note};
 use crate::{
     completion_queue::CompletionQueue, event_channel::EventChannel, gid::Gid,
     protection_domain::ProtectionDomain,
 };
 use clippy_utilities::Cast;
 use rdma_sys::{
-    ibv_close_device, ibv_context, ibv_free_device_list, ibv_get_device_list, ibv_get_device_name,
-    ibv_gid, ibv_open_device, ibv_port_attr, ibv_query_gid,
+    ibv_close_device, ibv_context, ibv_gid, ibv_open_device, ibv_port_attr, ibv_query_gid,
 };
 use std::mem::MaybeUninit;
-use std::{ffi::CStr, fmt::Debug, io, ptr::NonNull, sync::Arc};
-use tracing::warn;
+use std::{fmt::Debug, io, ptr::NonNull, sync::Arc};
 
 /// RDMA device context
 pub(crate) struct Context {
@@ -47,54 +46,24 @@ impl Context {
     ///
     /// `ENOSYS`    No kernel support for RDMA.
     pub(crate) fn open(dev_name: Option<&str>, port_num: u8, gid_index: usize) -> io::Result<Self> {
-        let mut num_devs: i32 = 0;
-        // ibv_get_device_list() returns the array of available RDMA devices on success, returns NULL and sets errno
-        // if the request fails. If no devices are found, then num_devices is set to 0, and non-NULL is returned.
-        // SAFETY: ffi
-        // TODO: check safety
-        let dev_list_ptr = unsafe { ibv_get_device_list(&mut num_devs) };
-        if dev_list_ptr.is_null() {
-            let err = log_ret_last_os_err_with_note("This is a basic verb that shouldn't fail, check if the module ib_uverbs is loaded.");
-            return Err(err);
-        }
-        // SAFETY: ?
-        // TODO: check safety
-        let dev_list = unsafe { std::slice::from_raw_parts(dev_list_ptr, num_devs.cast()) };
-        let dev = if let Some(dev_name_inner) = dev_name {
-            dev_list
-                .iter()
-                .find(|iter_dev| -> bool {
-                    // SAFETY: ffi
-                    // TODO: check safety
-                    let name = unsafe { ibv_get_device_name(**iter_dev) };
-                    if name.is_null() {
-                        warn!("get null dev name");
-                        return false;
-                    }
-                    // SAFETY: ?
-                    // TODO: check safety
-                    let name = unsafe { CStr::from_ptr(name) }.to_str();
-                    if name.is_err() {
-                        warn!("Device name {:?} is not valid", name);
-                        return false;
-                    }
+        let dev_list = log_ret(
+            DeviceList::available(),
+            "This is a basic verb that shouldn't fail, check if the module ib_uverbs is loaded.",
+        )?;
 
-                    // We've checked the name is not error
-                    #[allow(clippy::unwrap_used)]
-                    let name = name.unwrap();
-                    dev_name_inner.eq(name)
-                })
-                .ok_or(io::ErrorKind::NotFound)?
-        } else {
-            dev_list.get(0).ok_or(io::ErrorKind::NotFound)?
-        };
+        let dev = match dev_name {
+            Some(name) => dev_list.iter().find(|&d| d.name() == name),
+            None => dev_list.get(0),
+        }
+        .ok_or(io::ErrorKind::NotFound)?;
+
         // SAFETY: ffi
-        // TODO: check safety
-        let inner_ctx = NonNull::new(unsafe { ibv_open_device(*dev) })
+        // 1. `dev` is valid now.
+        // 2. `*mut ibv_context` does not associate with the lifetime of `*mut ibv_device`.
+        let inner_ctx = NonNull::new(unsafe { ibv_open_device(dev.ffi_ptr()) })
             .ok_or_else(|| log_ret_last_os_err_with_note("ibv_open_device failed"))?;
-        // SAFETY: ffi
-        // TODO: check safety
-        unsafe { ibv_free_device_list(dev_list_ptr) };
+
+        drop(dev_list);
 
         let gid = {
             let mut gid = MaybeUninit::<ibv_gid>::uninit();

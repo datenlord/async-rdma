@@ -125,6 +125,8 @@ mod agent;
 mod completion_queue;
 /// The rmda device context
 mod context;
+/// The rmda device
+pub mod device;
 
 /// Error handling utilities
 mod error_utilities;

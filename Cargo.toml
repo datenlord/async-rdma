@@ -31,10 +31,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3.9"
 tikv-jemalloc-sys = "0.4.3"
 parking_lot = {version = "0.12.0", features = ["arc_lock", "send_guard"]}
+hex-simd = "0.5.0"
+numeric_cast = "0.1.2"
+scopeguard = "1.1.0"
 
 [dev-dependencies]
 portpicker = "0.1.1"
 minstant = "0.1"
+const-str = "0.3.1"
 
 [features]
 cancel_safety_test = [] # only used for cancel_safety test

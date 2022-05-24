@@ -115,6 +115,7 @@
     clippy::exhaustive_enums,
     clippy::exhaustive_structs,
     clippy::indexing_slicing,
+    clippy::separated_literal_suffix, // conflicts with clippy::unseparated_literal_suffix
 )]
 
 /// The agent that handles async events in the background

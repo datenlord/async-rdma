@@ -116,6 +116,7 @@
     clippy::exhaustive_structs,
     clippy::indexing_slicing,
     clippy::separated_literal_suffix, // conflicts with clippy::unseparated_literal_suffix
+    clippy::single_char_lifetime_names, // TODO: change lifetime names
 )]
 
 /// The agent that handles async events in the background

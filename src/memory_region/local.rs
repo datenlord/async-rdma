@@ -53,6 +53,8 @@ pub trait LocalMrReadAccess: MrAccess {
     #[inline]
     #[allow(clippy::as_conversions)]
     fn as_slice(&self) -> MappedRwLockReadGuard<&[u8]> {
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         MappedRwLockReadGuard::map(self.as_ptr(), |ptr| unsafe {
             slice::from_raw_parts(ptr, self.length())
         })
@@ -67,6 +69,8 @@ pub trait LocalMrReadAccess: MrAccess {
         self.try_as_ptr().map_or_else(
             || None,
             |guard| {
+                // SAFETY: unsoundness
+                // BUG: unsound public api
                 return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts(ptr, self.length())
                 }));
@@ -83,6 +87,8 @@ pub trait LocalMrReadAccess: MrAccess {
     /// TODO: move unchecked methords to unsafe trait
     #[inline]
     fn as_slice_unchecked(&self) -> &[u8] {
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         unsafe { slice::from_raw_parts(self.as_ptr_unchecked(), self.length()) }
     }
 
@@ -99,6 +105,8 @@ pub trait LocalMrReadAccess: MrAccess {
     #[inline]
     #[allow(clippy::unreachable)] // inner will not be null
     fn lkey_unchecked(&self) -> u32 {
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         unsafe {
             <*const LocalMrInner>::as_ref(self.get_inner().data_ptr())
                 .map_or_else(|| unreachable!("get null inner"), LocalMrInner::lkey)
@@ -115,6 +123,8 @@ pub trait LocalMrReadAccess: MrAccess {
     #[inline]
     #[allow(clippy::unreachable)] // inner will not be null
     fn rkey_unchecked(&self) -> u32 {
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         unsafe {
             <*const LocalMrInner>::as_ref(self.get_inner().data_ptr())
                 .map_or_else(|| unreachable!("get null inner"), MrAccess::rkey)
@@ -196,6 +206,8 @@ pub trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     #[allow(clippy::as_conversions)]
     fn as_mut_slice(&mut self) -> MappedRwLockWriteGuard<&mut [u8]> {
         let len = self.length();
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         MappedRwLockWriteGuard::map(self.as_mut_ptr(), |ptr| unsafe {
             slice::from_raw_parts_mut(ptr, len)
         })
@@ -210,6 +222,8 @@ pub trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
         self.try_as_mut_ptr().map_or_else(
             || None,
             |guard| {
+                // SAFETY: unsoundness
+                // BUG: unsound public api
                 return Some(MappedRwLockWriteGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts_mut(ptr, self.length())
                 }));
@@ -226,6 +240,8 @@ pub trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     /// TODO: move unchecked methords to unsafe trait
     #[inline]
     fn as_mut_slice_unchecked(&mut self) -> &mut [u8] {
+        // SAFETY: unsoundness
+        // BUG: unsound public api
         unsafe { slice::from_raw_parts_mut(self.as_mut_ptr_unchecked(), self.length()) }
     }
 
@@ -357,6 +373,8 @@ impl Drop for LocalMrInner {
     #[allow(clippy::as_conversions)]
     fn drop(&mut self) {
         debug!("drop LocalMr {:?}", self);
+        // SAFETY: ffi
+        // TODO: check safety
         unsafe { tikv_jemalloc_sys::free(self.addr as _) }
     }
 }

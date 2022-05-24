@@ -58,6 +58,8 @@ impl CompletionQueue {
         ec: EventChannel,
         max_cqe: i32,
     ) -> io::Result<Self> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_cq = NonNull::new(unsafe {
             ibv_create_cq(
                 ctx.as_ptr(),
@@ -77,6 +79,8 @@ impl CompletionQueue {
 
     /// Request notification on next complete event arrive
     pub(crate) fn req_notify(&self, solicited_only: bool) -> io::Result<()> {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe {
             ibv_req_notify_cq(self.inner_cq.as_ptr(), if solicited_only { 1 } else { 0 })
         };
@@ -99,6 +103,8 @@ impl CompletionQueue {
                 ),
             ));
         }
+        // SAFETY: ffi
+        // TODO: check safety
         let cqe_num =
             unsafe { ibv_poll_cq(self.as_ptr(), self.max_cqe, wc_buf.as_mut_ptr().cast()) };
         if cqe_num > 0_i32 {
@@ -129,6 +135,8 @@ unsafe impl Send for CompletionQueue {}
 
 impl Drop for CompletionQueue {
     fn drop(&mut self) {
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_destroy_cq(self.as_ptr()) };
         assert_eq!(errno, 0_i32);
     }
@@ -167,6 +175,8 @@ impl WorkCompletion {
                 // use union to get imm_data after check opcode.
                 Ok((
                     len,
+                    // SAFETY: ?
+                    // TODO: check safety
                     Some(unsafe { self.inner_wc.imm_data_invalidated_rkey_union.imm_data }),
                 ))
             } else {
@@ -189,6 +199,7 @@ impl Debug for WorkCompletion {
 impl Default for WorkCompletion {
     fn default() -> Self {
         Self {
+            // SAFETY: POD FFI type
             inner_wc: unsafe { mem::zeroed() },
         }
     }

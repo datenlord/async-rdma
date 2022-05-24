@@ -30,6 +30,8 @@ impl MrAccess for RawMemoryRegion {
     }
 
     fn rkey(&self) -> u32 {
+        // SAFETY: ?
+        // TODO: check safety
         unsafe { self.inner_mr.as_ref().rkey }
     }
 }
@@ -42,6 +44,8 @@ impl RawMemoryRegion {
         len: usize,
         access: ibv_access_flags,
     ) -> io::Result<Self> {
+        // SAFETY: ffi
+        // TODO: check safety
         let inner_mr =
         NonNull::new(unsafe { ibv_reg_mr(pd.as_ptr(), addr.cast(), len, access.0.cast()) })
         .ok_or_else(|| {
@@ -61,6 +65,8 @@ impl RawMemoryRegion {
     }
     /// Get local key of memory region
     pub(crate) fn lkey(&self) -> u32 {
+        // SAFETY: ?
+        // TODO: check safety
         unsafe { self.inner_mr.as_ref().lkey }
     }
 }
@@ -84,6 +90,8 @@ unsafe impl Send for RawMemoryRegion {}
 impl Drop for RawMemoryRegion {
     fn drop(&mut self) {
         debug!("dereg_mr {:?}", &self);
+        // SAFETY: ffi
+        // TODO: check safety
         let errno = unsafe { ibv_dereg_mr(self.inner_mr.as_ptr()) };
         assert_eq!(errno, 0_i32);
     }

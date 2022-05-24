@@ -317,17 +317,23 @@ impl AgentThread {
 
     /// The main agent function that handles messages sent from the other side
     async fn main(self: Arc<Self>) -> io::Result<()> {
+        // SAFETY: ?
+        // TODO: check safety
         let mut header_buf = self
             .inner
             .allocator
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1) })?;
+        // SAFETY: ?
+        // TODO: check safety
         let mut data_buf = self
             .inner
             .allocator
             // alignment 1 is always correct
             .alloc(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
         loop {
+            // SAFETY: ?
+            // TODO: check safety
             unsafe {
                 std::ptr::write_bytes(header_buf.as_mut_ptr_unchecked(), 0_u8, header_buf.length());
             }
@@ -369,6 +375,8 @@ impl AgentThread {
                             Arc::<Self>::clone(&self).handle_send_req(request, data_buf, imm),
                         );
                         // alignment 1 is always correct
+                        // SAFETY: ?
+                        // TODO: check safety
                         data_buf = self.inner.allocator.alloc(unsafe {
                             &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
                         })?;
@@ -622,6 +630,8 @@ impl AgentInner {
             request_id: req_id,
             kind,
         };
+        // SAFETY: ?
+        // TODO: check safety
         let mut header_buf = self
             .allocator
             // alignment 1 is always correct
@@ -648,6 +658,8 @@ impl AgentInner {
 
     /// Send a response to the other side
     async fn send_response(&self, response: Response) -> io::Result<()> {
+        // SAFETY: ?
+        // TODO: check safety
         let mut header = self
             .allocator
             // alignment 1 is always correct

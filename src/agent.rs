@@ -211,7 +211,8 @@ impl Agent {
             });
             let response = self
                 .inner
-                .send_request_append_data(kind, &[&lm.get(start..end)?], imm)
+                // SAFETY: The input range is always valid
+                .send_request_append_data(kind, &[&unsafe { lm.get_unchecked(start..end) }], imm)
                 .await?;
             if let ResponseKind::SendData(send_data_resp) = response {
                 if send_data_resp.status > 0 {
@@ -246,7 +247,10 @@ impl Agent {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "data channel closed"))?;
-        Ok((lmr.take(0..len)?, imm))
+        let lmr = lmr.take(0..len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "this is a bug, received wrong len")
+        })?;
+        Ok((lmr, imm))
     }
 
     /// Receive content sent from the other side and stored in the `LocalMr`
@@ -645,7 +649,8 @@ impl AgentInner {
         // FIXME: serialize udpate
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let header_buf = &header_buf.get(0..header_buf.length())?;
+        // SAFETY: The input range is always valid
+        let header_buf = &unsafe { header_buf.get_unchecked(0..header_buf.length()) };
         let mut lms: Vec<&LocalMrSlice> = vec![header_buf];
         lms.extend(data);
         self.qp.send_sge(&lms, imm).await?;
@@ -678,7 +683,12 @@ impl AgentInner {
             .cast();
         bincode::serialize_into(cursor, &message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let buf = header.get_mut(0..msz)?;
+        let buf = header.get_mut(0..msz).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "this is a bug, get a wrong serialized size",
+            )
+        })?;
         self.qp.send(&buf).await?;
         Ok(())
     }

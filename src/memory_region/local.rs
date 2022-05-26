@@ -3,7 +3,6 @@ use crate::lock_utilities::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     fmt::Debug,
-    io,
     ops::Range,
     slice,
     sync::Arc,
@@ -310,29 +309,54 @@ impl LocalMr {
     }
 
     /// Get a local mr slice
+    ///
+    /// Return `None` if the inputed range is wrong
     #[inline]
-    pub fn get(&self, i: Range<usize>) -> io::Result<LocalMrSlice> {
+    #[must_use]
+    pub fn get(&self, i: Range<usize>) -> Option<LocalMrSlice> {
         // SAFETY: `self` is checked to be valid and in bounds above.
         if i.start >= i.end || i.end > self.len {
-            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+            None
         } else {
-            Ok(LocalMrSlice::new(
+            Some(LocalMrSlice::new(
                 self,
                 Arc::<RwLocalMrInner>::clone(&self.inner),
                 self.addr().wrapping_add(i.start),
                 i.len(),
             ))
         }
+    }
+
+    /// Get an unchecked local mr slice
+    ///
+    /// # Safety
+    ///
+    /// Callers of this function are responsible that these preconditions are
+    /// satisfied:
+    ///
+    /// * The starting index must not exceed the ending index;
+    /// * Indexes must be within bounds of the original `LocalMr`.
+    #[inline]
+    #[must_use]
+    pub unsafe fn get_unchecked(&self, i: Range<usize>) -> LocalMrSlice {
+        LocalMrSlice::new(
+            self,
+            Arc::<RwLocalMrInner>::clone(&self.inner),
+            self.addr().wrapping_add(i.start),
+            i.len(),
+        )
     }
 
     /// Get a mutable local mr slice
+    ///
+    /// Return `None` if the inputed range is wrong
     #[inline]
-    pub fn get_mut(&mut self, i: Range<usize>) -> io::Result<LocalMrSliceMut> {
+    pub fn get_mut(&mut self, i: Range<usize>) -> Option<LocalMrSliceMut> {
         // SAFETY: `self` is checked to be valid and in bounds above.
         if i.start >= i.end || i.end > self.length() {
-            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+            None
         } else {
-            Ok(LocalMrSliceMut::new(
+            Some(LocalMrSliceMut::new(
                 self,
                 Arc::<RwLocalMrInner>::clone(&self.inner),
                 self.addr().wrapping_add(i.start),
@@ -341,17 +365,55 @@ impl LocalMr {
         }
     }
 
-    /// take the ownership and return a sub local mr from self.
+    /// Get an unchecked mutable local mr slice
+    ///
+    /// # Safety
+    ///
+    /// Callers of this function are responsible that these preconditions are
+    /// satisfied:
+    ///
+    /// * The starting index must not exceed the ending index;
+    /// * Indexes must be within bounds of the original `LocalMr`.
     #[inline]
-    pub(crate) fn take(mut self, i: Range<usize>) -> io::Result<Self> {
+    pub unsafe fn get_unchecked_mut(&mut self, i: Range<usize>) -> LocalMrSliceMut {
+        LocalMrSliceMut::new(
+            self,
+            Arc::<RwLocalMrInner>::clone(&self.inner),
+            self.addr().wrapping_add(i.start),
+            i.len(),
+        )
+    }
+
+    /// Take the ownership and return a sub local mr from self
+    ///
+    /// Return `None` if the inputed range is wrong
+    #[inline]
+    pub(crate) fn take(mut self, i: Range<usize>) -> Option<Self> {
         // SAFETY: `self` is checked to be valid and in bounds above.
         if i.start >= i.end || i.end > self.length() {
-            Err(io::Error::new(io::ErrorKind::Other, "wrong range of lmr"))
+            None
         } else {
             self.addr = self.addr.wrapping_add(i.start);
             self.len = i.end.wrapping_sub(i.start);
-            Ok(self)
+            Some(self)
         }
+    }
+
+    /// Take the ownership and return an unchecked sub local mr from self
+    ///
+    /// # Safety
+    ///
+    /// Callers of this function are responsible that these preconditions are
+    /// satisfied:
+    ///
+    /// * The starting index must not exceed the ending index;
+    /// * Indexes must be within bounds of the original `LocalMr`.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) unsafe fn take_unchecked(mut self, i: Range<usize>) -> Self {
+        self.addr = self.addr.wrapping_add(i.start);
+        self.len = i.end.wrapping_sub(i.start);
+        self
     }
 }
 

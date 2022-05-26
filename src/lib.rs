@@ -1202,7 +1202,7 @@ impl Rdma {
     ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
     ///     // request a mr located in server.
     ///     let rmr = rdma
-    ///         .request_remote_mr_with_timeout(Layout::new::<Data>(), Duration::from_secs(1))
+    ///         .request_remote_mr_with_timeout(Layout::new::<Data>(), Duration::from_secs(10))
     ///         .await?;
     ///     assert!(!rmr.timeout_check());
     ///     // do something with rmr like `write` data into it.

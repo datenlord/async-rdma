@@ -31,6 +31,7 @@ mod tests {
     use crate::{io, Arc, Context};
 
     #[test]
+    #[ignore = "not yet implemented"]
     fn test_create() -> io::Result<()> {
         let ctx = Arc::new(Context::open(None, 1, 0)?);
         let pd = Arc::new(ctx.create_protection_domain()?);

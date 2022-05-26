@@ -56,6 +56,7 @@ rdma link | grep $RXE_DEV
 
 # Cargo run async-rdma with unlimited locked-memory
 sudo env "PATH=$PATH" bash -c "
+    set -e
     ulimit -l unlimited &&
     rustup default $1 && 
     cargo build

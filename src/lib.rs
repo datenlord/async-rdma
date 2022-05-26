@@ -1112,6 +1112,71 @@ impl Rdma {
     /// ```
     #[inline]
     pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMr> {
+        self.allocator.alloc_zeroed(&layout)
+    }
+
+    /// Allocate a local memory region that has not been initialized
+    ///
+    /// You can use local mr to `send`&`receive` or `read`&`write` with a remote mr.
+    /// The parameter `layout` can be obtained by `Layout::new::<Data>()`.
+    /// You can learn the way to write or read data in mr in the following example.
+    ///
+    /// # Safety
+    ///
+    /// The newly allocated memory in this `LocalMr` is uninitialized.
+    /// Initialize it before using to make it safe.
+    ///
+    /// # Examples
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaListener};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// struct Data(String);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Rdma::connect(addr, 1, 1, 512).await?;
+    ///     let mut lmr = unsafe { rdma.alloc_local_mr_uninit(Layout::new::<Data>())? };
+    ///     // put data into lmr
+    ///     unsafe { *(*lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    ///     // send the content of lmr to server
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_listener = RdmaListener::bind(addr).await?;
+    ///     let rdma = rdma_listener.accept(1, 1, 512).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive().await?;
+    ///     // assert data in the lmr
+    ///     unsafe {
+    ///         assert_eq!(
+    ///             "hello world".to_string(),
+    ///             *(*(*lmr.as_ptr() as *const Data)).0
+    ///         )
+    ///     };
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub unsafe fn alloc_local_mr_uninit(&self, layout: Layout) -> io::Result<LocalMr> {
         self.allocator.alloc(&layout)
     }
 

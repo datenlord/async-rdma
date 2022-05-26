@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::ops::Bound::Included;
 use std::{alloc::Layout, io, ptr, sync::Arc};
-use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA};
+use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_ZERO};
 use tracing::{debug, error};
 
 /// Get default extent hooks from arena0
@@ -108,17 +108,38 @@ impl MrAllocator {
         Self { _pd: pd, arena_ind }
     }
 
+    /// Allocate an uninitialized `LocalMr` according to the `layout`
+    ///
+    /// # Safety
+    ///
+    /// The newly allocated memory in this `LocalMr` is uninitialized.
+    /// Initialize it before using to make it safe.
+    #[allow(clippy::as_conversions)]
+    pub(crate) unsafe fn alloc(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        let inner = self.alloc_inner(layout, 0)?;
+        Ok(LocalMr::new(inner))
+    }
+
     /// Allocate a `LocalMr` according to the `layout`
     #[allow(clippy::as_conversions)]
-    pub(crate) fn alloc(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        let inner = self.alloc_inner(layout)?;
+    pub(crate) fn alloc_zeroed(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        // SAFETY: alloc zeroed memory is safe
+        let inner = unsafe { self.alloc_inner(layout, MALLOCX_ZERO)? };
         Ok(LocalMr::new(inner))
     }
 
     /// Allocate a `LocalMrInner` according to the `layout`
+    ///
+    /// # Safety
+    ///
+    /// This func is safe when `zeroed == true`, otherwise newly allocated memory in the `LocalMrInner` is uninitialized.
     #[allow(clippy::as_conversions)]
-    pub(crate) fn alloc_inner(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMrInner> {
-        self.alloc_from_je(layout).map_or_else(||{
+    pub(crate) unsafe fn alloc_inner(
+        self: &Arc<Self>,
+        layout: &Layout,
+        flag: i32,
+    ) -> io::Result<LocalMrInner> {
+        self.alloc_from_je(layout, flag).map_or_else(||{
                 Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
             }, |addr|{
                 let raw_mr = self.lookup_raw_mr(addr as usize);
@@ -127,14 +148,16 @@ impl MrAllocator {
     }
 
     /// Alloc memory for RDMA operations from jemalloc
-    fn alloc_from_je(&self, layout: &Layout) -> Option<*mut u8> {
-        // SAFETY: unsoundness
-        // BUG: unsound internal api
-        // Exporting uninitialized memory
-        let addr = unsafe {
+    ///
+    /// # Safety
+    ///
+    /// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
+    unsafe fn alloc_from_je(&self, layout: &Layout, flag: i32) -> Option<*mut u8> {
+        let addr = {
             tikv_jemalloc_sys::mallocx(
                 layout.size(),
-                (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(self.arena_ind.cast())).cast(),
+                (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(self.arena_ind.cast()) | flag)
+                    .cast(),
             )
         };
         if addr.is_null() {
@@ -502,7 +525,7 @@ pub(crate) fn register_extent_mr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{context::Context, MrAccess, RdmaBuilder};
+    use crate::{context::Context, LocalMrReadAccess, MrAccess, RdmaBuilder};
     use std::{alloc::Layout, io, thread};
     use tikv_jemalloc_sys::MALLOCX_ALIGN;
 
@@ -527,7 +550,7 @@ mod tests {
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(pd));
         let layout = Layout::new::<char>();
-        let lmr = allocator.alloc(&layout)?;
+        let lmr = allocator.alloc_zeroed(&layout)?;
         debug!("lmr info :{:?}", &lmr);
         Ok(())
     }
@@ -648,19 +671,19 @@ mod tests {
         let mut layout = Layout::new::<char>();
         // alloc and drop one by one
         for _ in 0_u32..100_u32 {
-            let _lmr = allocator.alloc(&layout)?;
+            let _lmr = allocator.alloc_zeroed(&layout)?;
         }
         // alloc all and drop all
         layout = Layout::new::<[u8; 16 * 1024]>();
         let mut lmrs = vec![];
         for _ in 0_u32..100_u32 {
-            lmrs.push(allocator.alloc(&layout)?);
+            lmrs.push(allocator.alloc_zeroed(&layout)?);
         }
         // jemalloc will merge extents after drop all lmr in lmrs.
         lmrs.clear();
         // alloc big extent and dalloc it immediately after _lmr's dropping
         layout = Layout::new::<[u8; 1024 * 1024 * 32]>();
-        let _lmr = allocator.alloc(&layout)?;
+        let _lmr = allocator.alloc_zeroed(&layout)?;
         Ok(())
     }
 
@@ -716,5 +739,16 @@ mod tests {
             );
         }
         thread.join().unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn zeroed_test() -> io::Result<()> {
+        let ctx = Arc::new(Context::open(None, 1, 1)?);
+        let pd = Arc::new(ctx.create_protection_domain()?);
+        let allocator = Arc::new(MrAllocator::new(pd));
+        let lmr = allocator.alloc_zeroed(&Layout::new::<[u8; 10]>()).unwrap();
+        assert_eq!(*lmr.as_slice(), [0_u8; 10]);
+        Ok(())
     }
 }

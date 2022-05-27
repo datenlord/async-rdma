@@ -196,6 +196,9 @@ where
     ibv_sge {
         addr: lmr.addr().cast(),
         length: lmr.length().cast(),
-        lkey: lmr.lkey_unchecked(),
+        // FIXME: turn to `unsafe` if use this fn as a pub API or `lkry` can be changed.
+        // SAFETY: no date race if just use this methord during wr processing. But in fact, this fn
+        // itself does not guarantee safety, it should depend on the context in which it is used.
+        lkey: unsafe { lmr.lkey_unchecked() },
     }
 }

@@ -354,7 +354,8 @@ impl QueuePair {
                 "post_send addr {}, len {}, lkey {} wrid: {}",
                 lm.addr(),
                 lm.length(),
-                lm.lkey_unchecked(),
+                // SAFETY: no date race here
+                unsafe { lm.lkey_unchecked() },
                 sr.as_ref().wr_id,
             );
         }
@@ -388,7 +389,8 @@ impl QueuePair {
                 "post_recv addr {}, len {}, lkey {} wrid: {}",
                 lm.addr(),
                 lm.length(),
-                lm.lkey_unchecked(),
+                // SAFETY: no date race here
+                unsafe { lm.lkey_unchecked() },
                 rr.as_ref().wr_id,
             );
         }
@@ -423,7 +425,8 @@ impl QueuePair {
                 "post_send addr {}, len {}, lkey {} wrid: {}",
                 lm.addr(),
                 lm.length(),
-                lm.lkey_unchecked(),
+                // SAFETY: no date race here
+                unsafe { lm.lkey_unchecked() },
                 sr.as_ref().wr_id,
             );
         }
@@ -464,7 +467,8 @@ impl QueuePair {
                 "post_send addr {}, len {}, lkey_unchecked {} wrid: {}",
                 lm.addr(),
                 lm.length(),
-                lm.lkey_unchecked(),
+                // SAFETY: no date race here
+                unsafe { lm.lkey_unchecked() },
                 sr.as_ref().wr_id,
             );
         }

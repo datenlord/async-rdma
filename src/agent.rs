@@ -130,7 +130,8 @@ impl Agent {
         mr: LocalMr,
         timeout: Duration,
     ) -> io::Result<()> {
-        let token = mr.token_with_timeout(timeout).map_or_else(
+        // SAFETY: no date race here
+        let token = unsafe { mr.token_with_timeout_unchecked(timeout) }.map_or_else(
             || {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -348,7 +349,8 @@ impl AgentThread {
                 .qp
                 .receive_sge(&[&mut header_buf, &mut data_buf])
                 .await?;
-            if imm.is_some() && header_buf.as_slice_unchecked() == CLEAN_STATE {
+            // SAFETY: the mr is readable here without cancel safety issue
+            if imm.is_some() && unsafe { header_buf.as_slice_unchecked() } == CLEAN_STATE {
                 debug!("write with immediate data : {:?}", imm);
                 // imm was checked by `is_some()`
                 #[allow(clippy::unwrap_used)]
@@ -356,7 +358,8 @@ impl AgentThread {
                 continue;
             }
             let message =
-                bincode::deserialize(header_buf.as_slice_unchecked().get(..).ok_or_else(|| {
+                // SAFETY: the mr is readable here without cancel safety issue
+                bincode::deserialize(unsafe {header_buf.as_slice_unchecked()}.get(..).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::Other,
                         format!(
@@ -422,7 +425,8 @@ impl AgentThread {
                     &Layout::from_size_align(param.size, param.align)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
                 )?;
-                let token = mr.token_with_timeout(param.timeout).map_or_else(
+                // SAFETY: no date race here
+                let token = unsafe { mr.token_with_timeout_unchecked(param.timeout) }.map_or_else(
                     || {
                         Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -644,7 +648,8 @@ impl AgentInner {
             .alloc_zeroed(unsafe {
                 &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
             })?;
-        let cursor = Cursor::new(header_buf.as_mut_slice_unchecked());
+        // SAFETY: the mr is writeable here without cancel safety issue
+        let cursor = Cursor::new(unsafe { header_buf.as_mut_slice_unchecked() });
         let message = Message::Request(req);
         // FIXME: serialize udpate
         bincode::serialize_into(cursor, &message)
@@ -676,7 +681,8 @@ impl AgentInner {
                 &Layout::from_size_align_unchecked(*RESPONSE_HEADER_MAX_LEN, 1)
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let cursor = Cursor::new(header.as_mut_slice_unchecked());
+        // SAFETY: the mr is readable here without cancel safety issue
+        let cursor = Cursor::new(unsafe { header.as_mut_slice_unchecked() });
         let message = Message::Response(response);
         let msz = bincode::serialized_size(&message)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?

@@ -139,6 +139,14 @@ impl MrAllocator {
         layout: &Layout,
         flag: i32,
     ) -> io::Result<LocalMrInner> {
+        // check to ensure the safety requirements of `slice` methords
+        if layout.size() > isize::MAX.cast() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the size of mr must be no larger than isize::MAX",
+            ));
+        }
+
         self.alloc_from_je(layout, flag).map_or_else(||{
                 Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
             }, |addr|{

@@ -60,8 +60,7 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
     #[inline]
     #[allow(clippy::as_conversions)]
     fn as_slice(&self) -> MappedRwLockReadGuard<&[u8]> {
-        // SAFETY: unsoundness
-        // BUG: unsound public api
+        // SAFETY: memory of this mr should have been initialized
         MappedRwLockReadGuard::map(self.as_ptr(), |ptr| unsafe {
             slice::from_raw_parts(ptr, self.length())
         })
@@ -76,8 +75,7 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
         self.try_as_ptr().map_or_else(
             || None,
             |guard| {
-                // SAFETY: unsoundness
-                // BUG: unsound public api
+                // SAFETY: memory of this mr should have been initialized
                 return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts(ptr, self.length())
                 }));
@@ -89,11 +87,11 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
     ///
     /// # Safety
     ///
-    /// Make sure the mr is readable without cancel safety issue
+    /// * Make sure the mr is readable without cancel safety issue.
+    /// * The memory of this mr is initialized.
+    /// * The total size of this mr of the slice must be no larger than `isize::MAX`.
     #[inline]
     unsafe fn as_slice_unchecked(&self) -> &[u8] {
-        // SAFETY: unsoundness
-        // BUG: unsound public api
         slice::from_raw_parts(self.as_ptr_unchecked(), self.length())
     }
 
@@ -229,7 +227,7 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     ///
     /// # Safety
     ///
-    /// make sure the mr is writeable without cancel safety issue
+    /// Make sure the mr is writeable without cancel safety issue
     #[inline]
     #[allow(clippy::as_conversions)]
     fn as_mut_ptr_unchecked(&mut self) -> *mut u8 {
@@ -244,8 +242,7 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     #[allow(clippy::as_conversions)]
     fn as_mut_slice(&mut self) -> MappedRwLockWriteGuard<&mut [u8]> {
         let len = self.length();
-        // SAFETY: unsoundness
-        // BUG: unsound public api
+        // SAFETY: memory of this mr should have been initialized
         MappedRwLockWriteGuard::map(self.as_mut_ptr(), |ptr| unsafe {
             slice::from_raw_parts_mut(ptr, len)
         })
@@ -260,8 +257,7 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
         self.try_as_mut_ptr().map_or_else(
             || None,
             |guard| {
-                // SAFETY: unsoundness
-                // BUG: unsound public api
+                // SAFETY: memory of this mr should have been initialized
                 return Some(MappedRwLockWriteGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts_mut(ptr, self.length())
                 }));
@@ -273,11 +269,11 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     ///
     /// # Safety
     ///
-    /// make sure the mr is writeable without cancel safety issue
+    /// * Make sure the mr is writeable without cancel safety issue.
+    /// * The memory of this mr is initialized.
+    /// * The total size of this mr of the slice must be no larger than `isize::MAX`.
     #[inline]
     unsafe fn as_mut_slice_unchecked(&mut self) -> &mut [u8] {
-        // SAFETY: unsoundness
-        // BUG: unsound public api
         slice::from_raw_parts_mut(self.as_mut_ptr_unchecked(), self.length())
     }
 

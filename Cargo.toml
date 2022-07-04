@@ -6,7 +6,7 @@ keywords = ["rdma", "network"]
 license-file = "LICENSE"
 name = "async-rdma"
 repository = "https://github.com/datenlord/async-rdma"
-version = "0.2.0"
+version = "0.3.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -30,7 +30,7 @@ scopeguard = "1.1.0"
 serde = { version = "1.0.130", features = ["derive"] }
 thiserror = "1.0.30"
 tikv-jemalloc-sys = "0.4.3"
-tokio = { version = "1.15", features = ["full", "tracing"] }
+tokio = { version = "1.15", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3.9"
 sealed = "0.4"

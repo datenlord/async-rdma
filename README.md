@@ -138,7 +138,7 @@ async fn client(addr: SocketAddrV4) -> io::Result<()> {
     let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
     let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
     // then send this mr to server to make server aware of this mr.
-    unsafe { *(lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
+    unsafe { *(*lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
     rdma.write(&lmr, &mut rmr).await?;
     // send the content of lmr to server
     rdma.send_remote_mr(rmr).await?;
@@ -151,7 +151,7 @@ async fn server(addr: SocketAddrV4) -> io::Result<()> {
     let rdma = rdma_listener.accept(1, 1, 512).await?;
     let lmr = rdma.receive_local_mr().await?;
     // print the content of lmr, which was `write` by client
-    unsafe { println!("{}", &*(*(lmr.as_ptr() as *const Data)).0) };
+    unsafe { println!("{}", &*(*(*lmr.as_ptr() as *const Data)).0) };
     Ok(())
 }
 

@@ -1,5 +1,48 @@
 # ChangeLog
 
+## 0.3.0
+
+  In this release, we adapted `Jemalloc` to manage RDMA memory region to improve memory
+  allocation efficiency.
+
+  Some safety and performance issues have been fixed, thanks to @Nugine's comments.
+
+### New features
+
+* `Jemalloc` was adapted to manage memory region. We inject custom extent hooks into `Jemalloc`
+  to empower it to manage `RawMr`s. That avoids the overhead of repeatedly reg/dereg memory region.
+  Use `BTreeMap` to record the relationship between `addr` and `RawMr`. When we alloc memory from
+  `Jemalloc`, `mr_allocator` will lookup the related `RawMr` by `addr`.
+* Add timeout mechanism for `RemoteMr`. Request `RemoteMr` from remote without timeout may cause
+  remote OOM. So we add `RemoteMrManager` to manage `RemoteMr` and free them after timeout.
+
+### Optimizations and refactors
+
+* Avoid unnecessary overflow checking operations to improve performance.
+* Optimize cq poll work flow. Poll single `CQE` at a time is inefficient in high concurrency.
+  Here we made the maximum number of `CQE` to poll at a time configurable. Accordingly,
+  `event_listener` should be able to wake up multiple tasks at a time.
+* Redesign `LocalMr` and `event_listener` to ensure cancel safety. Let `event_listener` holds
+  the `Arc`s of the `LocalMrInner`s that are being used by RDMA ops to ensure cancel safety.
+  `LocalMr` was replaced with new struct `LocalMrInner`. Because every struct that can use APIs
+  should hold an `Arc` of the mr's metadata, but previous `LocalMr` can't hold itself. Add `RwLock`
+  to avoid potential race condition.
+* Add zeroed `LocalMr` API. Uninitialized memory region is fast but not safe, so we add zeroed API
+  and mark uninitialized memory alloc API as unsafe.
+
+### Bug fixes
+
+* Fix `Gid` impl that used to have alignment mismatch bug.
+* Fix the handling of return values of ibv APIs. Most ibv APIs return -1 or NULL on error
+  and if the call fails, errno will be set to indicate the reason for the failure.But there
+  are some places treat the return value as errno, we fixed these wrong handlings.
+* Ensure cancel safety. Undefined behavior will happen if the future dropped(cancelled)
+  during the execution of RDMA operations. So we redesign `LocalMr` and `event_listener` to
+  hold `Arc` of memory regions until the operations are complete.
+* Mark unsafe traits and functions. The safety of access traits and functions cannot be guaranteed
+  by themselves. So we need to mark them as unsafe. And the unsafe traits are marked as `sealed` to
+  avoid being unsafely impl externally.
+
 ## 0.2.0
 
   In this release, the code related to `memory region` has been reorganized.

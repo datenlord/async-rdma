@@ -40,5 +40,11 @@ const-str = "0.3.1"
 minstant = "0.1"
 portpicker = "0.1.1"
 
+[[example]]
+name = "cm_client"
+required-features = ["cm", "raw"]
+
 [features]
 cancel_safety_test = [] # only used for cancel_safety test
+raw = [] # send/recv raw data
+cm = [] # connect cm server

@@ -175,8 +175,7 @@ impl WorkCompletion {
                 // use union to get imm_data after check opcode.
                 Ok((
                     len,
-                    // SAFETY: ?
-                    // TODO: check safety
+                    // SAFETY: imm flag was checked
                     Some(unsafe { self.inner_wc.imm_data_invalidated_rkey_union.imm_data }),
                 ))
             } else {

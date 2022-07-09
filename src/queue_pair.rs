@@ -186,7 +186,7 @@ pub(crate) struct QueuePair {
     /// protection domain it belongs to
     pd: Arc<ProtectionDomain>,
     /// event listener
-    event_listener: EventListener,
+    pub(crate) event_listener: EventListener,
     /// internal `ibv_qp` pointer
     inner_qp: NonNull<ibv_qp>,
     /// port number
@@ -494,6 +494,30 @@ impl QueuePair {
         QueuePairOps::new(Arc::<Self>::clone(self), send, get_lmr_inners(lms))
     }
 
+    /// Send raw data
+    #[cfg(feature = "raw")]
+    pub(crate) async fn send_sge_raw<'a, LR>(
+        self: &Arc<Self>,
+        lms: &'a [&'a LR],
+        imm: Option<u32>,
+    ) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+    {
+        let (wr_id, mut resp_rx) = self
+            .event_listener
+            .register_for_read(&get_lmr_inners(lms))?;
+        let len = lms.iter().map(|lm| lm.length()).sum();
+        self.submit_send(lms, wr_id, imm)?;
+        resp_rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            .result()
+            .map(|sz| assert_eq!(sz, len))
+            .map_err(Into::into)
+    }
+
     /// receive data to a local memory region
     pub(crate) fn receive_sge<'a, LW>(
         self: &Arc<Self>,
@@ -504,6 +528,32 @@ impl QueuePair {
     {
         let recv = QPRecv::new(lms);
         QueuePairOps::new(Arc::<Self>::clone(self), recv, get_mut_lmr_inners(lms))
+    }
+
+    /// Receive raw data
+    #[cfg(feature = "raw")]
+    pub(crate) async fn receive_sge_raw<'a, LW>(
+        self: &Arc<Self>,
+        lms: &'a [&'a mut LW],
+    ) -> io::Result<Option<u32>>
+    where
+        LW: LocalMrWriteAccess,
+    {
+        let (wr_id, mut resp_rx) = self
+            .event_listener
+            .register_for_write(&get_mut_lmr_inners(lms))?;
+        let len = lms.iter().map(|lm| lm.length()).sum();
+        self.submit_receive(lms, wr_id)?;
+        resp_rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
+            .result_with_imm()
+            .map(|(sz, imm)| {
+                assert_eq!(sz, len);
+                imm
+            })
+            .map_err(Into::into)
     }
 
     /// read data from `rm` to `lms`

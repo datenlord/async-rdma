@@ -20,6 +20,8 @@ elif [ `ifconfig -s | grep -c '^e'` -gt 1 ]; then
 fi
 
 ETH_DEV=`ifconfig -s | grep '^e' | cut -d ' ' -f 1 | head -n 1`
+ETH_IP=`ifconfig $ETH_DEV | grep inet | grep -v inet6 | awk '{print $2}' | tr -d "addr:"`
+CM_PORT=7471
 
 HOST_IP=`ifconfig $ETH_DEV | grep 'inet ' | awk '{print $2}'`
 SRV_PORT=9527
@@ -67,6 +69,9 @@ sudo env "PATH=$PATH" bash -c "
     sleep 1
     target/debug/examples/client
     sleep 1
+    cargo run --example cm_server &
+    sleep 1
+    cargo run --features="cm raw" --example cm_client $ETH_IP $CM_PORT
 "
 
 # Test soft-roce

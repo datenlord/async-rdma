@@ -162,6 +162,8 @@ use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
+#[cfg(feature = "cm")]
+use error_utilities::log_ret_last_os_err;
 use event_listener::EventListener;
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
@@ -172,7 +174,14 @@ use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{QueuePair, QueuePairEndpoint};
 use rdma_sys::ibv_access_flags;
+#[cfg(feature = "cm")]
+use rdma_sys::{
+    rdma_addrinfo, rdma_cm_id, rdma_connect, rdma_create_ep, rdma_disconnect, rdma_freeaddrinfo,
+    rdma_getaddrinfo, rdma_port_space,
+};
 use rmr_manager::DEFAULT_RMR_TIMEOUT;
+#[cfg(feature = "cm")]
+use std::ptr::null_mut;
 use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -223,6 +232,10 @@ pub struct RdmaBuilder {
     /// Maximum number of completion queue entries (CQE) to poll at a time.
     /// The higher the concurrency, the bigger this value should be and more memory allocated at a time.
     max_cqe: i32,
+    /// Connection type
+    conn_type: ConnectionType,
+    /// If send/recv raw data
+    raw: bool,
 }
 
 impl RdmaBuilder {
@@ -251,6 +264,8 @@ impl RdmaBuilder {
             self.max_cqe,
             self.port_num,
             self.gid_index,
+            self.conn_type,
+            self.raw,
         )
     }
 
@@ -283,6 +298,22 @@ impl RdmaBuilder {
     #[must_use]
     pub fn set_port_num(mut self, port_num: u8) -> Self {
         self.port_num = port_num;
+        self
+    }
+
+    /// Set the connection type
+    #[inline]
+    #[must_use]
+    pub fn set_conn_type(mut self, conn_type: ConnectionType) -> Self {
+        self.conn_type = conn_type;
+        self
+    }
+
+    /// Set if send/recv raw data
+    #[inline]
+    #[must_use]
+    pub fn set_raw(mut self, raw: bool) -> Self {
+        self.raw = raw;
         self
     }
 
@@ -345,8 +376,19 @@ impl Default for RdmaBuilder {
             gid_index: 0,
             port_num: 1,
             max_cqe: DEFAULT_MAX_CQE,
+            conn_type: ConnectionType::RCSocket,
+            raw: false,
         }
     }
+}
+
+/// Method of establishing a connection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// Establish reliable connection through `Socket` APIs.
+    RCSocket,
+    /// Establish reliable connection through `CM` APIs.
+    RCCM,
 }
 
 /// Rdma handler, the only interface that the users deal with rdma
@@ -364,10 +406,15 @@ pub struct Rdma {
     qp: Arc<QueuePair>,
     /// Background agent
     agent: Option<Arc<Agent>>,
+    /// Connection type
+    conn_type: ConnectionType,
+    /// If send/recv raw data
+    raw: bool,
 }
 
 impl Rdma {
     /// create a new `Rdma` instance
+    #[allow(clippy::too_many_arguments)] // TODO: fix with builder pattern
     fn new(
         dev_name: Option<&str>,
         access: ibv_access_flags,
@@ -375,6 +422,8 @@ impl Rdma {
         max_cqe: i32,
         port_num: u8,
         gid_index: usize,
+        conn_type: ConnectionType,
+        raw: bool,
     ) -> io::Result<Self> {
         let ctx = Arc::new(Context::open(dev_name, port_num, gid_index)?);
         let ec = ctx.create_event_channel()?;
@@ -396,6 +445,8 @@ impl Rdma {
             qp,
             agent: None,
             allocator,
+            conn_type,
+            raw,
         })
     }
 
@@ -479,6 +530,20 @@ impl Rdma {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
             .send_data(lm, None)
             .await
+    }
+
+    /// Send raw data in the lm
+    #[cfg(feature = "raw")]
+    #[inline]
+    pub async fn send_raw(&self, lm: &LocalMr) -> io::Result<()> {
+        self.qp.send_sge_raw(&[lm], None).await
+    }
+
+    /// Send raw data in the lm with imm
+    #[cfg(feature = "raw")]
+    #[inline]
+    pub async fn send_raw_with_imm(&self, lm: &LocalMr, imm: u32) -> io::Result<()> {
+        self.qp.send_sge_raw(&[lm], Some(imm)).await
     }
 
     /// Send the content in the `lm` with immediate date.
@@ -620,6 +685,24 @@ impl Rdma {
     pub async fn receive(&self) -> io::Result<LocalMr> {
         let (lmr, _) = self.receive_with_imm().await?;
         Ok(lmr)
+    }
+
+    /// Receive raw data
+    #[cfg(feature = "raw")]
+    #[inline]
+    pub async fn receive_raw(&self, layout: Layout) -> io::Result<LocalMr> {
+        let mut lmr = self.alloc_local_mr(layout)?;
+        let _imm = self.qp.receive_sge_raw(&[&mut lmr]).await?;
+        Ok(lmr)
+    }
+
+    /// Receive raw data with imm
+    #[cfg(feature = "raw")]
+    #[inline]
+    pub async fn receive_raw_with_imm(&self, layout: Layout) -> io::Result<(LocalMr, Option<u32>)> {
+        let mut lmr = self.alloc_local_mr(layout)?;
+        let imm = self.qp.receive_sge_raw(&[&mut lmr]).await?;
+        Ok((lmr, imm))
     }
 
     /// Receive the content and stored in the returned memory region.
@@ -1027,6 +1110,10 @@ impl Rdma {
             .set_port_num(port_num)
             .set_gid_index(gid_index)
             .build()?;
+        assert!(
+            rdma.conn_type == ConnectionType::RCSocket,
+            "should set connection type to RCSocket"
+        );
         let mut stream = TcpStream::connect(addr).await?;
         let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
             io::Error::new(
@@ -1044,12 +1131,116 @@ impl Rdma {
             )
         })?;
         rdma.qp_handshake(remote)?;
-        let agent = Arc::new(Agent::new(
-            Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MrAllocator>::clone(&rdma.allocator),
-            max_message_length,
-        )?);
-        rdma.agent = Some(agent);
+        if !rdma.raw {
+            let agent = Arc::new(Agent::new(
+                Arc::<QueuePair>::clone(&rdma.qp),
+                Arc::<MrAllocator>::clone(&rdma.allocator),
+                max_message_length,
+            )?);
+            rdma.agent = Some(agent);
+        }
+        // wait for server to initialize
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(rdma)
+    }
+
+    /// Establish connection with CM server.
+    #[cfg(feature = "cm")]
+    #[inline]
+    pub async fn cm_connect(
+        node: &str,
+        service: &str,
+        port_num: u8,
+        gid_index: usize,
+        max_message_length: usize,
+    ) -> io::Result<Self> {
+        let mut rdma = RdmaBuilder::default()
+            .set_port_num(port_num)
+            .set_gid_index(gid_index)
+            .set_raw(true)
+            .set_conn_type(ConnectionType::RCCM)
+            .build()?;
+        assert!(
+            rdma.conn_type == ConnectionType::RCCM,
+            "should set connection type to RCSocket"
+        );
+
+        // SAFETY: POD FFI type
+        let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+        let mut info: *mut rdma_addrinfo = null_mut();
+        hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
+        // Safety: ffi
+        let mut ret = unsafe {
+            rdma_getaddrinfo(
+                node.as_ptr().cast(),
+                service.as_ptr().cast(),
+                &hints,
+                &mut info,
+            )
+        };
+        if ret != 0_i32 {
+            return Err(log_ret_last_os_err());
+        }
+
+        let mut id: *mut rdma_cm_id = null_mut();
+        // Safety: ffi
+        ret = unsafe { rdma_create_ep(&mut id, info, rdma.pd.as_ptr(), null_mut()) };
+        if ret != 0_i32 {
+            // Safety: ffi
+            unsafe {
+                rdma_freeaddrinfo(info);
+            }
+            return Err(log_ret_last_os_err());
+        }
+
+        // Safety: id was initialized by `rdma_create_ep`
+        unsafe {
+            debug!(
+                "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+                (*id).qp,
+                (*id).pd,
+                (*id).verbs,
+                (*id).recv_cq_channel,
+                (*id).send_cq_channel,
+                (*id).recv_cq,
+                (*id).send_cq
+            );
+            (*id).qp = rdma.qp.as_ptr();
+            (*id).pd = rdma.pd.as_ptr();
+            (*id).verbs = rdma.ctx.as_ptr();
+            (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+            (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+            (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
+            (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
+            debug!(
+                "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+                (*id).qp,
+                (*id).pd,
+                (*id).verbs,
+                (*id).recv_cq_channel,
+                (*id).send_cq_channel,
+                (*id).recv_cq,
+                (*id).send_cq
+            );
+        }
+
+        // Safety: ffi
+        ret = unsafe { rdma_connect(id, null_mut()) };
+        if ret != 0_i32 {
+            // Safety: ffi
+            unsafe {
+                let _ = rdma_disconnect(id);
+            }
+            return Err(log_ret_last_os_err());
+        }
+        if !rdma.raw {
+            let agent = Arc::new(Agent::new(
+                Arc::<QueuePair>::clone(&rdma.qp),
+                Arc::<MrAllocator>::clone(&rdma.allocator),
+                max_message_length,
+            )?);
+            rdma.agent = Some(agent);
+        }
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
@@ -1757,6 +1948,10 @@ impl RdmaListener {
             .set_port_num(port_num)
             .set_gid_index(gid_index)
             .build()?;
+        assert!(
+            rdma.conn_type == ConnectionType::RCSocket,
+            "should set connection type to RCSocket"
+        );
         let endpoint_size = bincode::serialized_size(&rdma.endpoint()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
@@ -1781,12 +1976,14 @@ impl RdmaListener {
         stream.write_all(&local).await?;
         rdma.qp_handshake(remote)?;
         debug!("handshake done");
-        let agent = Arc::new(Agent::new(
-            Arc::<QueuePair>::clone(&rdma.qp),
-            Arc::<MrAllocator>::clone(&rdma.allocator),
-            max_message_length,
-        )?);
-        rdma.agent = Some(agent);
+        if !rdma.raw {
+            let agent = Arc::new(Agent::new(
+                Arc::<QueuePair>::clone(&rdma.qp),
+                Arc::<MrAllocator>::clone(&rdma.allocator),
+                max_message_length,
+            )?);
+            rdma.agent = Some(agent);
+        }
         // wait for the remote agent to prepare
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)

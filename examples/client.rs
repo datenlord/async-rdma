@@ -9,7 +9,7 @@
 //!
 //!     cargo run --example client
 
-use async_rdma::{LocalMrWriteAccess, Rdma};
+use async_rdma::{LocalMrWriteAccess, Rdma, RdmaBuilder};
 use std::alloc::Layout;
 use tracing::debug;
 
@@ -37,7 +37,10 @@ async fn send_data_to_server(rdma: &Rdma) {
 async fn main() {
     tracing_subscriber::fmt::init();
     debug!("client start");
-    let rdma = Rdma::connect("127.0.0.1:5555", 1, 1, 512).await.unwrap();
+    let rdma = RdmaBuilder::default()
+        .connect("127.0.0.1:5555")
+        .await
+        .unwrap();
     send_lmr_to_server(&rdma).await;
     request_then_write(&rdma).await;
     send_data_to_server(&rdma).await;

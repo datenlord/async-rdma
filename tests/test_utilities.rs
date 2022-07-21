@@ -1,12 +1,8 @@
-use async_rdma::{Rdma, RdmaListener};
+use async_rdma::{Rdma, RdmaBuilder};
 use futures::Future;
 use portpicker::pick_unused_port;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::{io, net::ToSocketAddrs};
-
-const PORT_NUM: u8 = 1;
-const GID_INDEX: usize = 1;
-const MAX_MSG_LEN: usize = 128;
 
 type RdmaFn<R> = fn(Rdma) -> R;
 
@@ -15,10 +11,7 @@ async fn server_wrapper<A: ToSocketAddrs, R: Future<Output = Result<(), io::Erro
     addr: A,
     f: RdmaFn<R>,
 ) -> io::Result<()> {
-    let rdma = RdmaListener::bind(addr)
-        .await?
-        .accept(PORT_NUM, GID_INDEX, MAX_MSG_LEN)
-        .await?;
+    let rdma = RdmaBuilder::default().listen(addr).await?;
     f(rdma).await
 }
 
@@ -27,7 +20,7 @@ async fn client_wrapper<A: ToSocketAddrs, R: Future<Output = Result<(), io::Erro
     addr: A,
     f: RdmaFn<R>,
 ) -> io::Result<()> {
-    let rdma = Rdma::connect(addr, PORT_NUM, GID_INDEX, MAX_MSG_LEN).await?;
+    let rdma = RdmaBuilder::default().connect(addr).await?;
     f(rdma).await
 }
 

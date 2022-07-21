@@ -38,6 +38,9 @@ use tracing::{debug, error, trace};
 /// Maximum time for waiting for a response
 static RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum length of message send/recv by Agent
+pub(crate) static MAX_MSG_LEN: usize = 512;
+
 /// An agent for handling the dirty rdma request and async events
 #[derive(Debug)]
 pub(crate) struct Agent {

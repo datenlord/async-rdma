@@ -157,7 +157,7 @@ mod rmr_manager;
 /// Work Request wrapper
 mod work_request;
 
-use agent::Agent;
+use agent::{Agent, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
@@ -298,6 +298,22 @@ impl Default for QPInitAttr {
     }
 }
 
+/// initial Agent attributes
+#[derive(Debug, Clone, Copy)]
+pub struct AgentInitAttr {
+    /// Max length of message send/recv by Agent
+    max_message_length: usize,
+}
+
+impl Default for AgentInitAttr {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            max_message_length: MAX_MSG_LEN,
+        }
+    }
+}
+
 /// The builder for the `Rdma`, it follows the builder pattern.
 #[derive(Default)]
 pub struct RdmaBuilder {
@@ -307,6 +323,8 @@ pub struct RdmaBuilder {
     cq_attr: CQInitAttr,
     /// initial QP attributes
     qp_attr: QPInitAttr,
+    /// initial Agent attributes
+    agent_attr: AgentInitAttr,
 }
 
 impl RdmaBuilder {
@@ -334,6 +352,196 @@ impl RdmaBuilder {
             self.cq_attr,
             self.qp_attr,
         )
+    }
+
+    /// Establish connection with RDMA server
+    #[inline]
+    pub async fn connect<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
+        match self.qp_attr.conn_type {
+            ConnectionType::RCSocket => {
+                let mut rdma = self.build()?;
+                let mut stream = TcpStream::connect(addr).await?;
+                let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("failed to serailize the endpoint, {:?}", e),
+                    )
+                })?;
+                stream.write_all(&endpoint).await?;
+                // the byte number is not important, as read_exact will fill the buffer
+                let _ = stream.read_exact(endpoint.as_mut()).await?;
+                let remote: QueuePairEndpoint = bincode::deserialize(&endpoint).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("failed to deserailize the endpoint, {:?}", e),
+                    )
+                })?;
+                rdma.qp_handshake(remote)?;
+                if !rdma.raw {
+                    let agent = Arc::new(Agent::new(
+                        Arc::<QueuePair>::clone(&rdma.qp),
+                        Arc::<MrAllocator>::clone(&rdma.allocator),
+                        self.agent_attr.max_message_length,
+                    )?);
+                    rdma.agent = Some(agent);
+                    // wait for remote agent to initialize
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(rdma)
+            }
+            ConnectionType::RCCM => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXSocket",
+            )),
+        }
+    }
+
+    /// Establish connection with RDMA CM server
+    #[inline]
+    #[cfg(feature = "cm")]
+    pub async fn cm_connect(self, node: &str, service: &str) -> io::Result<Rdma> {
+        match self.qp_attr.conn_type {
+            ConnectionType::RCSocket => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXSocket",
+            )),
+            ConnectionType::RCCM => {
+                let msg_len = self.agent_attr.max_message_length;
+                let mut rdma = self.build()?;
+
+                // SAFETY: POD FFI type
+                let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+                let mut info: *mut rdma_addrinfo = null_mut();
+                hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
+                // Safety: ffi
+                let mut ret = unsafe {
+                    rdma_getaddrinfo(
+                        node.as_ptr().cast(),
+                        service.as_ptr().cast(),
+                        &hints,
+                        &mut info,
+                    )
+                };
+                if ret != 0_i32 {
+                    return Err(log_ret_last_os_err());
+                }
+
+                let mut id: *mut rdma_cm_id = null_mut();
+                // Safety: ffi
+                ret = unsafe { rdma_create_ep(&mut id, info, rdma.pd.as_ptr(), null_mut()) };
+                if ret != 0_i32 {
+                    // Safety: ffi
+                    unsafe {
+                        rdma_freeaddrinfo(info);
+                    }
+                    return Err(log_ret_last_os_err());
+                }
+
+                // Safety: id was initialized by `rdma_create_ep`
+                unsafe {
+                    debug!(
+                        "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+                        (*id).qp,
+                        (*id).pd,
+                        (*id).verbs,
+                        (*id).recv_cq_channel,
+                        (*id).send_cq_channel,
+                        (*id).recv_cq,
+                        (*id).send_cq
+                    );
+                    (*id).qp = rdma.qp.as_ptr();
+                    (*id).pd = rdma.pd.as_ptr();
+                    (*id).verbs = rdma.ctx.as_ptr();
+                    (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+                    (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+                    (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
+                    (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
+                    debug!(
+                        "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+                        (*id).qp,
+                        (*id).pd,
+                        (*id).verbs,
+                        (*id).recv_cq_channel,
+                        (*id).send_cq_channel,
+                        (*id).recv_cq,
+                        (*id).send_cq
+                    );
+                }
+
+                // Safety: ffi
+                ret = unsafe { rdma_connect(id, null_mut()) };
+                if ret != 0_i32 {
+                    // Safety: ffi
+                    unsafe {
+                        let _ = rdma_disconnect(id);
+                    }
+                    return Err(log_ret_last_os_err());
+                }
+                if !rdma.raw {
+                    let agent = Arc::new(Agent::new(
+                        Arc::<QueuePair>::clone(&rdma.qp),
+                        Arc::<MrAllocator>::clone(&rdma.allocator),
+                        msg_len,
+                    )?);
+                    rdma.agent = Some(agent);
+                    // wait for remote agent to initialize
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(rdma)
+            }
+        }
+    }
+
+    /// Listen to the address to wait for a connection to be established
+    #[inline]
+    pub async fn listen<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
+        match self.qp_attr.conn_type {
+            ConnectionType::RCSocket => {
+                let tcp_listener = TcpListener::bind(addr).await?;
+                let (mut stream, _) = tcp_listener.accept().await?;
+                let mut rdma = self.build()?;
+
+                let endpoint_size = bincode::serialized_size(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Endpoint serialization failed, {:?}", e),
+                    )
+                })?;
+                let mut remote = vec![0_u8; endpoint_size.cast()];
+                // the byte number is not important, as read_exact will fill the buffer
+                let _ = stream.read_exact(remote.as_mut()).await?;
+                let remote: QueuePairEndpoint = bincode::deserialize(&remote).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize remote endpoint, {:?}", e),
+                    )
+                })?;
+                let local = bincode::serialize(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize remote endpoint, {:?}", e),
+                    )
+                })?;
+                stream.write_all(&local).await?;
+                rdma.qp_handshake(remote)?;
+                debug!("handshake done");
+                if !rdma.raw {
+                    let agent = Arc::new(Agent::new(
+                        Arc::<QueuePair>::clone(&rdma.qp),
+                        Arc::<MrAllocator>::clone(&rdma.allocator),
+                        self.agent_attr.max_message_length,
+                    )?);
+                    rdma.agent = Some(agent);
+                    // wait for the remote agent to prepare
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(rdma)
+            }
+            ConnectionType::RCCM => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXSocket",
+            )),
+        }
     }
 
     /// Set device name
@@ -448,6 +656,14 @@ impl RdmaBuilder {
         if flag.contains(AccessFlag::RelaxOrder) {
             self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
         }
+        self
+    }
+
+    /// Set max length of message send/recv by Agent
+    #[inline]
+    #[must_use]
+    pub fn set_max_message_length(mut self, max_msg_len: usize) -> Self {
+        self.agent_attr.max_message_length = max_msg_len;
         self
     }
 }
@@ -2067,9 +2283,9 @@ impl RdmaListener {
                 max_message_length,
             )?);
             rdma.agent = Some(agent);
+            // wait for the remote agent to prepare
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        // wait for the remote agent to prepare
-        tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
     }
 }

@@ -172,7 +172,9 @@ pub use memory_region::{
 };
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
-use queue_pair::{QueuePair, QueuePairEndpoint};
+use queue_pair::{
+    QueuePair, QueuePairEndpoint, MAX_RECV_SGE, MAX_RECV_WR, MAX_SEND_SGE, MAX_SEND_WR,
+};
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
 use rdma_sys::{
@@ -268,12 +270,24 @@ pub struct QPInitAttr {
     conn_type: ConnectionType,
     /// If send/recv raw data
     raw: bool,
+    /// Maximum number of outstanding send requests in the send queue
+    max_send_wr: u32,
+    /// Maximum number of outstanding receive requests in the receive queue
+    max_recv_wr: u32,
+    /// Maximum number of scatter/gather elements (SGE) in a WR on the send queue
+    max_send_sge: u32,
+    /// Maximum number of scatter/gather elements (SGE) in a WR on the receive queue
+    max_recv_sge: u32,
 }
 
 impl Default for QPInitAttr {
     #[inline]
     fn default() -> Self {
         Self {
+            max_send_wr: MAX_SEND_WR,
+            max_recv_wr: MAX_RECV_WR,
+            max_send_sge: MAX_SEND_SGE,
+            max_recv_sge: MAX_RECV_SGE,
             access: ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
                 | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
                 | ibv_access_flags::IBV_ACCESS_REMOTE_READ
@@ -367,6 +381,38 @@ impl RdmaBuilder {
     #[must_use]
     pub fn set_raw(mut self, raw: bool) -> Self {
         self.qp_attr.raw = raw;
+        self
+    }
+
+    /// Set maximum number of outstanding send requests in the send queue
+    #[inline]
+    #[must_use]
+    pub fn set_qp_max_send_wr(mut self, max_send_wr: u32) -> Self {
+        self.qp_attr.max_send_wr = max_send_wr;
+        self
+    }
+
+    /// Set maximum number of outstanding receive requests in the receive queue
+    #[inline]
+    #[must_use]
+    pub fn set_qp_max_recv_wr(mut self, max_recv_wr: u32) -> Self {
+        self.qp_attr.max_recv_wr = max_recv_wr;
+        self
+    }
+
+    /// Set maximum number of scatter/gather elements (SGE) in a WR on the send queue
+    #[inline]
+    #[must_use]
+    pub fn set_qp_max_send_sge(mut self, max_send_sge: u32) -> Self {
+        self.qp_attr.max_send_sge = max_send_sge;
+        self
+    }
+
+    /// Set maximum number of scatter/gather elements (SGE) in a WR on the receive queue
+    #[inline]
+    #[must_use]
+    pub fn set_qp_max_recv_sge(mut self, max_recv_sge: u32) -> Self {
+        self.qp_attr.max_recv_sge = max_recv_sge;
         self
     }
 
@@ -470,6 +516,10 @@ impl Rdma {
                 .set_event_listener(event_listener)
                 .set_port_num(dev_attr.port_num)
                 .set_gid_index(dev_attr.gid_index)
+                .set_max_send_wr(qp_attr.max_send_wr)
+                .set_max_send_sge(qp_attr.max_send_sge)
+                .set_max_recv_wr(qp_attr.max_recv_wr)
+                .set_max_recv_sge(qp_attr.max_recv_sge)
                 .build()?,
         );
         qp.modify_to_init(access, dev_attr.port_num)?;

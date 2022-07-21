@@ -217,25 +217,82 @@ pub enum AccessFlag {
     RelaxOrder,
 }
 
-/// The builder for the `Rdma`, it follows the builder pattern.
-pub struct RdmaBuilder {
+/// initial device attributes
+#[derive(Debug)]
+pub struct DeviceInitAttr {
     /// Rdma device name
     dev_name: Option<String>,
-    /// Access flag
-    access: ibv_access_flags,
-    /// Complete queue size
-    cq_size: u32,
-    /// Gid index
-    gid_index: usize,
     /// Device port number
     port_num: u8,
+    /// Gid index
+    gid_index: usize,
+}
+
+impl Default for DeviceInitAttr {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            dev_name: None,
+            port_num: 1,
+            gid_index: 1,
+        }
+    }
+}
+
+/// initial CQ attributes
+#[derive(Debug, Clone, Copy)]
+pub struct CQInitAttr {
+    /// Complete queue size
+    cq_size: u32,
     /// Maximum number of completion queue entries (CQE) to poll at a time.
     /// The higher the concurrency, the bigger this value should be and more memory allocated at a time.
     max_cqe: i32,
+}
+
+impl Default for CQInitAttr {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            cq_size: DEFAULT_CQ_SIZE,
+            max_cqe: DEFAULT_MAX_CQE,
+        }
+    }
+}
+
+/// initial QP attributes
+#[derive(Debug, Clone, Copy)]
+pub struct QPInitAttr {
+    /// Access flag
+    access: ibv_access_flags,
     /// Connection type
     conn_type: ConnectionType,
     /// If send/recv raw data
     raw: bool,
+}
+
+impl Default for QPInitAttr {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            access: ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
+                | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
+                | ibv_access_flags::IBV_ACCESS_REMOTE_READ
+                | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC,
+            conn_type: ConnectionType::RCSocket,
+            raw: false,
+        }
+    }
+}
+
+/// The builder for the `Rdma`, it follows the builder pattern.
+#[derive(Default)]
+pub struct RdmaBuilder {
+    /// Rdma device name
+    dev_attr: DeviceInitAttr,
+    /// initial CQ attributes
+    cq_attr: CQInitAttr,
+    /// initial QP attributes
+    qp_attr: QPInitAttr,
 }
 
 impl RdmaBuilder {
@@ -245,7 +302,7 @@ impl RdmaBuilder {
     ///     access right: `LocalWrite` | `RemoteRead` | `RemoteWrite` | `RemoteAtomic`
     ///     complete queue size: 16
     ///     port number: 1
-    ///     gid index: 0
+    ///     gid index: 1
     ///
     /// Note: We highly recommend setting the port number and the gid index.
     #[must_use]
@@ -258,14 +315,10 @@ impl RdmaBuilder {
     #[inline]
     pub fn build(&self) -> io::Result<Rdma> {
         Rdma::new(
-            self.dev_name.as_deref(),
-            self.access,
-            self.cq_size,
-            self.max_cqe,
-            self.port_num,
-            self.gid_index,
-            self.conn_type,
-            self.raw,
+            self.qp_attr.access,
+            &self.dev_attr,
+            self.cq_attr,
+            self.qp_attr,
         )
     }
 
@@ -273,7 +326,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_dev(mut self, dev: &str) -> Self {
-        self.dev_name = Some(dev.to_owned());
+        self.dev_attr.dev_name = Some(dev.to_owned());
         self
     }
 
@@ -281,7 +334,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_cq_size(mut self, cq_size: u32) -> Self {
-        self.cq_size = cq_size;
+        self.cq_attr.cq_size = cq_size;
         self
     }
 
@@ -289,7 +342,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_gid_index(mut self, gid_index: usize) -> Self {
-        self.gid_index = gid_index;
+        self.dev_attr.gid_index = gid_index;
         self
     }
 
@@ -297,7 +350,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_port_num(mut self, port_num: u8) -> Self {
-        self.port_num = port_num;
+        self.dev_attr.port_num = port_num;
         self
     }
 
@@ -305,7 +358,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_conn_type(mut self, conn_type: ConnectionType) -> Self {
-        self.conn_type = conn_type;
+        self.qp_attr.conn_type = conn_type;
         self
     }
 
@@ -313,41 +366,41 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_raw(mut self, raw: bool) -> Self {
-        self.raw = raw;
+        self.qp_attr.raw = raw;
         self
     }
 
     /// Set the access right
     #[inline]
     #[must_use]
-    pub fn set_access(mut self, flag: BitFlags<AccessFlag>) -> Self {
-        self.access = ibv_access_flags(0);
+    pub fn set_qp_access(mut self, flag: BitFlags<AccessFlag>) -> Self {
+        self.qp_attr.access = ibv_access_flags(0);
         if flag.contains(AccessFlag::LocalWrite) {
-            self.access |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
         }
         if flag.contains(AccessFlag::RemoteWrite) {
-            self.access |= ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
         }
         if flag.contains(AccessFlag::RemoteRead) {
-            self.access |= ibv_access_flags::IBV_ACCESS_REMOTE_READ;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_READ;
         }
         if flag.contains(AccessFlag::RemoteAtomic) {
-            self.access |= ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
         }
         if flag.contains(AccessFlag::MwBind) {
-            self.access |= ibv_access_flags::IBV_ACCESS_MW_BIND;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_MW_BIND;
         }
         if flag.contains(AccessFlag::ZeroBased) {
-            self.access |= ibv_access_flags::IBV_ACCESS_ZERO_BASED;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_ZERO_BASED;
         }
         if flag.contains(AccessFlag::OnDemand) {
-            self.access |= ibv_access_flags::IBV_ACCESS_ON_DEMAND;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_ON_DEMAND;
         }
         if flag.contains(AccessFlag::HugeTlb) {
-            self.access |= ibv_access_flags::IBV_ACCESS_HUGETLB;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_HUGETLB;
         }
         if flag.contains(AccessFlag::RelaxOrder) {
-            self.access |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
+            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
         }
         self
     }
@@ -357,28 +410,9 @@ impl Debug for RdmaBuilder {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RdmaBuilder")
-            .field("dev_name", &self.dev_name)
-            .field("cq_size", &self.cq_size)
+            .field("dev_name", &self.dev_attr.dev_name)
+            .field("cq_size", &self.cq_attr.cq_size)
             .finish()
-    }
-}
-
-impl Default for RdmaBuilder {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            dev_name: None,
-            access: ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
-                | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
-                | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-                | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC,
-            cq_size: DEFAULT_CQ_SIZE,
-            gid_index: 0,
-            port_num: 1,
-            max_cqe: DEFAULT_MAX_CQE,
-            conn_type: ConnectionType::RCSocket,
-            raw: false,
-        }
     }
 }
 
@@ -416,37 +450,37 @@ impl Rdma {
     /// create a new `Rdma` instance
     #[allow(clippy::too_many_arguments)] // TODO: fix with builder pattern
     fn new(
-        dev_name: Option<&str>,
         access: ibv_access_flags,
-        cq_size: u32,
-        max_cqe: i32,
-        port_num: u8,
-        gid_index: usize,
-        conn_type: ConnectionType,
-        raw: bool,
+        dev_attr: &DeviceInitAttr,
+        cq_attr: CQInitAttr,
+        qp_attr: QPInitAttr,
     ) -> io::Result<Self> {
-        let ctx = Arc::new(Context::open(dev_name, port_num, gid_index)?);
+        let ctx = Arc::new(Context::open(
+            dev_attr.dev_name.as_deref(),
+            dev_attr.port_num,
+            dev_attr.gid_index,
+        )?);
         let ec = ctx.create_event_channel()?;
-        let cq = Arc::new(ctx.create_completion_queue(cq_size, ec, max_cqe)?);
+        let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
         let event_listener = EventListener::new(cq);
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(Arc::<ProtectionDomain>::clone(&pd)));
         let qp = Arc::new(
             pd.create_queue_pair_builder()
                 .set_event_listener(event_listener)
-                .set_port_num(port_num)
-                .set_gid_index(gid_index)
+                .set_port_num(dev_attr.port_num)
+                .set_gid_index(dev_attr.gid_index)
                 .build()?,
         );
-        qp.modify_to_init(access, port_num)?;
+        qp.modify_to_init(access, dev_attr.port_num)?;
         Ok(Self {
             ctx,
             pd,
             qp,
             agent: None,
             allocator,
-            conn_type,
-            raw,
+            conn_type: qp_attr.conn_type,
+            raw: qp_attr.raw,
         })
     }
 

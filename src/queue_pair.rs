@@ -167,6 +167,30 @@ impl QueuePairBuilder {
         self.gid_index = gid_index;
         self
     }
+
+    /// Set maximum number of outstanding send requests in the send queue
+    pub(crate) fn set_max_send_wr(mut self, max_send_wr: u32) -> Self {
+        self.qp_init_attr.qp_init_attr_inner.cap.max_send_wr = max_send_wr;
+        self
+    }
+
+    /// Set maximum number of outstanding receive requests in the receive queue
+    pub(crate) fn set_max_recv_wr(mut self, max_recv_wr: u32) -> Self {
+        self.qp_init_attr.qp_init_attr_inner.cap.max_recv_wr = max_recv_wr;
+        self
+    }
+
+    /// Set maximum number of scatter/gather elements (SGE) in a WR on the send queue
+    pub(crate) fn set_max_send_sge(mut self, max_send_sge: u32) -> Self {
+        self.qp_init_attr.qp_init_attr_inner.cap.max_send_sge = max_send_sge;
+        self
+    }
+
+    /// Set maximum number of scatter/gather elements (SGE) in a WR on the receive queue
+    pub(crate) fn set_max_recv_sge(mut self, max_recv_sge: u32) -> Self {
+        self.qp_init_attr.qp_init_attr_inner.cap.max_recv_sge = max_recv_sge;
+        self
+    }
 }
 
 /// Queue pair information used to hand shake

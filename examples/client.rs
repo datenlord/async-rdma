@@ -9,40 +9,105 @@
 //!
 //!     cargo run --example client
 
-use async_rdma::{LocalMrWriteAccess, Rdma, RdmaBuilder};
-use std::alloc::Layout;
-use tracing::debug;
+use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma};
+use std::{
+    alloc::Layout,
+    io::{self, Write},
+};
 
-async fn send_lmr_to_server(rdma: &Rdma) {
-    let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'h' };
-    rdma.send_local_mr(lmr).await.unwrap();
+/// send data to serer
+async fn send_data_to_server(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    // send data in mr to the remote end
+    rdma.send(&lmr).await?;
+    Ok(())
 }
 
-async fn request_then_write(rdma: &Rdma) {
-    let mut rmr = rdma.request_remote_mr(Layout::new::<char>()).await.unwrap();
-    let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'e' };
-    rdma.write(&lmr, &mut rmr).await.unwrap();
-    rdma.send_remote_mr(rmr).await.unwrap();
+/// send data and immdiate number to server
+async fn send_data_with_imm_to_server(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    // send data and imm to the remote end
+    rdma.send_with_imm(&lmr, 1_u32).await?;
+    Ok(())
 }
 
-async fn send_data_to_server(rdma: &Rdma) {
-    let mut lmr = rdma.alloc_local_mr(Layout::new::<char>()).unwrap();
-    unsafe { *(*lmr.as_mut_ptr() as *mut char) = 'y' };
-    rdma.send(&lmr).await.unwrap();
+/// write data into local mr and send mr's meta data to server and wait to be read
+async fn send_lmr_to_server(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    println!("{:?}", *lmr.as_slice());
+    assert_eq!(*lmr.as_slice(), [0_u8; 8]);
+
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    println!("{:?}", *lmr.as_slice());
+    assert_eq!(*lmr.as_slice(), [1_u8; 8]);
+
+    // write data to a part of it
+    let _num = lmr
+        .get_mut(4..8)
+        .unwrap()
+        .as_mut_slice()
+        .write(&[2_u8; 4])?;
+    println!("{:?}", *lmr.as_slice());
+    assert_eq!(*lmr.as_slice(), [[1_u8; 4], [2_u8; 4]].concat());
+
+    // send lmr's meta data to the remote
+    rdma.send_local_mr(lmr).await?;
+    Ok(())
+}
+
+/// request remote memory region and write data to it by RDMA WRITE
+async fn request_then_write(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes remote memory
+    let mut rmr = rdma.request_remote_mr(Layout::new::<[u8; 8]>()).await?;
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    // write the second half of the data in lmr to the rmr
+    rdma.write(&lmr.get(4..8).unwrap(), &mut rmr.get_mut(4..8).unwrap())
+        .await?;
+    // send rmr's meta data to the remote end
+    rdma.send_remote_mr(rmr).await?;
+    Ok(())
+}
+
+/// request remote memory region and write data to it with immdiate number by RDMA WRITE
+async fn request_then_write_with_imm(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes remote memory
+    let mut rmr = rdma.request_remote_mr(Layout::new::<[u8; 8]>()).await?;
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    // write the second half of the data in lmr to the rmr
+    rdma.write_with_imm(
+        &lmr.get(4..8).unwrap(),
+        &mut rmr.get_mut(4..8).unwrap(),
+        4_u32,
+    )
+    .await?;
+    // send rmr's meta data to the remote end
+    rdma.send_remote_mr(rmr).await?;
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-    debug!("client start");
-    let rdma = RdmaBuilder::default()
-        .connect("127.0.0.1:5555")
-        .await
-        .unwrap();
-    send_lmr_to_server(&rdma).await;
-    request_then_write(&rdma).await;
-    send_data_to_server(&rdma).await;
-    debug!("client done");
+    println!("client start");
+    let rdma = Rdma::connect("127.0.0.1:5555", 1, 1, 512).await.unwrap();
+    println!("connected");
+    send_data_to_server(&rdma).await.unwrap();
+    send_data_with_imm_to_server(&rdma).await.unwrap();
+    send_lmr_to_server(&rdma).await.unwrap();
+    request_then_write(&rdma).await.unwrap();
+    request_then_write_with_imm(&rdma).await.unwrap();
+    println!("client done");
 }

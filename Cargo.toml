@@ -39,6 +39,7 @@ sealed = "0.4"
 const-str = "0.3.1"
 minstant = "0.1"
 portpicker = "0.1.1"
+local-ip-address = "0.4.5"
 
 [[example]]
 name = "cm_client"

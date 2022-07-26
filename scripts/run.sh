@@ -62,7 +62,7 @@ sudo env "PATH=$PATH" bash -c "
     ulimit -l unlimited &&
     rustup default $1 && 
     cargo build
-    cargo test
+    cargo test --features="cm raw"
     cargo test --package async-rdma --test cancel_safety --features cancel_safety_test
     cargo run --example rpc
     timeout 3 target/debug/examples/server &

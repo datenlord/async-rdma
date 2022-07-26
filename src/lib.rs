@@ -355,6 +355,41 @@ impl RdmaBuilder {
     }
 
     /// Establish connection with RDMA server
+    ///
+    /// Used with `listen`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let _rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let _rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn connect<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
@@ -397,6 +432,93 @@ impl RdmaBuilder {
     }
 
     /// Establish connection with RDMA CM server
+    ///
+    /// Application scenario can be seen in `[/example/cm_client.rs]`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{ConnectionType, RdmaBuilder};
+    /// use local_ip_address::local_ip;
+    /// use portpicker::pick_unused_port;
+    /// use rdma_sys::*;
+    /// use std::{io, ptr::null_mut, time::Duration};
+    ///
+    /// static SERVER_NODE: &str = "0.0.0.0\0";
+    ///
+    /// async fn client(node: &str, service: &str) -> io::Result<()> {
+    ///     let _rdma = RdmaBuilder::default()
+    ///         .set_conn_type(ConnectionType::RCCM)
+    ///         .set_raw(true)
+    ///         .cm_connect(node, service)
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(node: &str, service: &str) -> io::Result<()> {
+    ///     let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+    ///     let mut res: *mut rdma_addrinfo = null_mut();
+    ///     hints.ai_flags = RAI_PASSIVE.try_into().unwrap();
+    ///     hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.try_into().unwrap();
+    ///     let mut ret = unsafe {
+    ///         rdma_getaddrinfo(
+    ///             node.as_ptr().cast(),
+    ///             service.as_ptr().cast(),
+    ///             &hints,
+    ///             &mut res,
+    ///         )
+    ///     };
+    ///     if ret != 0 {
+    ///         println!("rdma_getaddrinfo");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     let mut listen_id = null_mut();
+    ///     let mut id = null_mut();
+    ///     let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+    ///     init_attr.cap.max_send_wr = 1;
+    ///     init_attr.cap.max_recv_wr = 1;
+    ///     ret = unsafe { rdma_create_ep(&mut listen_id, res, null_mut(), &mut init_attr) };
+    ///     if ret != 0 {
+    ///         println!("rdma_create_ep");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_listen(listen_id, 0) };
+    ///     if ret != 0 {
+    ///         println!("rdma_listen");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_get_request(listen_id, &mut id) };
+    ///     if ret != 0 {
+    ///         println!("rdma_get_request");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_accept(id, null_mut()) };
+    ///     if ret != 0 {
+    ///         println!("rdma_get_request");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let port = pick_unused_port().unwrap();
+    ///     let server_service = port.to_string() + "\0";
+    ///     let client_service = server_service.clone();
+    ///     std::thread::spawn(move || server(SERVER_NODE, &server_service));
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     let node = local_ip().unwrap().to_string() + "\0";
+    ///     client(&node, &client_service)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
     #[cfg(feature = "cm")]
     pub async fn cm_connect(self, node: &str, service: &str) -> io::Result<Rdma> {
@@ -467,7 +589,6 @@ impl RdmaBuilder {
                         (*id).send_cq
                     );
                 }
-
                 // Safety: ffi
                 ret = unsafe { rdma_connect(id, null_mut()) };
                 if ret != 0_i32 {
@@ -493,6 +614,41 @@ impl RdmaBuilder {
     }
 
     /// Listen to the address to wait for a connection to be established
+    ///
+    /// Used with `connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let _rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let _rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
     pub async fn listen<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
@@ -833,15 +989,121 @@ impl Rdma {
     }
 
     /// Send raw data in the lm
-    #[cfg(feature = "raw")]
+    ///
+    /// Used with `receive_raw`.
+    ///
+    /// # Examples
+    ///
+    ///  ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     tokio::time::sleep(Duration::from_millis(100)).await;
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive_raw(Layout::for_value(&RAW_DATA)).await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
+    #[cfg(feature = "raw")]
     pub async fn send_raw(&self, lm: &LocalMr) -> io::Result<()> {
         self.qp.send_sge_raw(&[lm], None).await
     }
 
     /// Send raw data in the lm with imm
-    #[cfg(feature = "raw")]
+    ///
+    /// Used with `receive_raw_with_imm`
+    ///
+    /// # Examples
+    ///
+    ///  ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    /// const IMM: u32 = 1_u32;
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     tokio::time::sleep(Duration::from_millis(100)).await;
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw_with_imm(&lmr, IMM).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let (lmr, imm) = rdma
+    ///         .receive_raw_with_imm(Layout::for_value(&RAW_DATA))
+    ///         .await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     assert_eq!(imm, Some(IMM));
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
+    #[cfg(feature = "raw")]
     pub async fn send_raw_with_imm(&self, lm: &LocalMr, imm: u32) -> io::Result<()> {
         self.qp.send_sge_raw(&[lm], Some(imm)).await
     }
@@ -988,8 +1250,59 @@ impl Rdma {
     }
 
     /// Receive raw data
-    #[cfg(feature = "raw")]
+    ///
+    /// Used with `send_raw`.
+    ///
+    /// # Examples
+    ///
+    ///  ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     tokio::time::sleep(Duration::from_millis(100)).await;
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma.receive_raw(Layout::for_value(&RAW_DATA)).await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
+    #[cfg(feature = "raw")]
     pub async fn receive_raw(&self, layout: Layout) -> io::Result<LocalMr> {
         let mut lmr = self.alloc_local_mr(layout)?;
         let _imm = self.qp.receive_sge_raw(&[&mut lmr]).await?;
@@ -997,8 +1310,63 @@ impl Rdma {
     }
 
     /// Receive raw data with imm
-    #[cfg(feature = "raw")]
+    ///
+    /// Used with `send_raw_with_imm`
+    ///
+    /// # Examples
+    ///
+    ///  ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    /// const IMM: u32 = 1_u32;
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     tokio::time::sleep(Duration::from_millis(100)).await;
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw_with_imm(&lmr, IMM).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let (lmr, imm) = rdma
+    ///         .receive_raw_with_imm(Layout::for_value(&RAW_DATA))
+    ///         .await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     assert_eq!(imm, Some(IMM));
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
+    #[cfg(feature = "raw")]
     pub async fn receive_raw_with_imm(&self, layout: Layout) -> io::Result<(LocalMr, Option<u32>)> {
         let mut lmr = self.alloc_local_mr(layout)?;
         let imm = self.qp.receive_sge_raw(&[&mut lmr]).await?;
@@ -1444,9 +1812,92 @@ impl Rdma {
         Ok(rdma)
     }
 
-    /// Establish connection with CM server.
-    #[cfg(feature = "cm")]
+    /// Establish connection with RDMA CM server
+    ///
+    /// Application scenario can be seen in `[/example/cm_client.rs]`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::Rdma;
+    /// use local_ip_address::local_ip;
+    /// use portpicker::pick_unused_port;
+    /// use rdma_sys::*;
+    /// use std::{io, ptr::null_mut, time::Duration};
+    ///
+    /// static SERVER_NODE: &str = "0.0.0.0\0";
+    ///
+    /// async fn client(node: &str, service: &str) -> io::Result<()> {
+    ///     let _rdma = Rdma::cm_connect(node, service, 1, 1, 0).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(node: &str, service: &str) -> io::Result<()> {
+    ///     let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+    ///     let mut res: *mut rdma_addrinfo = null_mut();
+    ///     hints.ai_flags = RAI_PASSIVE.try_into().unwrap();
+    ///     hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.try_into().unwrap();
+    ///     let mut ret = unsafe {
+    ///         rdma_getaddrinfo(
+    ///             node.as_ptr().cast(),
+    ///             service.as_ptr().cast(),
+    ///             &hints,
+    ///             &mut res,
+    ///         )
+    ///     };
+    ///     if ret != 0 {
+    ///         println!("rdma_getaddrinfo");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     let mut listen_id = null_mut();
+    ///     let mut id = null_mut();
+    ///     let mut init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+    ///     init_attr.cap.max_send_wr = 1;
+    ///     init_attr.cap.max_recv_wr = 1;
+    ///     ret = unsafe { rdma_create_ep(&mut listen_id, res, null_mut(), &mut init_attr) };
+    ///     if ret != 0 {
+    ///         println!("rdma_create_ep");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_listen(listen_id, 0) };
+    ///     if ret != 0 {
+    ///         println!("rdma_listen");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_get_request(listen_id, &mut id) };
+    ///     if ret != 0 {
+    ///         println!("rdma_get_request");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///
+    ///     ret = unsafe { rdma_accept(id, null_mut()) };
+    ///     if ret != 0 {
+    ///         println!("rdma_get_request");
+    ///         return Err(io::Error::last_os_error());
+    ///     }
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let port = pick_unused_port().unwrap();
+    ///     let server_service = port.to_string() + "\0";
+    ///     let client_service = server_service.clone();
+    ///     std::thread::spawn(move || server(SERVER_NODE, &server_service));
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     let node = local_ip().unwrap().to_string() + "\0";
+    ///     client(&node, &client_service)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
     #[inline]
+    #[cfg(feature = "cm")]
     pub async fn cm_connect(
         node: &str,
         service: &str,
@@ -1492,7 +1943,6 @@ impl Rdma {
             }
             return Err(log_ret_last_os_err());
         }
-
         // Safety: id was initialized by `rdma_create_ep`
         unsafe {
             debug!(

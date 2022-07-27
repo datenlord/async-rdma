@@ -9,7 +9,7 @@
 //!
 //!     cargo run --example client
 
-use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma};
+use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaBuilder};
 use std::{
     alloc::Layout,
     io::{self, Write},
@@ -102,7 +102,10 @@ async fn request_then_write_with_imm(rdma: &Rdma) -> io::Result<()> {
 #[tokio::main]
 async fn main() {
     println!("client start");
-    let rdma = Rdma::connect("127.0.0.1:5555", 1, 1, 512).await.unwrap();
+    let rdma = RdmaBuilder::default()
+        .connect("localhost:5555")
+        .await
+        .unwrap();
     println!("connected");
     send_data_to_server(&rdma).await.unwrap();
     send_data_with_imm_to_server(&rdma).await.unwrap();

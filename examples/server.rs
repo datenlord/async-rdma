@@ -9,7 +9,7 @@
 //!
 //!     cargo run --example client
 
-use async_rdma::{LocalMrReadAccess, Rdma, RdmaListener};
+use async_rdma::{LocalMrReadAccess, Rdma, RdmaBuilder};
 use clippy_utilities::Cast;
 use std::{alloc::Layout, io};
 
@@ -75,8 +75,10 @@ async fn receive_mr_after_being_written_with_imm(rdma: &Rdma) -> io::Result<()> 
 #[tokio::main]
 async fn main() {
     println!("server start");
-    let rdmalistener = RdmaListener::bind("127.0.0.1:5555").await.unwrap();
-    let rdma = rdmalistener.accept(1, 1, 512).await.unwrap();
+    let rdma = RdmaBuilder::default()
+        .listen("localhost:5555")
+        .await
+        .unwrap();
     println!("accepted");
     receive_data_from_client(&rdma).await.unwrap();
     receive_data_with_imm_from_client(&rdma).await.unwrap();

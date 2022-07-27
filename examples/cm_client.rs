@@ -11,14 +11,17 @@
 //!
 //! The default port is 7471.
 
-use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma};
+use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
 use std::{alloc::Layout, env, io::Write, process::exit};
 const BUF_SIZE: usize = 16;
 const BUF_FILLER: u8 = 1;
 
 async fn run(node: &str, service: &str) {
     // send/recv raw data ,so we don't need agent here
-    let rdma = Rdma::cm_connect(node, service, 1, 1, 0).await.unwrap();
+    let rdma = RdmaBuilder::default()
+        .cm_connect(node, service)
+        .await
+        .unwrap();
 
     // send raw data to server
     let mut lmr = rdma

@@ -7,7 +7,7 @@
 //!
 //!     cargo run --example rpc
 
-use async_rdma::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaListener};
+use async_rdma::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaBuilder};
 use std::{alloc::Layout, sync::Arc, time::Duration};
 use tokio::net::ToSocketAddrs;
 
@@ -28,12 +28,8 @@ struct Server {}
 impl Server {
     #[tokio::main]
     async fn start<A: ToSocketAddrs>(addr: A) {
-        let rdmalistener = RdmaListener::bind(addr)
-            .await
-            .map_err(|err| println!("{}", err))
-            .unwrap();
         // wait for client to connect
-        let rdma = Arc::new(rdmalistener.accept(1, 1, 128).await.unwrap());
+        let rdma = Arc::new(RdmaBuilder::default().listen(addr).await.unwrap());
         // run rpc task loop
         let sr_handler = tokio::spawn(Self::sr_task(rdma.clone()));
         let wr_handler = tokio::spawn(Self::wr_task(rdma));
@@ -144,7 +140,8 @@ impl Client {
     async fn new<A: ToSocketAddrs>(addr: A) -> Self {
         // connect to server
         // gid_index: 0:ipv6 1:ipv4(default)
-        let rdma_stub = Rdma::connect(addr, 1, 1, 128)
+        let rdma_stub = RdmaBuilder::default()
+            .connect(addr)
             .await
             .map_err(|err| println!("{}", &err))
             .unwrap();
@@ -264,13 +261,13 @@ impl Client {
 async fn main() {
     tracing_subscriber::fmt::init();
     //run rpc server
-    std::thread::spawn(|| Server::start("127.0.0.1:5555"));
+    std::thread::spawn(|| Server::start("localhost:5555"));
     println!("rpc server started");
     //sleep for a second to wait for the server to start
     tokio::time::sleep(Duration::new(1, 0)).await;
     let msg_hello = String::from("hello");
     let msg_world = String::from("world");
-    let client = Client::new("127.0.0.1:5555").await;
+    let client = Client::new("localhost:5555").await;
     println!("request: {}", msg_hello);
     let res = client.echo_req_sr(msg_hello).await;
     println!("response: {}", res);

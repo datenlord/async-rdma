@@ -1,8 +1,12 @@
 use super::{raw::RawMemoryRegion, MrAccess, MrToken};
-use crate::lock_utilities::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
+use crate::{
+    lock_utilities::{MappedRwLockReadGuard, MappedRwLockWriteGuard},
+    MRManageStrategy,
+};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use sealed::sealed;
 use std::{
+    alloc::{dealloc, Layout},
     fmt::Debug,
     ops::Range,
     slice,
@@ -338,7 +342,7 @@ impl LocalMr {
     /// New Local Mr
     pub(crate) fn new(inner: LocalMrInner) -> Self {
         let addr = inner.addr;
-        let len = inner.len;
+        let len = inner.layout.size();
         let inner = Arc::new(RwLock::new(inner));
         Self { inner, addr, len }
     }
@@ -459,10 +463,12 @@ pub(crate) type RwLocalMrInner = RwLock<LocalMrInner>;
 pub struct LocalMrInner {
     /// The start address of this mr
     addr: usize,
-    /// The length of this mr
-    len: usize,
+    /// The layout of this mr
+    layout: Layout,
     /// The raw mr where this local mr comes from.
     raw: Arc<RawMemoryRegion>,
+    /// Strategy to manage this `MR`
+    strategy: MRManageStrategy,
 }
 
 impl Drop for LocalMrInner {
@@ -470,9 +476,19 @@ impl Drop for LocalMrInner {
     #[allow(clippy::as_conversions)]
     fn drop(&mut self) {
         debug!("drop LocalMr {:?}", self);
-        // SAFETY: ffi
-        // TODO: check safety
-        unsafe { tikv_jemalloc_sys::free(self.addr as _) }
+        match self.strategy {
+            crate::MRManageStrategy::Jemalloc => {
+                // SAFETY: ffi
+                unsafe { tikv_jemalloc_sys::free(self.addr as _) }
+            }
+            crate::MRManageStrategy::Raw => {
+                // SAFETY: The ptr is allocated via this allocator, and the layout is the same layout
+                // that was used to allocate that block of memory.
+                unsafe {
+                    dealloc(self.addr as _, self.layout);
+                }
+            }
+        }
     }
 }
 
@@ -484,7 +500,7 @@ impl MrAccess for LocalMrInner {
 
     #[inline]
     fn length(&self) -> usize {
-        self.len
+        self.layout.size()
     }
 
     #[inline]
@@ -495,8 +511,18 @@ impl MrAccess for LocalMrInner {
 
 impl LocalMrInner {
     /// Crate a new `LocalMrInner`
-    pub(crate) fn new(addr: usize, len: usize, raw: Arc<RawMemoryRegion>) -> Self {
-        Self { addr, len, raw }
+    pub(crate) fn new(
+        addr: usize,
+        layout: Layout,
+        raw: Arc<RawMemoryRegion>,
+        strategy: MRManageStrategy,
+    ) -> Self {
+        Self {
+            addr,
+            layout,
+            raw,
+            strategy,
+        }
     }
 
     /// Get local key of memory region

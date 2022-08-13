@@ -5,15 +5,20 @@ use crate::{
         RawMemoryRegion,
     },
     protection_domain::ProtectionDomain,
+    MRInitAttr,
 };
 use clippy_utilities::Cast;
 use libc::{c_void, size_t};
 use parking_lot::{Mutex, MutexGuard};
 use rdma_sys::ibv_access_flags;
-use std::collections::{BTreeMap, HashMap};
-use std::mem;
-use std::ops::Bound::Included;
-use std::{alloc::Layout, io, ptr, sync::Arc};
+use std::{
+    alloc::{alloc, alloc_zeroed, Layout},
+    collections::{BTreeMap, HashMap},
+    io, mem,
+    ops::Bound::Included,
+    ptr,
+    sync::Arc,
+};
 use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_ZERO};
 use tracing::{debug, error};
 
@@ -90,22 +95,54 @@ pub(crate) struct Item {
     arena_ind: u32,
 }
 
+/// Strategies to manage `MR`s
+#[derive(Debug, Clone, Copy)]
+pub enum MRManageStrategy {
+    /// Use `Jemalloc` to manage `MRs`
+    Jemalloc,
+    /// Alloc raw `MR`
+    Raw,
+}
+
 /// Memory region allocator
 #[derive(Debug)]
 pub(crate) struct MrAllocator {
     /// Protection domain that holds the allocator
-    _pd: Arc<ProtectionDomain>,
+    pd: Arc<ProtectionDomain>,
     /// Arena index
     arena_ind: u32,
+    /// Strategy to manage `MR`s
+    strategy: MRManageStrategy,
+    /// Default memory region access
+    access: ibv_access_flags,
 }
 
 impl MrAllocator {
     /// Create a new MR allocator
-    pub(crate) fn new(pd: Arc<ProtectionDomain>) -> Self {
-        #[allow(clippy::expect_used)]
-        let arena_ind =
-            init_je_statics(Arc::<ProtectionDomain>::clone(&pd)).expect("init je statics failed");
-        Self { _pd: pd, arena_ind }
+    pub(crate) fn new(pd: Arc<ProtectionDomain>, mr_attr: MRInitAttr) -> Self {
+        match mr_attr.strategy {
+            MRManageStrategy::Jemalloc => {
+                debug!("new mr_allocator using jemalloc strategy");
+                #[allow(clippy::expect_used)]
+                let arena_ind = init_je_statics(Arc::<ProtectionDomain>::clone(&pd))
+                    .expect("init je statics failed");
+                Self {
+                    pd,
+                    arena_ind,
+                    strategy: mr_attr.strategy,
+                    access: mr_attr.access,
+                }
+            }
+            MRManageStrategy::Raw => {
+                debug!("new mr_allocator using raw strategy");
+                Self {
+                    pd,
+                    arena_ind: 0_u32,
+                    strategy: mr_attr.strategy,
+                    access: mr_attr.access,
+                }
+            }
+        }
     }
 
     /// Allocate an uninitialized `LocalMr` according to the `layout`
@@ -115,17 +152,42 @@ impl MrAllocator {
     /// The newly allocated memory in this `LocalMr` is uninitialized.
     /// Initialize it before using to make it safe.
     #[allow(clippy::as_conversions)]
-    pub(crate) unsafe fn alloc(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        let inner = self.alloc_inner(layout, 0)?;
+    pub(crate) unsafe fn alloc(
+        self: &Arc<Self>,
+        layout: &Layout,
+        access: ibv_access_flags,
+    ) -> io::Result<LocalMr> {
+        let inner = self.alloc_inner(layout, 0, access)?;
         Ok(LocalMr::new(inner))
     }
 
     /// Allocate a `LocalMr` according to the `layout`
     #[allow(clippy::as_conversions)]
-    pub(crate) fn alloc_zeroed(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+    pub(crate) fn alloc_zeroed(
+        self: &Arc<Self>,
+        layout: &Layout,
+        access: ibv_access_flags,
+    ) -> io::Result<LocalMr> {
         // SAFETY: alloc zeroed memory is safe
-        let inner = unsafe { self.alloc_inner(layout, MALLOCX_ZERO)? };
+        let inner = unsafe { self.alloc_inner(layout, MALLOCX_ZERO, access)? };
         Ok(LocalMr::new(inner))
+    }
+
+    /// Allocate an uninitialized `LocalMr` according to the `layout` with default access
+    ///
+    /// # Safety
+    ///
+    /// The newly allocated memory in this `LocalMr` is uninitialized.
+    /// Initialize it before using to make it safe.
+    #[allow(clippy::as_conversions)]
+    pub(crate) unsafe fn alloc_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        self.alloc(layout, self.access)
+    }
+
+    /// Allocate a `LocalMr` according to the `layout` with default access
+    #[allow(clippy::as_conversions)]
+    pub(crate) fn alloc_zeroed_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        self.alloc_zeroed(layout, self.access)
     }
 
     /// Allocate a `LocalMrInner` according to the `layout`
@@ -138,6 +200,7 @@ impl MrAllocator {
         self: &Arc<Self>,
         layout: &Layout,
         flag: i32,
+        access: ibv_access_flags,
     ) -> io::Result<LocalMrInner> {
         // check to ensure the safety requirements of `slice` methords
         if layout.size() > isize::MAX.cast() {
@@ -147,12 +210,24 @@ impl MrAllocator {
             ));
         }
 
-        self.alloc_from_je(layout, flag).map_or_else(||{
-                Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
-            }, |addr|{
-                let raw_mr = self.lookup_raw_mr(addr as usize);
-                Ok(LocalMrInner::new(addr as usize, layout.size(), raw_mr))
-            })
+        match self.strategy {
+            MRManageStrategy::Jemalloc => {
+                self.alloc_from_je(layout, flag).map_or_else(||{
+                        Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
+                    }, |addr|{
+                        let raw_mr = self.lookup_raw_mr(addr as usize);
+                        Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
+                    })
+            },
+            MRManageStrategy::Raw => {
+                alloc_raw_mem(layout, flag).map_or_else(||{
+                        Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
+                    }, |addr|{
+                        let raw_mr = Arc::new(RawMemoryRegion::register_from_pd(&self.pd, addr, layout.size(), access)?);
+                        Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
+                    })
+            },
+        }
     }
 
     /// Alloc memory for RDMA operations from jemalloc
@@ -215,6 +290,27 @@ fn get_default_hooks_impl(arena_ind: u32) -> extent_hooks_t {
     // SAFETY: ?
     // TODO: check safety
     unsafe { *hooks }
+}
+
+/// Alloc raw memory region for RDMA operations
+///
+/// # Safety
+///
+/// This func is safe when:
+/// * `flag == MALLOCX_ZERO`, otherwise newly allocated memory is uninitialized.
+/// * Dealloc `addr` after dropping `raw_mr`.
+unsafe fn alloc_raw_mem(layout: &Layout, flag: i32) -> Option<*mut u8> {
+    let addr = if flag == MALLOCX_ZERO {
+        alloc_zeroed(*layout)
+    } else {
+        alloc(*layout)
+    };
+
+    if addr.is_null() {
+        None
+    } else {
+        Some(addr)
+    }
 }
 
 /// Set custom extent hooks
@@ -533,7 +629,7 @@ pub(crate) fn register_extent_mr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{context::Context, LocalMrReadAccess, MrAccess, RdmaBuilder};
+    use crate::{context::Context, LocalMrReadAccess, MrAccess, RdmaBuilder, DEFAULT_ACCESS};
     use std::{alloc::Layout, io, thread};
     use tikv_jemalloc_sys::MALLOCX_ALIGN;
 
@@ -556,9 +652,9 @@ mod tests {
     fn alloc_mr_from_allocator() -> io::Result<()> {
         let ctx = Arc::new(Context::open(None, 1, 1)?);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MrAllocator::new(pd));
+        let allocator = Arc::new(MrAllocator::new(pd, MRInitAttr::default()));
         let layout = Layout::new::<char>();
-        let lmr = allocator.alloc_zeroed(&layout)?;
+        let lmr = allocator.alloc_zeroed_default(&layout)?;
         debug!("lmr info :{:?}", &lmr);
         Ok(())
     }
@@ -651,7 +747,7 @@ mod tests {
         tracing_subscriber::fmt::init();
         let ctx = Arc::new(Context::open(None, 1, 1)?);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MrAllocator::new(pd));
+        let allocator = Arc::new(MrAllocator::new(pd, MRInitAttr::default()));
 
         check_hooks(allocator.arena_ind);
         // set test hooks
@@ -679,19 +775,19 @@ mod tests {
         let mut layout = Layout::new::<char>();
         // alloc and drop one by one
         for _ in 0_u32..100_u32 {
-            let _lmr = allocator.alloc_zeroed(&layout)?;
+            let _lmr = allocator.alloc_zeroed_default(&layout)?;
         }
         // alloc all and drop all
         layout = Layout::new::<[u8; 16 * 1024]>();
         let mut lmrs = vec![];
         for _ in 0_u32..100_u32 {
-            lmrs.push(allocator.alloc_zeroed(&layout)?);
+            lmrs.push(allocator.alloc_zeroed_default(&layout)?);
         }
         // jemalloc will merge extents after drop all lmr in lmrs.
         lmrs.clear();
         // alloc big extent and dalloc it immediately after _lmr's dropping
         layout = Layout::new::<[u8; 1024 * 1024 * 32]>();
-        let _lmr = allocator.alloc_zeroed(&layout)?;
+        let _lmr = allocator.alloc_zeroed_default(&layout)?;
         Ok(())
     }
 
@@ -754,9 +850,41 @@ mod tests {
     fn zeroed_test() -> io::Result<()> {
         let ctx = Arc::new(Context::open(None, 1, 1)?);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MrAllocator::new(pd));
-        let lmr = allocator.alloc_zeroed(&Layout::new::<[u8; 10]>()).unwrap();
+        let allocator = Arc::new(MrAllocator::new(pd, MRInitAttr::default()));
+        let lmr = allocator
+            .alloc_zeroed_default(&Layout::new::<[u8; 10]>())
+            .unwrap();
         assert_eq!(*lmr.as_slice(), [0_u8; 10]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alloc_raw_mr_from_rdma() -> io::Result<()> {
+        let rdma = RdmaBuilder::default()
+            .set_mr_strategy(MRManageStrategy::Raw)
+            .build()?;
+        let mut mrs = vec![];
+        let layout = Layout::new::<[u8; 4096]>();
+        for _ in 0_i32..2_i32 {
+            let mr = rdma.alloc_local_mr(layout)?;
+            mrs.push(mr);
+        }
+        mrs.clear();
+        Ok(())
+    }
+
+    #[test]
+    fn alloc_raw_mr_from_allocator() -> io::Result<()> {
+        let ctx = Arc::new(Context::open(None, 1, 1)?);
+        let pd = Arc::new(ctx.create_protection_domain()?);
+        let mr_attr = MRInitAttr {
+            access: *DEFAULT_ACCESS,
+            strategy: MRManageStrategy::Raw,
+        };
+        let allocator = Arc::new(MrAllocator::new(pd, mr_attr));
+        let layout = Layout::new::<char>();
+        let lmr = allocator.alloc_zeroed_default(&layout)?;
+        debug!("lmr info :{:?}", &lmr);
         Ok(())
     }
 }

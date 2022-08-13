@@ -170,6 +170,7 @@ pub use memory_region::{
     remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
     MrAccess,
 };
+pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
@@ -217,6 +218,39 @@ pub enum AccessFlag {
     HugeTlb,
     /// allow system to reorder accesses to the MR to improve performance
     RelaxOrder,
+}
+
+/// Convert `BitFlags<AccessFlag>` into `ibv_access_flags`
+pub(crate) fn flags_into_ibv_access(flags: BitFlags<AccessFlag>) -> ibv_access_flags {
+    let mut ret = ibv_access_flags(0);
+    if flags.contains(AccessFlag::LocalWrite) {
+        ret |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
+    }
+    if flags.contains(AccessFlag::RemoteWrite) {
+        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
+    }
+    if flags.contains(AccessFlag::RemoteRead) {
+        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_READ;
+    }
+    if flags.contains(AccessFlag::RemoteAtomic) {
+        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
+    }
+    if flags.contains(AccessFlag::MwBind) {
+        ret |= ibv_access_flags::IBV_ACCESS_MW_BIND;
+    }
+    if flags.contains(AccessFlag::ZeroBased) {
+        ret |= ibv_access_flags::IBV_ACCESS_ZERO_BASED;
+    }
+    if flags.contains(AccessFlag::OnDemand) {
+        ret |= ibv_access_flags::IBV_ACCESS_ON_DEMAND;
+    }
+    if flags.contains(AccessFlag::HugeTlb) {
+        ret |= ibv_access_flags::IBV_ACCESS_HUGETLB;
+    }
+    if flags.contains(AccessFlag::RelaxOrder) {
+        ret |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
+    }
+    ret
 }
 
 /// initial device attributes
@@ -280,6 +314,14 @@ pub struct QPInitAttr {
     max_recv_sge: u32,
 }
 
+lazy_static! {
+    /// Default `ibv_access_flags`
+    static ref DEFAULT_ACCESS:ibv_access_flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
+    | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
+    | ibv_access_flags::IBV_ACCESS_REMOTE_READ
+    | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
+}
+
 impl Default for QPInitAttr {
     #[inline]
     fn default() -> Self {
@@ -288,12 +330,28 @@ impl Default for QPInitAttr {
             max_recv_wr: MAX_RECV_WR,
             max_send_sge: MAX_SEND_SGE,
             max_recv_sge: MAX_RECV_SGE,
-            access: ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
-                | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
-                | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-                | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC,
+            access: *DEFAULT_ACCESS,
             conn_type: ConnectionType::RCSocket,
             raw: false,
+        }
+    }
+}
+
+/// Initial `MR` attributes
+#[derive(Debug, Clone, Copy)]
+pub struct MRInitAttr {
+    /// Access flag
+    access: ibv_access_flags,
+    /// Strategy to manage `MR`s
+    strategy: MRManageStrategy,
+}
+
+impl Default for MRInitAttr {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            access: *DEFAULT_ACCESS,
+            strategy: MRManageStrategy::Jemalloc,
         }
     }
 }
@@ -323,6 +381,8 @@ pub struct RdmaBuilder {
     cq_attr: CQInitAttr,
     /// initial QP attributes
     qp_attr: QPInitAttr,
+    /// initial MR attributes
+    mr_attr: MRInitAttr,
     /// initial Agent attributes
     agent_attr: AgentInitAttr,
 }
@@ -346,12 +406,7 @@ impl RdmaBuilder {
     /// Create a `Rdma` from this builder
     #[inline]
     pub fn build(&self) -> io::Result<Rdma> {
-        Rdma::new(
-            self.qp_attr.access,
-            &self.dev_attr,
-            self.cq_attr,
-            self.qp_attr,
-        )
+        Rdma::new(&self.dev_attr, self.cq_attr, self.qp_attr, self.mr_attr)
     }
 
     /// Establish connection with RDMA server
@@ -780,38 +835,27 @@ impl RdmaBuilder {
         self
     }
 
-    /// Set the access right
+    /// Set default `QP` access
     #[inline]
     #[must_use]
-    pub fn set_qp_access(mut self, flag: BitFlags<AccessFlag>) -> Self {
-        self.qp_attr.access = ibv_access_flags(0);
-        if flag.contains(AccessFlag::LocalWrite) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
-        }
-        if flag.contains(AccessFlag::RemoteWrite) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
-        }
-        if flag.contains(AccessFlag::RemoteRead) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_READ;
-        }
-        if flag.contains(AccessFlag::RemoteAtomic) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
-        }
-        if flag.contains(AccessFlag::MwBind) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_MW_BIND;
-        }
-        if flag.contains(AccessFlag::ZeroBased) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_ZERO_BASED;
-        }
-        if flag.contains(AccessFlag::OnDemand) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_ON_DEMAND;
-        }
-        if flag.contains(AccessFlag::HugeTlb) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_HUGETLB;
-        }
-        if flag.contains(AccessFlag::RelaxOrder) {
-            self.qp_attr.access |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
-        }
+    pub fn set_qp_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
+        self.qp_attr.access = flags_into_ibv_access(flags);
+        self
+    }
+
+    /// Set default `MR` access
+    #[inline]
+    #[must_use]
+    pub fn set_mr_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
+        self.mr_attr.access = flags_into_ibv_access(flags);
+        self
+    }
+
+    /// Set the stragety to manage `MR`s
+    #[inline]
+    #[must_use]
+    pub fn set_mr_strategy(mut self, strategy: MRManageStrategy) -> Self {
+        self.mr_attr.strategy = strategy;
         self
     }
 
@@ -868,10 +912,10 @@ impl Rdma {
     /// create a new `Rdma` instance
     #[allow(clippy::too_many_arguments)] // TODO: fix with builder pattern
     fn new(
-        access: ibv_access_flags,
         dev_attr: &DeviceInitAttr,
         cq_attr: CQInitAttr,
         qp_attr: QPInitAttr,
+        mr_attr: MRInitAttr,
     ) -> io::Result<Self> {
         let ctx = Arc::new(Context::open(
             dev_attr.dev_name.as_deref(),
@@ -882,7 +926,10 @@ impl Rdma {
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
         let event_listener = EventListener::new(cq);
         let pd = Arc::new(ctx.create_protection_domain()?);
-        let allocator = Arc::new(MrAllocator::new(Arc::<ProtectionDomain>::clone(&pd)));
+        let allocator = Arc::new(MrAllocator::new(
+            Arc::<ProtectionDomain>::clone(&pd),
+            mr_attr,
+        ));
         let qp = Arc::new(
             pd.create_queue_pair_builder()
                 .set_event_listener(event_listener)
@@ -894,7 +941,7 @@ impl Rdma {
                 .set_max_recv_sge(qp_attr.max_recv_sge)
                 .build()?,
         );
-        qp.modify_to_init(access, dev_attr.port_num)?;
+        qp.modify_to_init(qp_attr.access, dev_attr.port_num)?;
         Ok(Self {
             ctx,
             pd,
@@ -2053,7 +2100,7 @@ impl Rdma {
     /// ```
     #[inline]
     pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMr> {
-        self.allocator.alloc_zeroed(&layout)
+        self.allocator.alloc_zeroed_default(&layout)
     }
 
     /// Allocate a local memory region that has not been initialized
@@ -2118,7 +2165,34 @@ impl Rdma {
     /// ```
     #[inline]
     pub unsafe fn alloc_local_mr_uninit(&self, layout: Layout) -> io::Result<LocalMr> {
-        self.allocator.alloc(&layout)
+        self.allocator.alloc_default(&layout)
+    }
+
+    /// Allocate a local memory region
+    #[inline]
+    pub fn alloc_local_mr_with_access(
+        &self,
+        layout: Layout,
+        access: BitFlags<AccessFlag>,
+    ) -> io::Result<LocalMr> {
+        self.allocator
+            .alloc_zeroed(&layout, flags_into_ibv_access(access))
+    }
+
+    /// Allocate a local memory region that has not been initialized
+    ///
+    /// # Safety
+    ///
+    /// The newly allocated memory in this `LocalMr` is uninitialized.
+    /// Initialize it before using to make it safe.
+    ///
+    #[inline]
+    pub unsafe fn alloc_local_mr_uninit_with_access(
+        &self,
+        layout: Layout,
+        access: BitFlags<AccessFlag>,
+    ) -> io::Result<LocalMr> {
+        self.allocator.alloc(&layout, flags_into_ibv_access(access))
     }
 
     /// Request a remote memory region with default timeout value.

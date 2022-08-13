@@ -331,7 +331,7 @@ impl AgentThread {
             .inner
             .allocator
             // alignment 1 is always correct
-            .alloc_zeroed(unsafe {
+            .alloc_zeroed_default(unsafe {
                 &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
             })?;
         // SAFETY: ?
@@ -340,7 +340,9 @@ impl AgentThread {
             .inner
             .allocator
             // alignment 1 is always correct
-            .alloc_zeroed(unsafe { &Layout::from_size_align_unchecked(self.max_sr_data_len, 1) })?;
+            .alloc_zeroed_default(unsafe {
+                &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
+            })?;
         loop {
             // SAFETY: ?
             // TODO: check safety
@@ -389,7 +391,7 @@ impl AgentThread {
                         // alignment 1 is always correct
                         // SAFETY: ?
                         // TODO: check safety
-                        data_buf = self.inner.allocator.alloc_zeroed(unsafe {
+                        data_buf = self.inner.allocator.alloc_zeroed_default(unsafe {
                             &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
                         })?;
                     }
@@ -424,7 +426,7 @@ impl AgentThread {
         let response = match request.kind {
             RequestKind::AllocMR(param) => {
                 // TODO: error handling
-                let mr = self.inner.allocator.alloc_zeroed(
+                let mr = self.inner.allocator.alloc_zeroed_default(
                     &Layout::from_size_align(param.size, param.align)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
                 )?;
@@ -648,7 +650,7 @@ impl AgentInner {
         let mut header_buf = self
             .allocator
             // alignment 1 is always correct
-            .alloc_zeroed(unsafe {
+            .alloc_zeroed_default(unsafe {
                 &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
             })?;
         // SAFETY: the mr is writeable here without cancel safety issue
@@ -680,7 +682,7 @@ impl AgentInner {
         let mut header = self
             .allocator
             // alignment 1 is always correct
-            .alloc_zeroed(unsafe {
+            .alloc_zeroed_default(unsafe {
                 &Layout::from_size_align_unchecked(*RESPONSE_HEADER_MAX_LEN, 1)
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;

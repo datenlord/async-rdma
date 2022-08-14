@@ -221,7 +221,26 @@ pub enum AccessFlag {
 }
 
 /// Convert `BitFlags<AccessFlag>` into `ibv_access_flags`
-pub(crate) fn flags_into_ibv_access(flags: BitFlags<AccessFlag>) -> ibv_access_flags {
+///
+/// # Example
+///
+/// ```
+/// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
+/// use std::alloc::Layout;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let rdma = RdmaBuilder::default().build().unwrap();
+///     let layout = Layout::new::<[u8; 4096]>();
+///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
+///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+/// }
+///
+/// ```
+#[inline]
+#[must_use]
+pub fn flags_into_ibv_access(flags: BitFlags<AccessFlag>) -> ibv_access_flags {
     let mut ret = ibv_access_flags(0);
     if flags.contains(AccessFlag::LocalWrite) {
         ret |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
@@ -2168,7 +2187,29 @@ impl Rdma {
         self.allocator.alloc_default(&layout)
     }
 
-    /// Allocate a local memory region
+    /// Allocate a local memory region with specified access
+    ///
+    /// Use `alloc_local_mr` if you want to alloc memory region with default access.
+    ///
+    /// If you want more information, please check the documentation and examples
+    /// of `alloc_local_mr`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
+    /// use std::alloc::Layout;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let rdma = RdmaBuilder::default().build().unwrap();
+    ///     let layout = Layout::new::<[u8; 4096]>();
+    ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+    ///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
+    ///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+    /// }
+    ///
+    /// ```
     #[inline]
     pub fn alloc_local_mr_with_access(
         &self,
@@ -2179,13 +2220,37 @@ impl Rdma {
             .alloc_zeroed(&layout, flags_into_ibv_access(access))
     }
 
-    /// Allocate a local memory region that has not been initialized
+    /// Allocate a local memory region with specified access that has not been initialized
+    ///
+    /// Use `alloc_local_mr_uninit` if you want to alloc memory region with default access.
+    ///
+    /// If you want more information, please check the documentation and examples
+    /// of `alloc_local_mr_uninit`.
     ///
     /// # Safety
     ///
     /// The newly allocated memory in this `LocalMr` is uninitialized.
     /// Initialize it before using to make it safe.
     ///
+    /// # Example
+    ///
+    /// ```
+    /// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
+    /// use std::alloc::Layout;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let rdma = RdmaBuilder::default().build().unwrap();
+    ///     let layout = Layout::new::<[u8; 4096]>();
+    ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+    ///     let mr = unsafe {
+    ///         rdma.alloc_local_mr_uninit_with_access(layout, access)
+    ///             .unwrap()
+    ///     };
+    ///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+    /// }
+    ///
+    /// ```
     #[inline]
     pub unsafe fn alloc_local_mr_uninit_with_access(
         &self,

@@ -1,5 +1,7 @@
+use rdma_sys::ibv_access_flags;
+
 use super::{MrAccess, MrToken};
-use crate::agent::AgentInner;
+use crate::{agent::AgentInner, DEFAULT_ACCESS};
 use std::{io, ops::Range, sync::Arc, time::SystemTime};
 
 /// Remote Memory Region Accrss
@@ -40,6 +42,12 @@ impl MrAccess for RemoteMr {
     #[inline]
     fn rkey(&self) -> u32 {
         self.token.rkey
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        // TODO: add access control for rmr
+        *DEFAULT_ACCESS
     }
 }
 
@@ -118,6 +126,12 @@ impl MrAccess for &RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        // TODO: add access control for rmr
+        *DEFAULT_ACCESS
+    }
 }
 
 impl RemoteMrReadAccess for &RemoteMr {
@@ -141,6 +155,12 @@ impl MrAccess for &mut RemoteMr {
     #[inline]
     fn rkey(&self) -> u32 {
         self.token.rkey
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        // TODO: add access control for rmr
+        *DEFAULT_ACCESS
     }
 }
 impl RemoteMrReadAccess for &mut RemoteMr {
@@ -185,6 +205,12 @@ impl MrAccess for RemoteMrSlice<'_> {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        // TODO: add access control for rmr
+        *DEFAULT_ACCESS
+    }
 }
 
 impl RemoteMrReadAccess for RemoteMrSlice<'_> {
@@ -217,6 +243,12 @@ impl MrAccess for RemoteMrSliceMut<'_> {
     #[inline]
     fn rkey(&self) -> u32 {
         self.token.rkey
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        // TODO: add access control for rmr
+        *DEFAULT_ACCESS
     }
 }
 

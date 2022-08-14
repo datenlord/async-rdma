@@ -15,8 +15,10 @@ pub(crate) struct RawMemoryRegion {
     addr: *mut u8,
     /// the len of the raw memory region
     len: usize,
-    /// the protection domain the raw memory region belongs to
+    /// the protection domain that raw memory region belongs to
     pd: Arc<ProtectionDomain>,
+    /// the access of this raw memory region
+    access: ibv_access_flags,
 }
 
 impl MrAccess for RawMemoryRegion {
@@ -33,6 +35,10 @@ impl MrAccess for RawMemoryRegion {
         // SAFETY: ?
         // TODO: check safety
         unsafe { self.inner_mr.as_ref().rkey }
+    }
+
+    fn access(&self) -> ibv_access_flags {
+        self.access
     }
 }
 
@@ -61,6 +67,7 @@ impl RawMemoryRegion {
             addr,
             len,
             pd: Arc::<ProtectionDomain>::clone(pd),
+            access,
         })
     }
     /// Get local key of memory region

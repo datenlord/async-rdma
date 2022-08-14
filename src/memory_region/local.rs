@@ -4,6 +4,7 @@ use crate::{
     MRManageStrategy,
 };
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rdma_sys::ibv_access_flags;
 use sealed::sealed;
 use std::{
     alloc::{dealloc, Layout},
@@ -320,6 +321,11 @@ impl MrAccess for LocalMr {
     fn rkey(&self) -> u32 {
         self.read_inner().rkey()
     }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        self.read_inner().access()
+    }
 }
 
 #[sealed]
@@ -507,6 +513,11 @@ impl MrAccess for LocalMrInner {
     fn rkey(&self) -> u32 {
         self.raw.rkey()
     }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        self.raw.access()
+    }
 }
 
 impl LocalMrInner {
@@ -545,6 +556,11 @@ impl MrAccess for &LocalMr {
     #[inline]
     fn rkey(&self) -> u32 {
         self.read_inner().rkey()
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        self.read_inner().access()
     }
 }
 
@@ -588,6 +604,11 @@ impl MrAccess for LocalMrSlice<'_> {
     #[inline]
     fn rkey(&self) -> u32 {
         self.lmr.rkey()
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        self.read_inner().access()
     }
 }
 
@@ -664,6 +685,11 @@ impl MrAccess for LocalMrSliceMut<'_> {
     #[inline]
     fn rkey(&self) -> u32 {
         self.lmr.rkey()
+    }
+
+    #[inline]
+    fn access(&self) -> ibv_access_flags {
+        self.read_inner().access()
     }
 }
 

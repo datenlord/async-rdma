@@ -72,14 +72,23 @@ static mut RDMA_EXTENT_HOOKS: extent_hooks_t = extent_hooks_t {
     merge: Some(RDMA_MERGE_EXTENT_HOOK),
 };
 
+/// The map that records correspondence between extent metadata and `raw_mr`
+type ExtentTokenMap = Arc<Mutex<BTreeMap<usize, Item>>>;
+/// The map that records correspondence between `arena_ind` and `ProtectionDomain`
+type ArenaPdMap = Arc<Mutex<HashMap<u32, (Arc<ProtectionDomain>, ibv_access_flags)>>>;
+/// The map that records correspondence between `ibv_access_flags` and `arena_ind`
+type AccessArenaMap = Arc<Mutex<HashMap<ibv_access_flags, u32>>>;
+
 lazy_static! {
     /// Default extent hooks of jemalloc
     static ref ORIGIN_HOOKS: extent_hooks_t = get_default_hooks_impl(DEFAULT_ARENA_INDEX);
     /// The correspondence between extent metadata and `raw_mr`
     #[derive(Debug)]
-    pub(crate) static ref EXTENT_TOKEN_MAP: Arc<Mutex<BTreeMap<usize, Item>>> = Arc::new(Mutex::new(BTreeMap::<usize, Item>::new()));
+    pub(crate) static ref EXTENT_TOKEN_MAP: ExtentTokenMap = Arc::new(Mutex::new(BTreeMap::<usize, Item>::new()));
     /// The correspondence between `arena_ind` and `ProtectionDomain`
-    pub(crate) static ref ARENA_PD_MAP: Arc<Mutex<HashMap<u32, Arc<ProtectionDomain>>>> = Arc::new(Mutex::new(HashMap::new()));
+    pub(crate) static ref ARENA_PD_MAP:  ArenaPdMap = Arc::new(Mutex::new(HashMap::new()));
+    /// The correspondence between `ibv_access_flags` and `arena_ind`
+    pub(crate) static ref ACCESS_ARENA_MAP: AccessArenaMap = Arc::new(Mutex::new(HashMap::new()));
 }
 
 /// Combination between extent metadata and `raw_mr`
@@ -109,12 +118,12 @@ pub enum MRManageStrategy {
 pub(crate) struct MrAllocator {
     /// Protection domain that holds the allocator
     pd: Arc<ProtectionDomain>,
-    /// Arena index
-    arena_ind: u32,
+    /// Default arena index
+    default_arena_ind: u32,
     /// Strategy to manage `MR`s
     strategy: MRManageStrategy,
     /// Default memory region access
-    access: ibv_access_flags,
+    default_access: ibv_access_flags,
 }
 
 impl MrAllocator {
@@ -124,22 +133,23 @@ impl MrAllocator {
             MRManageStrategy::Jemalloc => {
                 debug!("new mr_allocator using jemalloc strategy");
                 #[allow(clippy::expect_used)]
-                let arena_ind = init_je_statics(Arc::<ProtectionDomain>::clone(&pd))
-                    .expect("init je statics failed");
+                let arena_ind =
+                    init_je_statics(Arc::<ProtectionDomain>::clone(&pd), mr_attr.access)
+                        .expect("init je statics failed");
                 Self {
                     pd,
-                    arena_ind,
+                    default_arena_ind: arena_ind,
                     strategy: mr_attr.strategy,
-                    access: mr_attr.access,
+                    default_access: mr_attr.access,
                 }
             }
             MRManageStrategy::Raw => {
                 debug!("new mr_allocator using raw strategy");
                 Self {
                     pd,
-                    arena_ind: 0_u32,
+                    default_arena_ind: 0_u32,
                     strategy: mr_attr.strategy,
-                    access: mr_attr.access,
+                    default_access: mr_attr.access,
                 }
             }
         }
@@ -181,13 +191,13 @@ impl MrAllocator {
     /// Initialize it before using to make it safe.
     #[allow(clippy::as_conversions)]
     pub(crate) unsafe fn alloc_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc(layout, self.access)
+        self.alloc(layout, self.default_access)
     }
 
     /// Allocate a `LocalMr` according to the `layout` with default access
     #[allow(clippy::as_conversions)]
     pub(crate) fn alloc_zeroed_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc_zeroed(layout, self.access)
+        self.alloc_zeroed(layout, self.default_access)
     }
 
     /// Allocate a `LocalMrInner` according to the `layout`
@@ -212,12 +222,46 @@ impl MrAllocator {
 
         match self.strategy {
             MRManageStrategy::Jemalloc => {
-                self.alloc_from_je(layout, flag).map_or_else(||{
+                if access == self.default_access{
+                    alloc_from_je(self.default_arena_ind, layout, flag).map_or_else(||{
+                            Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
+                        }, |addr|{
+                            #[allow(clippy::unreachable)]
+                            let raw_mr = lookup_raw_mr(self.default_arena_ind, addr as usize).map_or_else(
+                                || {
+                                    unreachable!("can not find raw mr by addr {}", addr as usize);
+                                },
+                                |raw_mr| raw_mr,
+                            );
+                            Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
+                        })
+                }else {
+                    let arena_id = ACCESS_ARENA_MAP.lock().get(&access).copied();
+                    let arena_id = arena_id.map_or_else(||{
+                        // didn't use this access before, so create an arena to mange this kind of MR
+                        let ind = init_je_statics(Arc::<ProtectionDomain>::clone(&self.pd), access)?;
+                        if ACCESS_ARENA_MAP.lock().insert(access, ind).is_some(){
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("this is a bug: insert ACCESS_ARENA_MAP failed, access:{:?} has been recorded", access),
+                            ))
+                        };
+                        Ok(ind)
+                    }, |ind|{Ok(ind)})?;
+
+                    alloc_from_je(arena_id, layout, flag).map_or_else(||{
                         Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
                     }, |addr|{
-                        let raw_mr = self.lookup_raw_mr(addr as usize);
+                        #[allow(clippy::unreachable)]
+                        let raw_mr = lookup_raw_mr(arena_id, addr as usize).map_or_else(
+                            || {
+                                unreachable!("can not find raw mr with arena_id: {} by addr: {}",arena_id, addr as usize);
+                            },
+                            |raw_mr| raw_mr,
+                        );
                         Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
                     })
+                }
             },
             MRManageStrategy::Raw => {
                 alloc_raw_mem(layout, flag).map_or_else(||{
@@ -229,36 +273,24 @@ impl MrAllocator {
             },
         }
     }
+}
 
-    /// Alloc memory for RDMA operations from jemalloc
-    ///
-    /// # Safety
-    ///
-    /// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
-    unsafe fn alloc_from_je(&self, layout: &Layout, flag: i32) -> Option<*mut u8> {
-        let addr = {
-            tikv_jemalloc_sys::mallocx(
-                layout.size(),
-                (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(self.arena_ind.cast()) | flag)
-                    .cast(),
-            )
-        };
-        if addr.is_null() {
-            None
-        } else {
-            Some(addr.cast::<u8>())
-        }
-    }
-
-    /// Look up `raw_mr` info by addr
-    #[allow(clippy::unreachable)]
-    fn lookup_raw_mr(&self, addr: usize) -> Arc<RawMemoryRegion> {
-        lookup_raw_mr(self.arena_ind, addr).map_or_else(
-            || {
-                unreachable!("can not find raw mr by addr {}", addr);
-            },
-            |raw_mr| raw_mr,
+/// Alloc memory for RDMA operations from jemalloc
+///
+/// # Safety
+///
+/// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
+unsafe fn alloc_from_je(arena_ind: u32, layout: &Layout, flag: i32) -> Option<*mut u8> {
+    let addr = {
+        tikv_jemalloc_sys::mallocx(
+            layout.size(),
+            (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(arena_ind.cast()) | flag).cast(),
         )
+    };
+    if addr.is_null() {
+        None
+    } else {
+        Some(addr.cast::<u8>())
     }
 }
 
@@ -366,9 +398,9 @@ fn create_arena() -> io::Result<u32> {
 }
 
 /// Create arena and init statics
-fn init_je_statics(pd: Arc<ProtectionDomain>) -> io::Result<u32> {
+fn init_je_statics(pd: Arc<ProtectionDomain>, access: ibv_access_flags) -> io::Result<u32> {
     let ind = create_arena()?;
-    if ARENA_PD_MAP.lock().insert(ind, pd).is_some() {
+    if ARENA_PD_MAP.lock().insert(ind, (pd, access)).is_some() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "insert ARENA_PD_MAP failed",
@@ -425,7 +457,7 @@ unsafe extern "C" fn extent_alloc_hook(
     if addr.is_null() {
         return addr;
     }
-    register_extent_mr_default(addr, size, arena_ind).map_or_else(
+    register_extent_mr(addr, size, arena_ind).map_or_else(
         || {
             error!("register_extent_mr failed. If this is the first registration, it may be caused by invalid parameters, otherwise it is OOM");
             let origin_dalloc_hook = (*ORIGIN_HOOKS)
@@ -509,7 +541,7 @@ unsafe extern "C" fn extent_merge_hook(
         remove_item_after_lock(map, addr_a);
         remove_item_after_lock(map, addr_b);
         // so we only need to register a new `raw_mr`
-        register_extent_mr_default(addr_a, size_a.wrapping_add(size_b), arena_ind).map_or_else(
+        register_extent_mr(addr_a, size_a.wrapping_add(size_b), arena_ind).map_or_else(
             || {
                 error!("register_extent_mr failed");
                 1_i32
@@ -576,39 +608,21 @@ fn remove_item_after_lock(map: &mut MutexGuard<BTreeMap<usize, Item>>, addr: *mu
     );
 }
 
-/// Register extent memory region with default access flags
-pub(crate) fn register_extent_mr_default(
-    addr: *mut c_void,
-    size: usize,
-    arena_ind: u32,
-) -> Option<Item> {
-    let access = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
-        | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE
-        | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-        | ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
-    register_extent_mr(addr, size, arena_ind, access)
-}
-
 /// Register extent memory region
 #[allow(clippy::as_conversions)]
-pub(crate) fn register_extent_mr(
-    addr: *mut c_void,
-    size: usize,
-    arena_ind: u32,
-    access: ibv_access_flags,
-) -> Option<Item> {
+pub(crate) fn register_extent_mr(addr: *mut c_void, size: usize, arena_ind: u32) -> Option<Item> {
     assert_ne!(addr, ptr::null_mut());
-    debug!(
-        "reg_mr addr {}, size {}, arena_ind {}, access {:?}",
-        addr as usize, size, arena_ind, access
-    );
     ARENA_PD_MAP.lock().get(&arena_ind).map_or_else(
         || {
             error!("can not get pd from ARENA_PD_MAP");
             None
         },
-        |pd| {
-            RawMemoryRegion::register_from_pd(pd, addr.cast::<u8>(), size, access).map_or_else(
+        |&(ref pd, ref access)| {
+            debug!(
+                "reg_mr addr {}, size {}, arena_ind {}, access {:?}",
+                addr as usize, size, arena_ind, access
+            );
+            RawMemoryRegion::register_from_pd(pd, addr.cast::<u8>(), size, *access).map_or_else(
                 |err| {
                     error!("RawMemoryRegion::register_from_pd failed {:?}", err);
                     None
@@ -629,7 +643,9 @@ pub(crate) fn register_extent_mr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{context::Context, LocalMrReadAccess, MrAccess, RdmaBuilder, DEFAULT_ACCESS};
+    use crate::{
+        context::Context, AccessFlag, LocalMrReadAccess, MrAccess, RdmaBuilder, DEFAULT_ACCESS,
+    };
     use std::{alloc::Layout, io, thread};
     use tikv_jemalloc_sys::MALLOCX_ALIGN;
 
@@ -749,7 +765,7 @@ mod tests {
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(pd, MRInitAttr::default()));
 
-        check_hooks(allocator.arena_ind);
+        check_hooks(allocator.default_arena_ind);
         // set test hooks
         // SAFETY: ?
         // TODO: check safety
@@ -766,9 +782,9 @@ mod tests {
                 merge: Some(extent_merge_hook_for_test),
             };
         }
-        set_extent_hooks(allocator.arena_ind).unwrap();
+        set_extent_hooks(allocator.default_arena_ind).unwrap();
         // check custom test hooks
-        check_hooks(allocator.arena_ind);
+        check_hooks(allocator.default_arena_ind);
 
         // some tests to make it possible to observe the opreations of jemalloc's
         // memory management operatios such as alloc, dalloc, merge.
@@ -797,7 +813,7 @@ mod tests {
     fn je_malloxc_test() {
         let ctx = Arc::new(Context::open(None, 1, 1).unwrap());
         let pd = Arc::new(ctx.create_protection_domain().unwrap());
-        let ind = init_je_statics(pd).unwrap();
+        let ind = init_je_statics(pd, *DEFAULT_ACCESS).unwrap();
         let thread = thread::spawn(move || {
             let layout = Layout::new::<char>();
             // SAFETY: ?
@@ -885,6 +901,26 @@ mod tests {
         let layout = Layout::new::<char>();
         let lmr = allocator.alloc_zeroed_default(&layout)?;
         debug!("lmr info :{:?}", &lmr);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alloc_raw_mr_with_access() -> io::Result<()> {
+        let rdma = RdmaBuilder::default()
+            .set_mr_strategy(MRManageStrategy::Raw)
+            .build()?;
+        let layout = Layout::new::<[u8; 4096]>();
+        let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+        let _mr = rdma.alloc_local_mr_with_access(layout, access)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alloc_mr_with_access() -> io::Result<()> {
+        let rdma = RdmaBuilder::default().build()?;
+        let layout = Layout::new::<[u8; 4096]>();
+        let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+        let _mr = rdma.alloc_local_mr_with_access(layout, access)?;
         Ok(())
     }
 }

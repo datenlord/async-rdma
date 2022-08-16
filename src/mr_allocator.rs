@@ -928,4 +928,50 @@ mod tests {
         assert_ne!(mr.access(), *DEFAULT_ACCESS);
         Ok(())
     }
+
+    #[tokio::test]
+    #[allow(clippy::as_conversions)]
+    async fn check_je_mr_layout() -> io::Result<()> {
+        let rdma = RdmaBuilder::default().build()?;
+        let layouts = vec![
+            Layout::new::<char>(),
+            Layout::new::<u8>(),
+            Layout::new::<u32>(),
+            Layout::new::<u64>(),
+            Layout::new::<String>(),
+            Layout::new::<[u8; 8]>(),
+        ];
+        for lay in layouts {
+            let mr = rdma.alloc_local_mr(lay)?;
+            // size check
+            assert_eq!(lay.size(), mr.length());
+            // alignment check
+            assert_eq!((*mr.as_ptr() as usize) % lay.align(), 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::as_conversions)]
+    async fn check_raw_mr_layout() -> io::Result<()> {
+        let rdma = RdmaBuilder::default()
+            .set_mr_strategy(MRManageStrategy::Raw)
+            .build()?;
+        let layouts = vec![
+            Layout::new::<char>(),
+            Layout::new::<u8>(),
+            Layout::new::<u32>(),
+            Layout::new::<u64>(),
+            Layout::new::<String>(),
+            Layout::new::<[u8; 8]>(),
+        ];
+        for lay in layouts {
+            let mr = rdma.alloc_local_mr(lay)?;
+            // size check
+            assert_eq!(lay.size(), mr.length());
+            // alignment check
+            assert_eq!((*mr.as_ptr() as usize) % lay.align(), 0);
+        }
+        Ok(())
+    }
 }

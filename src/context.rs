@@ -80,8 +80,9 @@ impl Context {
 
         // SAFETY: POD FFI type
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
-        let errno =
-            unsafe { rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), 1, &mut inner_port_attr) };
+        let errno = unsafe {
+            rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), port_num, &mut inner_port_attr)
+        };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err_with_note("ibv_query_port failed"));
         }

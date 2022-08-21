@@ -469,33 +469,9 @@ impl RdmaBuilder {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
                 let mut rdma = self.build()?;
-                let mut stream = TcpStream::connect(addr).await?;
-                let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("failed to serailize the endpoint, {:?}", e),
-                    )
-                })?;
-                stream.write_all(&endpoint).await?;
-                // the byte number is not important, as read_exact will fill the buffer
-                let _ = stream.read_exact(endpoint.as_mut()).await?;
-                let remote: QueuePairEndpoint = bincode::deserialize(&endpoint).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("failed to deserailize the endpoint, {:?}", e),
-                    )
-                })?;
+                let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
-                if !rdma.raw {
-                    let agent = Arc::new(Agent::new(
-                        Arc::<QueuePair>::clone(&rdma.qp),
-                        Arc::<MrAllocator>::clone(&rdma.allocator),
-                        self.agent_attr.max_message_length,
-                    )?);
-                    rdma.agent = Some(agent);
-                    // wait for remote agent to initialize
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                rdma.init_agent(self.agent_attr.max_message_length).await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -602,86 +578,10 @@ impl RdmaBuilder {
                 "ConnectionType should be XXSocket",
             )),
             ConnectionType::RCCM => {
-                let msg_len = self.agent_attr.max_message_length;
+                let max_message_length = self.agent_attr.max_message_length;
                 let mut rdma = self.build()?;
-
-                // SAFETY: POD FFI type
-                let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
-                let mut info: *mut rdma_addrinfo = null_mut();
-                hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
-                // Safety: ffi
-                let mut ret = unsafe {
-                    rdma_getaddrinfo(
-                        node.as_ptr().cast(),
-                        service.as_ptr().cast(),
-                        &hints,
-                        &mut info,
-                    )
-                };
-                if ret != 0_i32 {
-                    return Err(log_ret_last_os_err());
-                }
-
-                let mut id: *mut rdma_cm_id = null_mut();
-                // Safety: ffi
-                ret = unsafe { rdma_create_ep(&mut id, info, rdma.pd.as_ptr(), null_mut()) };
-                if ret != 0_i32 {
-                    // Safety: ffi
-                    unsafe {
-                        rdma_freeaddrinfo(info);
-                    }
-                    return Err(log_ret_last_os_err());
-                }
-
-                // Safety: id was initialized by `rdma_create_ep`
-                unsafe {
-                    debug!(
-                        "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
-                        (*id).qp,
-                        (*id).pd,
-                        (*id).verbs,
-                        (*id).recv_cq_channel,
-                        (*id).send_cq_channel,
-                        (*id).recv_cq,
-                        (*id).send_cq
-                    );
-                    (*id).qp = rdma.qp.as_ptr();
-                    (*id).pd = rdma.pd.as_ptr();
-                    (*id).verbs = rdma.ctx.as_ptr();
-                    (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-                    (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-                    (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
-                    (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
-                    debug!(
-                        "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
-                        (*id).qp,
-                        (*id).pd,
-                        (*id).verbs,
-                        (*id).recv_cq_channel,
-                        (*id).send_cq_channel,
-                        (*id).recv_cq,
-                        (*id).send_cq
-                    );
-                }
-                // Safety: ffi
-                ret = unsafe { rdma_connect(id, null_mut()) };
-                if ret != 0_i32 {
-                    // Safety: ffi
-                    unsafe {
-                        let _ = rdma_disconnect(id);
-                    }
-                    return Err(log_ret_last_os_err());
-                }
-                if !rdma.raw {
-                    let agent = Arc::new(Agent::new(
-                        Arc::<QueuePair>::clone(&rdma.qp),
-                        Arc::<MrAllocator>::clone(&rdma.allocator),
-                        msg_len,
-                    )?);
-                    rdma.agent = Some(agent);
-                    // wait for remote agent to initialize
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                cm_connect_helper(&mut rdma, node, service)?;
+                rdma.init_agent(max_message_length).await?;
                 Ok(rdma)
             }
         }
@@ -727,44 +627,12 @@ impl RdmaBuilder {
     pub async fn listen<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
-                let tcp_listener = TcpListener::bind(addr).await?;
-                let (mut stream, _) = tcp_listener.accept().await?;
                 let mut rdma = self.build()?;
-
-                let endpoint_size = bincode::serialized_size(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Endpoint serialization failed, {:?}", e),
-                    )
-                })?;
-                let mut remote = vec![0_u8; endpoint_size.cast()];
-                // the byte number is not important, as read_exact will fill the buffer
-                let _ = stream.read_exact(remote.as_mut()).await?;
-                let remote: QueuePairEndpoint = bincode::deserialize(&remote).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to deserialize remote endpoint, {:?}", e),
-                    )
-                })?;
-                let local = bincode::serialize(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to deserialize remote endpoint, {:?}", e),
-                    )
-                })?;
-                stream.write_all(&local).await?;
+                let tcp_listener = TcpListener::bind(addr).await?;
+                let remote = tcp_listen(&tcp_listener, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
                 debug!("handshake done");
-                if !rdma.raw {
-                    let agent = Arc::new(Agent::new(
-                        Arc::<QueuePair>::clone(&rdma.qp),
-                        Arc::<MrAllocator>::clone(&rdma.allocator),
-                        self.agent_attr.max_message_length,
-                    )?);
-                    rdma.agent = Some(agent);
-                    // wait for the remote agent to prepare
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                rdma.init_agent(self.agent_attr.max_message_length).await?;
                 rdma.tcp_listener = Arc::new(Mutex::new(Some(tcp_listener)));
                 Ok(rdma)
             }
@@ -898,6 +766,136 @@ impl Debug for RdmaBuilder {
     }
 }
 
+/// Exchange metadata through tcp
+async fn tcp_connect_helper<A: ToSocketAddrs>(
+    addr: A,
+    ep: &QueuePairEndpoint,
+) -> io::Result<QueuePairEndpoint> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let mut endpoint = bincode::serialize(ep).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to serailize the endpoint, {:?}", e),
+        )
+    })?;
+    stream.write_all(&endpoint).await?;
+    // the byte number is not important, as read_exact will fill the buffer
+    let _ = stream.read_exact(endpoint.as_mut()).await?;
+    bincode::deserialize(&endpoint).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to deserailize the endpoint, {:?}", e),
+        )
+    })
+}
+
+/// Listen for exchanging metadata through tcp
+async fn tcp_listen(
+    tcp_listener: &TcpListener,
+    ep: &QueuePairEndpoint,
+) -> io::Result<QueuePairEndpoint> {
+    let (mut stream, _) = tcp_listener.accept().await?;
+
+    let endpoint_size = bincode::serialized_size(ep).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Endpoint serialization failed, {:?}", e),
+        )
+    })?;
+    let mut remote = vec![0_u8; endpoint_size.cast()];
+    // the byte number is not important, as read_exact will fill the buffer
+    let _ = stream.read_exact(remote.as_mut()).await?;
+    let remote: QueuePairEndpoint = bincode::deserialize(&remote).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to deserialize remote endpoint, {:?}", e),
+        )
+    })?;
+    let local = bincode::serialize(ep).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to deserialize remote endpoint, {:?}", e),
+        )
+    })?;
+    stream.write_all(&local).await?;
+    Ok(remote)
+}
+
+/// Exchange metadata and setup connection through cm
+#[inline]
+#[cfg(feature = "cm")]
+fn cm_connect_helper(rdma: &mut Rdma, node: &str, service: &str) -> io::Result<()> {
+    // SAFETY: POD FFI type
+    let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
+    let mut info: *mut rdma_addrinfo = null_mut();
+    hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
+    // Safety: ffi
+    let mut ret = unsafe {
+        rdma_getaddrinfo(
+            node.as_ptr().cast(),
+            service.as_ptr().cast(),
+            &hints,
+            &mut info,
+        )
+    };
+    if ret != 0_i32 {
+        return Err(log_ret_last_os_err());
+    }
+
+    let mut id: *mut rdma_cm_id = null_mut();
+    // Safety: ffi
+    ret = unsafe { rdma_create_ep(&mut id, info, rdma.pd.as_ptr(), null_mut()) };
+    if ret != 0_i32 {
+        // Safety: ffi
+        unsafe {
+            rdma_freeaddrinfo(info);
+        }
+        return Err(log_ret_last_os_err());
+    }
+
+    // Safety: id was initialized by `rdma_create_ep`
+    unsafe {
+        debug!(
+            "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+            (*id).qp,
+            (*id).pd,
+            (*id).verbs,
+            (*id).recv_cq_channel,
+            (*id).send_cq_channel,
+            (*id).recv_cq,
+            (*id).send_cq
+        );
+        (*id).qp = rdma.qp.as_ptr();
+        (*id).pd = rdma.pd.as_ptr();
+        (*id).verbs = rdma.ctx.as_ptr();
+        (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+        (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
+        (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
+        (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
+        debug!(
+            "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+            (*id).qp,
+            (*id).pd,
+            (*id).verbs,
+            (*id).recv_cq_channel,
+            (*id).send_cq_channel,
+            (*id).recv_cq,
+            (*id).send_cq
+        );
+    }
+    // Safety: ffi
+    ret = unsafe { rdma_connect(id, null_mut()) };
+    if ret != 0_i32 {
+        // Safety: ffi
+        unsafe {
+            let _ = rdma_disconnect(id);
+        }
+        return Err(log_ret_last_os_err());
+    }
+
+    Ok(())
+}
+
 /// Method of establishing a connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionType {
@@ -1028,6 +1026,21 @@ impl Rdma {
         Ok(())
     }
 
+    /// Agent init helper
+    async fn init_agent(&mut self, max_message_length: usize) -> io::Result<()> {
+        if !self.raw {
+            let agent = Arc::new(Agent::new(
+                Arc::<QueuePair>::clone(&self.qp),
+                Arc::<MrAllocator>::clone(&self.allocator),
+                max_message_length,
+            )?);
+            self.agent = Some(agent);
+            // wait for the remote agent to prepare
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Ok(())
+    }
+
     /// Listen for new connections using the same `mr_allocator` and `event_listener` as parent `Rdma`
     ///
     /// Used with `connect` and `new_connect`
@@ -1074,59 +1087,27 @@ impl Rdma {
     pub async fn listen(&self) -> io::Result<Self> {
         match self.conn_type {
             ConnectionType::RCSocket => {
-                let (mut stream, _) = self
+                let mut rdma = self.clone()?;
+                let remote = self
                     .tcp_listener
                     .lock()
                     .await
                     .as_ref()
                     .map_or_else(
                         || Err(io::Error::new(io::ErrorKind::Other, "tcp_listener is None")),
-                        |listener| Ok(async { listener.accept().await }),
+                        |listener| Ok(async { tcp_listen(listener, &rdma.endpoint()).await }),
                     )?
                     .await?;
-                let mut rdma = self.clone()?;
-                let endpoint_size = bincode::serialized_size(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Endpoint serialization failed, {:?}", e),
-                    )
-                })?;
-                let mut remote = vec![0_u8; endpoint_size.cast()];
-                // the byte number is not important, as read_exact will fill the buffer
-                let _ = stream.read_exact(remote.as_mut()).await?;
-                let remote: QueuePairEndpoint = bincode::deserialize(&remote).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to deserialize remote endpoint, {:?}", e),
-                    )
-                })?;
-                let local = bincode::serialize(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to deserialize remote endpoint, {:?}", e),
-                    )
-                })?;
-                stream.write_all(&local).await?;
                 rdma.qp_handshake(remote)?;
                 debug!("handshake done");
-                if !rdma.raw {
-                    #[allow(clippy::unreachable)]
-                    let max_sr_data_len = self.agent.as_ref().map_or_else(
-                        || {
-                            unreachable!("agent of parent rdma is None");
-                        },
-                        |agent| agent.max_sr_data_len,
-                    );
-
-                    let agent = Arc::new(Agent::new(
-                        Arc::<QueuePair>::clone(&rdma.qp),
-                        Arc::<MrAllocator>::clone(&rdma.allocator),
-                        max_sr_data_len,
-                    )?);
-                    rdma.agent = Some(agent);
-                    // wait for the remote agent to prepare
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                #[allow(clippy::unreachable)]
+                let max_message_length = self.agent.as_ref().map_or_else(
+                    || {
+                        unreachable!("agent of parent rdma is None");
+                    },
+                    |agent| agent.max_sr_data_len,
+                );
+                rdma.init_agent(max_message_length).await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -1183,40 +1164,16 @@ impl Rdma {
         match self.conn_type {
             ConnectionType::RCSocket => {
                 let mut rdma = self.clone()?;
-                let mut stream = TcpStream::connect(addr).await?;
-                let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("failed to serailize the endpoint, {:?}", e),
-                    )
-                })?;
-                stream.write_all(&endpoint).await?;
-                // the byte number is not important, as read_exact will fill the buffer
-                let _ = stream.read_exact(endpoint.as_mut()).await?;
-                let remote: QueuePairEndpoint = bincode::deserialize(&endpoint).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("failed to deserailize the endpoint, {:?}", e),
-                    )
-                })?;
+                let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
-                if !rdma.raw {
-                    #[allow(clippy::unreachable)]
-                    let max_sr_data_len = self.agent.as_ref().map_or_else(
-                        || {
-                            unreachable!("agent of parent rdma is None");
-                        },
-                        |agent| agent.max_sr_data_len,
-                    );
-                    let agent = Arc::new(Agent::new(
-                        Arc::<QueuePair>::clone(&rdma.qp),
-                        Arc::<MrAllocator>::clone(&rdma.allocator),
-                        max_sr_data_len,
-                    )?);
-                    rdma.agent = Some(agent);
-                    // wait for remote agent to initialize
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                #[allow(clippy::unreachable)]
+                let max_message_length = self.agent.as_ref().map_or_else(
+                    || {
+                        unreachable!("agent of parent rdma is None");
+                    },
+                    |agent| agent.max_sr_data_len,
+                );
+                rdma.init_agent(max_message_length).await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -2088,31 +2045,9 @@ impl Rdma {
             rdma.conn_type == ConnectionType::RCSocket,
             "should set connection type to RCSocket"
         );
-        let mut stream = TcpStream::connect(addr).await?;
-        let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("failed to serailize the endpoint, {:?}", e),
-            )
-        })?;
-        stream.write_all(&endpoint).await?;
-        // the byte number is not important, as read_exact will fill the buffer
-        let _ = stream.read_exact(endpoint.as_mut()).await?;
-        let remote: QueuePairEndpoint = bincode::deserialize(&endpoint).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("failed to deserailize the endpoint, {:?}", e),
-            )
-        })?;
+        let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
         rdma.qp_handshake(remote)?;
-        if !rdma.raw {
-            let agent = Arc::new(Agent::new(
-                Arc::<QueuePair>::clone(&rdma.qp),
-                Arc::<MrAllocator>::clone(&rdma.allocator),
-                max_message_length,
-            )?);
-            rdma.agent = Some(agent);
-        }
+        rdma.init_agent(max_message_length).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
@@ -2221,82 +2156,8 @@ impl Rdma {
             rdma.conn_type == ConnectionType::RCCM,
             "should set connection type to RCSocket"
         );
-
-        // SAFETY: POD FFI type
-        let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
-        let mut info: *mut rdma_addrinfo = null_mut();
-        hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
-        // Safety: ffi
-        let mut ret = unsafe {
-            rdma_getaddrinfo(
-                node.as_ptr().cast(),
-                service.as_ptr().cast(),
-                &hints,
-                &mut info,
-            )
-        };
-        if ret != 0_i32 {
-            return Err(log_ret_last_os_err());
-        }
-
-        let mut id: *mut rdma_cm_id = null_mut();
-        // Safety: ffi
-        ret = unsafe { rdma_create_ep(&mut id, info, rdma.pd.as_ptr(), null_mut()) };
-        if ret != 0_i32 {
-            // Safety: ffi
-            unsafe {
-                rdma_freeaddrinfo(info);
-            }
-            return Err(log_ret_last_os_err());
-        }
-        // Safety: id was initialized by `rdma_create_ep`
-        unsafe {
-            debug!(
-                "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
-                (*id).qp,
-                (*id).pd,
-                (*id).verbs,
-                (*id).recv_cq_channel,
-                (*id).send_cq_channel,
-                (*id).recv_cq,
-                (*id).send_cq
-            );
-            (*id).qp = rdma.qp.as_ptr();
-            (*id).pd = rdma.pd.as_ptr();
-            (*id).verbs = rdma.ctx.as_ptr();
-            (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-            (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-            (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
-            (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
-            debug!(
-                "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
-                (*id).qp,
-                (*id).pd,
-                (*id).verbs,
-                (*id).recv_cq_channel,
-                (*id).send_cq_channel,
-                (*id).recv_cq,
-                (*id).send_cq
-            );
-        }
-
-        // Safety: ffi
-        ret = unsafe { rdma_connect(id, null_mut()) };
-        if ret != 0_i32 {
-            // Safety: ffi
-            unsafe {
-                let _ = rdma_disconnect(id);
-            }
-            return Err(log_ret_last_os_err());
-        }
-        if !rdma.raw {
-            let agent = Arc::new(Agent::new(
-                Arc::<QueuePair>::clone(&rdma.qp),
-                Arc::<MrAllocator>::clone(&rdma.allocator),
-                max_message_length,
-            )?);
-            rdma.agent = Some(agent);
-        }
+        cm_connect_helper(&mut rdma, node, service)?;
+        rdma.init_agent(max_message_length).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
@@ -3105,16 +2966,7 @@ impl RdmaListener {
         stream.write_all(&local).await?;
         rdma.qp_handshake(remote)?;
         debug!("handshake done");
-        if !rdma.raw {
-            let agent = Arc::new(Agent::new(
-                Arc::<QueuePair>::clone(&rdma.qp),
-                Arc::<MrAllocator>::clone(&rdma.allocator),
-                max_message_length,
-            )?);
-            rdma.agent = Some(agent);
-            // wait for the remote agent to prepare
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        rdma.init_agent(max_message_length).await?;
         Ok(rdma)
     }
 }

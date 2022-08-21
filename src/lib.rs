@@ -633,7 +633,7 @@ impl RdmaBuilder {
                 rdma.qp_handshake(remote)?;
                 debug!("handshake done");
                 rdma.init_agent(self.agent_attr.max_message_length).await?;
-                rdma.tcp_listener = Arc::new(Mutex::new(Some(tcp_listener)));
+                rdma.clone_attr = CloneAttr::default().set_tcp_listener(tcp_listener);
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -905,14 +905,53 @@ pub enum ConnectionType {
     RCCM,
 }
 
+/// Attributes for creating new `Rdma`s through `clone`
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CloneAttr {
+    /// Tcp listener used for new connections
+    pub(crate) tcp_listener: Option<Arc<Mutex<TcpListener>>>,
+    /// Clone `Rdma` with new `ProtectionDomain`
+    #[allow(dead_code)] // not yet fully implemented
+    pub(crate) pd: Option<Arc<ProtectionDomain>>,
+    /// Clone `Rdma` with new `Port number`
+    pub(crate) port_num: Option<u8>,
+    /// Clone `Rdma` with new qp access
+    pub(crate) qp_access: Option<ibv_access_flags>,
+}
+
+impl CloneAttr {
+    /// Set `TcpListener`
+    fn set_tcp_listener(mut self, tcp_listener: TcpListener) -> Self {
+        self.tcp_listener = Some(Arc::new(Mutex::new(tcp_listener)));
+        self
+    }
+
+    /// Set `ProtectionDomain`
+    #[allow(dead_code)] // not yet fully implemented
+    fn set_pd(mut self, pd: ProtectionDomain) -> Self {
+        self.pd = Some(Arc::new(pd));
+        self
+    }
+
+    /// Set port number
+    fn set_port_num(mut self, port_num: u8) -> Self {
+        self.port_num = Some(port_num);
+        self
+    }
+
+    /// Set qp access
+    fn set_qp_access(mut self, access: ibv_access_flags) -> Self {
+        self.qp_access = Some(access);
+        self
+    }
+}
+
 /// Rdma handler, the only interface that the users deal with rdma
 #[derive(Debug)]
 pub struct Rdma {
     /// device context
-    #[allow(dead_code)]
     ctx: Arc<Context>,
     /// protection domain
-    #[allow(dead_code)]
     pd: Arc<ProtectionDomain>,
     /// Memory region allocator
     allocator: Arc<MrAllocator>,
@@ -924,8 +963,8 @@ pub struct Rdma {
     conn_type: ConnectionType,
     /// If send/recv raw data
     raw: bool,
-    /// Tcp listener used for new connections
-    tcp_listener: Arc<Mutex<Option<TcpListener>>>,
+    /// Attributes for creating new `Rdma`s through `clone`
+    clone_attr: CloneAttr,
 }
 
 impl Rdma {
@@ -969,21 +1008,34 @@ impl Rdma {
             allocator,
             conn_type: qp_attr.conn_type,
             raw: qp_attr.raw,
-            tcp_listener: Arc::new(Mutex::new(None)),
+            clone_attr: CloneAttr::default(),
         })
     }
 
     /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
     fn clone(&self) -> io::Result<Self> {
-        let access = self.qp.access.map_or_else(
+        let qp_access = self.clone_attr.qp_access.map_or_else(
             || {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "parent qp access is none",
-                ))
+                self.qp.access.map_or_else(
+                    || {
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "parent qp access is none",
+                        ))
+                    },
+                    Ok,
+                )
             },
             Ok,
         )?;
+        let port_num = self.clone_attr.port_num.unwrap_or(self.qp.port_num);
+        // TODO: add multi-pd support for allocator
+        let pd = self
+            .clone_attr
+            .pd
+            .as_ref()
+            .map_or_else(|| &self.pd, |pd| pd);
+
         let mut qp_init_attr = self.qp.qp_init_attr.clone();
         // SAFETY: ffi
         let inner_qp = NonNull::new(unsafe {
@@ -991,24 +1043,24 @@ impl Rdma {
         })
         .ok_or_else(log_ret_last_os_err)?;
         let mut qp = QueuePair {
-            pd: Arc::clone(&self.pd),
+            pd: Arc::clone(pd),
             event_listener: Arc::clone(&self.qp.event_listener),
             inner_qp,
-            port_num: self.qp.port_num,
+            port_num,
             gid_index: self.qp.gid_index,
             qp_init_attr,
-            access: self.qp.access,
+            access: Some(qp_access),
         };
-        qp.modify_to_init(access, self.qp.port_num)?;
+        qp.modify_to_init(qp_access, self.qp.port_num)?;
         Ok(Self {
             ctx: Arc::clone(&self.ctx),
-            pd: Arc::clone(&self.pd),
+            pd: Arc::clone(pd),
             qp: Arc::new(qp),
             agent: None,
             allocator: Arc::clone(&self.allocator),
             conn_type: self.conn_type,
             raw: self.raw,
-            tcp_listener: Arc::clone(&self.tcp_listener),
+            clone_attr: self.clone_attr.clone(),
         })
     }
 
@@ -1089,13 +1141,17 @@ impl Rdma {
             ConnectionType::RCSocket => {
                 let mut rdma = self.clone()?;
                 let remote = self
+                    .clone_attr
                     .tcp_listener
-                    .lock()
-                    .await
                     .as_ref()
                     .map_or_else(
                         || Err(io::Error::new(io::ErrorKind::Other, "tcp_listener is None")),
-                        |listener| Ok(async { tcp_listen(listener, &rdma.endpoint()).await }),
+                        |tcp_listener| {
+                            Ok(async {
+                                let tcp_listener = tcp_listener.lock().await;
+                                tcp_listen(&tcp_listener, &rdma.endpoint()).await
+                            })
+                        },
                     )?
                     .await?;
                 rdma.qp_handshake(remote)?;
@@ -2840,6 +2896,103 @@ impl Rdma {
                 "Agent is not ready, please wait a while",
             ))
         }
+    }
+
+    /// Set qp access for new `Rdma` that created by `clone`
+    ///
+    /// Used with `listen`, `new_connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{AccessFlag, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+    ///     let rdma = rdma.set_new_qp_access(access);
+    ///     let _new_rdma = rdma.new_connect(addr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///         let _new_rdma = rdma.listen().await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn set_new_qp_access(mut self, qp_access: BitFlags<AccessFlag>) -> Self {
+        self.clone_attr = self
+            .clone_attr
+            .set_qp_access(flags_into_ibv_access(qp_access));
+        self
+    }
+
+    /// Set qp access for new `Rdma` that created by `clone`
+    ///
+    /// Used with `listen`, `new_connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let rdma = rdma.set_new_port_num(1_u8);
+    ///     let _new_rdma = rdma.new_connect(addr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let _new_rdma = rdma.listen().await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn set_new_port_num(mut self, port_num: u8) -> Self {
+        self.clone_attr = self.clone_attr.set_port_num(port_num);
+        self
     }
 }
 

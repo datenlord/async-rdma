@@ -162,7 +162,6 @@ use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use enumflags2::{bitflags, BitFlags};
-#[cfg(feature = "cm")]
 use error_utilities::log_ret_last_os_err;
 use event_listener::EventListener;
 pub use memory_region::{
@@ -185,10 +184,11 @@ use rdma_sys::{
 use rmr_manager::DEFAULT_RMR_TIMEOUT;
 #[cfg(feature = "cm")]
 use std::ptr::null_mut;
-use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
+use std::{alloc::Layout, fmt::Debug, io, ptr::NonNull, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::Mutex,
 };
 use tracing::debug;
 
@@ -765,6 +765,7 @@ impl RdmaBuilder {
                     // wait for the remote agent to prepare
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
+                rdma.tcp_listener = Arc::new(Mutex::new(Some(tcp_listener)));
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -925,6 +926,8 @@ pub struct Rdma {
     conn_type: ConnectionType,
     /// If send/recv raw data
     raw: bool,
+    /// Tcp listener used for new connections
+    tcp_listener: Arc<Mutex<Option<TcpListener>>>,
 }
 
 impl Rdma {
@@ -949,26 +952,65 @@ impl Rdma {
             Arc::<ProtectionDomain>::clone(&pd),
             mr_attr,
         ));
-        let qp = Arc::new(
-            pd.create_queue_pair_builder()
-                .set_event_listener(event_listener)
-                .set_port_num(dev_attr.port_num)
-                .set_gid_index(dev_attr.gid_index)
-                .set_max_send_wr(qp_attr.max_send_wr)
-                .set_max_send_sge(qp_attr.max_send_sge)
-                .set_max_recv_wr(qp_attr.max_recv_wr)
-                .set_max_recv_sge(qp_attr.max_recv_sge)
-                .build()?,
-        );
+        let mut qp = pd
+            .create_queue_pair_builder()
+            .set_event_listener(event_listener)
+            .set_port_num(dev_attr.port_num)
+            .set_gid_index(dev_attr.gid_index)
+            .set_max_send_wr(qp_attr.max_send_wr)
+            .set_max_send_sge(qp_attr.max_send_sge)
+            .set_max_recv_wr(qp_attr.max_recv_wr)
+            .set_max_recv_sge(qp_attr.max_recv_sge)
+            .build()?;
         qp.modify_to_init(qp_attr.access, dev_attr.port_num)?;
         Ok(Self {
             ctx,
             pd,
-            qp,
+            qp: Arc::new(qp),
             agent: None,
             allocator,
             conn_type: qp_attr.conn_type,
             raw: qp_attr.raw,
+            tcp_listener: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
+    fn clone(&self) -> io::Result<Self> {
+        let access = self.qp.access.map_or_else(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "parent qp access is none",
+                ))
+            },
+            Ok,
+        )?;
+        let mut qp_init_attr = self.qp.qp_init_attr.clone();
+        // SAFETY: ffi
+        let inner_qp = NonNull::new(unsafe {
+            rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut qp_init_attr.qp_init_attr_inner)
+        })
+        .ok_or_else(log_ret_last_os_err)?;
+        let mut qp = QueuePair {
+            pd: Arc::clone(&self.pd),
+            event_listener: Arc::clone(&self.qp.event_listener),
+            inner_qp,
+            port_num: self.qp.port_num,
+            gid_index: self.qp.gid_index,
+            qp_init_attr,
+            access: self.qp.access,
+        };
+        qp.modify_to_init(access, self.qp.port_num)?;
+        Ok(Self {
+            ctx: Arc::clone(&self.ctx),
+            pd: Arc::clone(&self.pd),
+            qp: Arc::new(qp),
+            agent: None,
+            allocator: Arc::clone(&self.allocator),
+            conn_type: self.conn_type,
+            raw: self.raw,
+            tcp_listener: Arc::clone(&self.tcp_listener),
         })
     }
 
@@ -984,6 +1026,204 @@ impl Rdma {
         self.qp.modify_to_rts(0x12, 6, 6, 0, 1)?;
         debug!("rts");
         Ok(())
+    }
+
+    /// Listen for new connections using the same `mr_allocator` and `event_listener` as parent `Rdma`
+    ///
+    /// Used with `connect` and `new_connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     for _ in 0..3 {
+    ///         let _new_rdma = rdma.new_connect(addr).await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     for _ in 0..3 {
+    ///         let _new_rdma = rdma.listen().await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn listen(&self) -> io::Result<Self> {
+        match self.conn_type {
+            ConnectionType::RCSocket => {
+                let (mut stream, _) = self
+                    .tcp_listener
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map_or_else(
+                        || Err(io::Error::new(io::ErrorKind::Other, "tcp_listener is None")),
+                        |listener| Ok(async { listener.accept().await }),
+                    )?
+                    .await?;
+                let mut rdma = self.clone()?;
+                let endpoint_size = bincode::serialized_size(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Endpoint serialization failed, {:?}", e),
+                    )
+                })?;
+                let mut remote = vec![0_u8; endpoint_size.cast()];
+                // the byte number is not important, as read_exact will fill the buffer
+                let _ = stream.read_exact(remote.as_mut()).await?;
+                let remote: QueuePairEndpoint = bincode::deserialize(&remote).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize remote endpoint, {:?}", e),
+                    )
+                })?;
+                let local = bincode::serialize(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to deserialize remote endpoint, {:?}", e),
+                    )
+                })?;
+                stream.write_all(&local).await?;
+                rdma.qp_handshake(remote)?;
+                debug!("handshake done");
+                if !rdma.raw {
+                    #[allow(clippy::unreachable)]
+                    let max_sr_data_len = self.agent.as_ref().map_or_else(
+                        || {
+                            unreachable!("agent of parent rdma is None");
+                        },
+                        |agent| agent.max_sr_data_len,
+                    );
+
+                    let agent = Arc::new(Agent::new(
+                        Arc::<QueuePair>::clone(&rdma.qp),
+                        Arc::<MrAllocator>::clone(&rdma.allocator),
+                        max_sr_data_len,
+                    )?);
+                    rdma.agent = Some(agent);
+                    // wait for the remote agent to prepare
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(rdma)
+            }
+            ConnectionType::RCCM => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXSocket",
+            )),
+        }
+    }
+
+    /// Establish new connections with RDMA server using the same `mr_allocator` and `event_listener` as parent `Rdma`
+    ///
+    /// Used with `listen`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     for _ in 0..3 {
+    ///         let _new_rdma = rdma.new_connect(addr).await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     for _ in 0..3 {
+    ///         let _new_rdma = rdma.listen().await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn new_connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<Self> {
+        match self.conn_type {
+            ConnectionType::RCSocket => {
+                let mut rdma = self.clone()?;
+                let mut stream = TcpStream::connect(addr).await?;
+                let mut endpoint = bincode::serialize(&rdma.endpoint()).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("failed to serailize the endpoint, {:?}", e),
+                    )
+                })?;
+                stream.write_all(&endpoint).await?;
+                // the byte number is not important, as read_exact will fill the buffer
+                let _ = stream.read_exact(endpoint.as_mut()).await?;
+                let remote: QueuePairEndpoint = bincode::deserialize(&endpoint).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("failed to deserailize the endpoint, {:?}", e),
+                    )
+                })?;
+                rdma.qp_handshake(remote)?;
+                if !rdma.raw {
+                    #[allow(clippy::unreachable)]
+                    let max_sr_data_len = self.agent.as_ref().map_or_else(
+                        || {
+                            unreachable!("agent of parent rdma is None");
+                        },
+                        |agent| agent.max_sr_data_len,
+                    );
+                    let agent = Arc::new(Agent::new(
+                        Arc::<QueuePair>::clone(&rdma.qp),
+                        Arc::<MrAllocator>::clone(&rdma.allocator),
+                        max_sr_data_len,
+                    )?);
+                    rdma.agent = Some(agent);
+                    // wait for remote agent to initialize
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(rdma)
+            }
+            ConnectionType::RCCM => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXSocket",
+            )),
+        }
     }
 
     /// Send the content in the `lm`

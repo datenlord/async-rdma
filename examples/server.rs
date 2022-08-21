@@ -88,4 +88,18 @@ async fn main() {
         .await
         .unwrap();
     println!("server done");
+
+    // create new `Rdma`s (connections) that has the same `mr_allocator` and `event_listener` as parent
+    for _ in 0..3 {
+        let rdma = rdma.listen().await.unwrap();
+        println!("accepted");
+        receive_data_from_client(&rdma).await.unwrap();
+        receive_data_with_imm_from_client(&rdma).await.unwrap();
+        read_rmr_from_client(&rdma).await.unwrap();
+        receive_mr_after_being_written(&rdma).await.unwrap();
+        receive_mr_after_being_written_with_imm(&rdma)
+            .await
+            .unwrap();
+    }
+    println!("server done");
 }

@@ -60,7 +60,7 @@ pub(crate) struct Agent {
     #[allow(dead_code)]
     agent_thread: Arc<AgentThread>,
     /// Max message length
-    max_sr_data_len: usize,
+    pub(crate) max_sr_data_len: usize,
 }
 
 impl Drop for Agent {

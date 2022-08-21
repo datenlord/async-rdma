@@ -42,9 +42,10 @@ pub(crate) static MAX_SEND_SGE: u32 = 10;
 pub(crate) static MAX_RECV_SGE: u32 = 10;
 
 /// Queue pair initialized attribute
-struct QueuePairInitAttr {
+#[derive(Clone)]
+pub(crate) struct QueuePairInitAttr {
     /// Internal `ibv_qp_init_attr` structure
-    qp_init_attr_inner: ibv_qp_init_attr,
+    pub(crate) qp_init_attr_inner: ibv_qp_init_attr,
 }
 
 impl Default for QueuePairInitAttr {
@@ -129,7 +130,6 @@ impl QueuePairBuilder {
     /// `EPERM`     Not enough permissions to create a QP with this Transport Service Type
     pub(crate) fn build(mut self) -> io::Result<QueuePair> {
         // SAFETY: ffi
-        // TODO: check safety
         let inner_qp = NonNull::new(unsafe {
             rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut self.qp_init_attr.qp_init_attr_inner)
         })
@@ -137,14 +137,16 @@ impl QueuePairBuilder {
         Ok(QueuePair {
             pd: Arc::<ProtectionDomain>::clone(&self.pd),
             inner_qp,
-            event_listener: self.event_listener.ok_or_else(|| {
+            event_listener: Arc::new(self.event_listener.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Other,
                     "event channel is not set for the queue pair builder",
                 )
-            })?,
+            })?),
             port_num: self.port_num,
             gid_index: self.gid_index,
+            qp_init_attr: self.qp_init_attr,
+            access: None,
         })
     }
 
@@ -208,15 +210,19 @@ pub(crate) struct QueuePairEndpoint {
 #[derive(Debug)]
 pub(crate) struct QueuePair {
     /// protection domain it belongs to
-    pd: Arc<ProtectionDomain>,
+    pub(crate) pd: Arc<ProtectionDomain>,
     /// event listener
-    pub(crate) event_listener: EventListener,
+    pub(crate) event_listener: Arc<EventListener>,
     /// internal `ibv_qp` pointer
-    inner_qp: NonNull<ibv_qp>,
+    pub(crate) inner_qp: NonNull<ibv_qp>,
     /// port number
-    port_num: u8,
+    pub(crate) port_num: u8,
     /// gid index
-    gid_index: usize,
+    pub(crate) gid_index: usize,
+    /// backup for child qp
+    pub(crate) qp_init_attr: QueuePairInitAttr,
+    /// access of this qp
+    pub(crate) access: Option<ibv_access_flags>,
 }
 
 impl QueuePair {
@@ -243,7 +249,11 @@ impl QueuePair {
     /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
     ///
     /// `ENOMEM`    Not enough resources to complete this operation
-    pub(crate) fn modify_to_init(&self, flag: ibv_access_flags, port_num: u8) -> io::Result<()> {
+    pub(crate) fn modify_to_init(
+        &mut self,
+        flag: ibv_access_flags,
+        port_num: u8,
+    ) -> io::Result<()> {
         // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.pkey_index = 0;
@@ -260,6 +270,7 @@ impl QueuePair {
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
+        self.access = Some(flag);
         Ok(())
     }
 

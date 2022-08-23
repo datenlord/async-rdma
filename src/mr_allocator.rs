@@ -974,4 +974,19 @@ mod tests {
         }
         Ok(())
     }
+
+    /// `Jemalloc` may alloc `MR` with wrong `arena_index` from `tcache` when we
+    /// create more than one `Jemalloc` enabled `mr_allocator`s.
+    /// So we disable `tcache` by default and make this test.
+    /// If you want to enable `tcache` and make sure safety by yourself, change
+    /// `JEMALLOC_SYS_WITH_MALLOC_CONF` from `tcache:false` to `tcache:true`.
+    #[tokio::test]
+    async fn multi_je_allocator() -> io::Result<()> {
+        let rdma_1 = RdmaBuilder::default().build()?;
+        let layout = Layout::new::<char>();
+        let _mr_1 = rdma_1.alloc_local_mr(layout);
+        let rdma_2 = RdmaBuilder::default().build()?;
+        let _mr_2 = rdma_2.alloc_local_mr(layout);
+        Ok(())
+    }
 }

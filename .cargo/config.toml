@@ -2,4 +2,11 @@
 # `narenas` is the maximum number of arenas to use for automatic multiplexing of threads and arenas. 
 # The default is four times the number of CPUs, or one if there is a single CPU.
 # `async-rdma` doesn't need that many antomatic arenas so we set it to 1.
-JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1"
+
+# `tcache` is a feature of `Jemalloc` to speed up memory allocation.
+# However `Jemalloc` may alloc `MR` with wrong `arena_index` from `tcache` 
+# when we create more than one `Jemalloc` enabled `mr_allocator`s.
+# So we disable `tcache` by default.
+# If you want to enable `tcache` and make sure safety by yourself, change 
+# `JEMALLOC_SYS_WITH_MALLOC_CONF` from `tcache:false` to `tcache:true`.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false"

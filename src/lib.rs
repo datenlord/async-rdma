@@ -2374,7 +2374,7 @@ impl Rdma {
         access: BitFlags<AccessFlag>,
     ) -> io::Result<LocalMr> {
         self.allocator
-            .alloc_zeroed(&layout, flags_into_ibv_access(access))
+            .alloc_zeroed(&layout, flags_into_ibv_access(access), &self.pd)
     }
 
     /// Allocate a local memory region with specified access that has not been initialized
@@ -2414,7 +2414,8 @@ impl Rdma {
         layout: Layout,
         access: BitFlags<AccessFlag>,
     ) -> io::Result<LocalMr> {
-        self.allocator.alloc(&layout, flags_into_ibv_access(access))
+        self.allocator
+            .alloc(&layout, flags_into_ibv_access(access), &self.pd)
     }
 
     /// Request a remote memory region with default timeout value.

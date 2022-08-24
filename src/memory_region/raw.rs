@@ -76,6 +76,12 @@ impl RawMemoryRegion {
         // TODO: check safety
         unsafe { self.inner_mr.as_ref().lkey }
     }
+
+    /// Get pd of this memory region
+    #[allow(dead_code)] // used by test
+    pub(crate) fn pd(&self) -> &Arc<ProtectionDomain> {
+        &self.pd
+    }
 }
 
 impl Debug for RawMemoryRegion {

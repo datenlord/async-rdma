@@ -72,12 +72,24 @@ static mut RDMA_EXTENT_HOOKS: extent_hooks_t = extent_hooks_t {
     merge: Some(RDMA_MERGE_EXTENT_HOOK),
 };
 
+/// Combination of `ProtectionDomain`'s ptr and `ibv_access_falgs` as a key.
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct AccessPDKey(u128);
+
+impl AccessPDKey {
+    /// Cast the `ProtectionDomain`'s ptr and `ibv_access_flags` into a `u128`
+    #[allow(clippy::as_conversions)]
+    pub(crate) fn new(pd: &Arc<ProtectionDomain>, access: ibv_access_flags) -> Self {
+        Self((u128::from(access.0)).wrapping_shl(64) | (pd.as_ptr() as u128))
+    }
+}
+
 /// The map that records correspondence between extent metadata and `raw_mr`
 type ExtentTokenMap = Arc<Mutex<BTreeMap<usize, Item>>>;
 /// The map that records correspondence between `arena_ind` and `ProtectionDomain`
 type ArenaPdMap = Arc<Mutex<HashMap<u32, (Arc<ProtectionDomain>, ibv_access_flags)>>>;
-/// The map that records correspondence between `ibv_access_flags` and `arena_ind`
-type AccessArenaMap = Arc<Mutex<HashMap<ibv_access_flags, u32>>>;
+/// The map that records correspondence between (`ibv_access_flags`, &pd) and `arena_ind`
+type AccessPDArenaMap = Arc<Mutex<HashMap<AccessPDKey, u32>>>;
 
 lazy_static! {
     /// Default extent hooks of jemalloc
@@ -88,7 +100,7 @@ lazy_static! {
     /// The correspondence between `arena_ind` and `ProtectionDomain`
     pub(crate) static ref ARENA_PD_MAP:  ArenaPdMap = Arc::new(Mutex::new(HashMap::new()));
     /// The correspondence between `ibv_access_flags` and `arena_ind`
-    pub(crate) static ref ACCESS_ARENA_MAP: AccessArenaMap = Arc::new(Mutex::new(HashMap::new()));
+    pub(crate) static ref ACCESS_PD_ARENA_MAP: AccessPDArenaMap = Arc::new(Mutex::new(HashMap::new()));
 }
 
 /// Combination between extent metadata and `raw_mr`
@@ -117,7 +129,7 @@ pub enum MRManageStrategy {
 #[derive(Debug)]
 pub(crate) struct MrAllocator {
     /// Protection domain that holds the allocator
-    pd: Arc<ProtectionDomain>,
+    default_pd: Arc<ProtectionDomain>,
     /// Default arena index
     default_arena_ind: u32,
     /// Strategy to manage `MR`s
@@ -137,7 +149,7 @@ impl MrAllocator {
                     init_je_statics(Arc::<ProtectionDomain>::clone(&pd), mr_attr.access)
                         .expect("init je statics failed");
                 Self {
-                    pd,
+                    default_pd: pd,
                     default_arena_ind: arena_ind,
                     strategy: mr_attr.strategy,
                     default_access: mr_attr.access,
@@ -146,7 +158,7 @@ impl MrAllocator {
             MRManageStrategy::Raw => {
                 debug!("new mr_allocator using raw strategy");
                 Self {
-                    pd,
+                    default_pd: pd,
                     default_arena_ind: 0_u32,
                     strategy: mr_attr.strategy,
                     default_access: mr_attr.access,
@@ -166,8 +178,9 @@ impl MrAllocator {
         self: &Arc<Self>,
         layout: &Layout,
         access: ibv_access_flags,
+        pd: &Arc<ProtectionDomain>,
     ) -> io::Result<LocalMr> {
-        let inner = self.alloc_inner(layout, 0, access)?;
+        let inner = self.alloc_inner(layout, 0, access, pd)?;
         Ok(LocalMr::new(inner))
     }
 
@@ -177,9 +190,10 @@ impl MrAllocator {
         self: &Arc<Self>,
         layout: &Layout,
         access: ibv_access_flags,
+        pd: &Arc<ProtectionDomain>,
     ) -> io::Result<LocalMr> {
         // SAFETY: alloc zeroed memory is safe
-        let inner = unsafe { self.alloc_inner(layout, MALLOCX_ZERO, access)? };
+        let inner = unsafe { self.alloc_inner(layout, MALLOCX_ZERO, access, pd)? };
         Ok(LocalMr::new(inner))
     }
 
@@ -191,13 +205,13 @@ impl MrAllocator {
     /// Initialize it before using to make it safe.
     #[allow(clippy::as_conversions)]
     pub(crate) unsafe fn alloc_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc(layout, self.default_access)
+        self.alloc(layout, self.default_access, &self.default_pd)
     }
 
     /// Allocate a `LocalMr` according to the `layout` with default access
     #[allow(clippy::as_conversions)]
     pub(crate) fn alloc_zeroed_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc_zeroed(layout, self.default_access)
+        self.alloc_zeroed(layout, self.default_access, &self.default_pd)
     }
 
     /// Allocate a `LocalMrInner` according to the `layout`
@@ -211,6 +225,7 @@ impl MrAllocator {
         layout: &Layout,
         flag: i32,
         access: ibv_access_flags,
+        pd: &Arc<ProtectionDomain>,
     ) -> io::Result<LocalMrInner> {
         // check to ensure the safety requirements of `slice` methords
         if layout.size() > isize::MAX.cast() {
@@ -222,7 +237,7 @@ impl MrAllocator {
 
         match self.strategy {
             MRManageStrategy::Jemalloc => {
-                if access == self.default_access{
+                if access == self.default_access && pd.inner_pd == self.default_pd.inner_pd {
                     alloc_from_je(self.default_arena_ind, layout, flag).map_or_else(||{
                             Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
                         }, |addr|{
@@ -236,11 +251,12 @@ impl MrAllocator {
                             Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
                         })
                 }else {
-                    let arena_id = ACCESS_ARENA_MAP.lock().get(&access).copied();
+                    let access_pd_key = AccessPDKey::new(pd, access);
+                    let arena_id = ACCESS_PD_ARENA_MAP.lock().get(&access_pd_key).copied();
                     let arena_id = arena_id.map_or_else(||{
                         // didn't use this access before, so create an arena to mange this kind of MR
-                        let ind = init_je_statics(Arc::<ProtectionDomain>::clone(&self.pd), access)?;
-                        if ACCESS_ARENA_MAP.lock().insert(access, ind).is_some(){
+                        let ind = init_je_statics(Arc::<ProtectionDomain>::clone(pd), access)?;
+                        if ACCESS_PD_ARENA_MAP.lock().insert(access_pd_key, ind).is_some(){
                             return Err(io::Error::new(
                                 io::ErrorKind::Other,
                                 format!("this is a bug: insert ACCESS_ARENA_MAP failed, access:{:?} has been recorded", access),
@@ -267,7 +283,7 @@ impl MrAllocator {
                 alloc_raw_mem(layout, flag).map_or_else(||{
                         Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
                     }, |addr|{
-                        let raw_mr = Arc::new(RawMemoryRegion::register_from_pd(&self.pd, addr, layout.size(), access)?);
+                        let raw_mr = Arc::new(RawMemoryRegion::register_from_pd(pd, addr, layout.size(), access)?);
                         Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
                     })
             },
@@ -281,12 +297,12 @@ impl MrAllocator {
 ///
 /// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
 unsafe fn alloc_from_je(arena_ind: u32, layout: &Layout, flag: i32) -> Option<*mut u8> {
-    let addr = {
-        tikv_jemalloc_sys::mallocx(
-            layout.size(),
-            (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(arena_ind.cast()) | flag).cast(),
-        )
-    };
+    let flags = (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(arena_ind.cast()) | flag).cast();
+    debug!(
+        "alloc mr from je, arena_ind: {:?}, layout: {:?}, flags: {:?}",
+        arena_ind, layout, flags
+    );
+    let addr = { tikv_jemalloc_sys::mallocx(layout.size(), flags) };
     if addr.is_null() {
         None
     } else {
@@ -987,6 +1003,46 @@ mod tests {
         let _mr_1 = rdma_1.alloc_local_mr(layout);
         let rdma_2 = RdmaBuilder::default().build()?;
         let _mr_2 = rdma_2.alloc_local_mr(layout);
+        Ok(())
+    }
+
+    #[test]
+    fn alloc_raw_multi_pd_mr() -> io::Result<()> {
+        let ctx = Arc::new(Context::open(None, 1, 1)?);
+        let pd_1 = Arc::new(ctx.create_protection_domain()?);
+        let pd_2 = Arc::new(ctx.create_protection_domain()?);
+        let mr_attr = MRInitAttr {
+            access: *DEFAULT_ACCESS,
+            strategy: MRManageStrategy::Raw,
+        };
+        let allocator = Arc::new(MrAllocator::new(Arc::clone(&pd_1), mr_attr));
+        let layout = Layout::new::<char>();
+        let mr_1 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_1)?;
+        println!("{:?}", mr_1);
+        assert_eq!(&mr_1.read_inner().pd().inner_pd, &pd_1.inner_pd);
+        let mr_2 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_2)?;
+        println!("{:?}", mr_2);
+        assert_eq!(&mr_2.read_inner().pd().inner_pd, &pd_2.inner_pd);
+        Ok(())
+    }
+
+    #[test]
+    fn alloc_multi_pd_mr_from_je() -> io::Result<()> {
+        let ctx = Arc::new(Context::open(None, 1, 1)?);
+        let pd_1 = Arc::new(ctx.create_protection_domain()?);
+        let pd_2 = Arc::new(ctx.create_protection_domain()?);
+        let mr_attr = MRInitAttr {
+            access: *DEFAULT_ACCESS,
+            strategy: MRManageStrategy::Jemalloc,
+        };
+        let allocator = Arc::new(MrAllocator::new(Arc::clone(&pd_1), mr_attr));
+        let layout = Layout::new::<char>();
+        let mr_1 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_1)?;
+        println!("{:?}", mr_1);
+        assert_eq!(&mr_1.read_inner().pd().inner_pd, &pd_1.inner_pd);
+        let mr_2 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_2)?;
+        println!("{:?}", mr_2);
+        assert_eq!(&mr_2.read_inner().pd().inner_pd, &pd_2.inner_pd);
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use super::{raw::RawMemoryRegion, MrAccess, MrToken};
 use crate::{
     lock_utilities::{MappedRwLockReadGuard, MappedRwLockWriteGuard},
+    protection_domain::ProtectionDomain,
     MRManageStrategy,
 };
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -539,6 +540,12 @@ impl LocalMrInner {
     /// Get local key of memory region
     fn lkey(&self) -> u32 {
         self.raw.lkey()
+    }
+
+    /// Get pd of this memory region
+    #[allow(dead_code)] // used by test
+    pub(crate) fn pd(&self) -> &Arc<ProtectionDomain> {
+        self.raw.pd()
     }
 }
 

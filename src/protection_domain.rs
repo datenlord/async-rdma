@@ -12,7 +12,7 @@ pub(crate) struct ProtectionDomain {
     /// The device context
     pub(crate) ctx: Arc<Context>,
     /// Internal `ibv_pd` pointer
-    inner_pd: NonNull<ibv_pd>,
+    pub(crate) inner_pd: NonNull<ibv_pd>,
 }
 
 impl ProtectionDomain {

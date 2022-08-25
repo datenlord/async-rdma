@@ -197,6 +197,12 @@ impl MrAllocator {
         Ok(LocalMr::new(inner))
     }
 
+    /// Allocate a `LocalMr` according to the `layout` with default access and pd
+    #[allow(clippy::as_conversions)]
+    pub(crate) fn alloc_zeroed_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
+        self.alloc_zeroed(layout, self.default_access, &self.default_pd)
+    }
+
     /// Allocate an uninitialized `LocalMr` according to the `layout` with default access
     ///
     /// # Safety
@@ -204,14 +210,22 @@ impl MrAllocator {
     /// The newly allocated memory in this `LocalMr` is uninitialized.
     /// Initialize it before using to make it safe.
     #[allow(clippy::as_conversions)]
-    pub(crate) unsafe fn alloc_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc(layout, self.default_access, &self.default_pd)
+    pub(crate) unsafe fn alloc_default_access(
+        self: &Arc<Self>,
+        layout: &Layout,
+        pd: &Arc<ProtectionDomain>,
+    ) -> io::Result<LocalMr> {
+        self.alloc(layout, self.default_access, pd)
     }
 
     /// Allocate a `LocalMr` according to the `layout` with default access
     #[allow(clippy::as_conversions)]
-    pub(crate) fn alloc_zeroed_default(self: &Arc<Self>, layout: &Layout) -> io::Result<LocalMr> {
-        self.alloc_zeroed(layout, self.default_access, &self.default_pd)
+    pub(crate) fn alloc_zeroed_default_access(
+        self: &Arc<Self>,
+        layout: &Layout,
+        pd: &Arc<ProtectionDomain>,
+    ) -> io::Result<LocalMr> {
+        self.alloc_zeroed(layout, self.default_access, pd)
     }
 
     /// Allocate a `LocalMrInner` according to the `layout`
@@ -777,7 +791,6 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_extent_hooks() -> io::Result<()> {
-        tracing_subscriber::fmt::init();
         let ctx = Arc::new(Context::open(None, 1, 1)?);
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(pd, MRInitAttr::default()));
@@ -1038,11 +1051,86 @@ mod tests {
         let allocator = Arc::new(MrAllocator::new(Arc::clone(&pd_1), mr_attr));
         let layout = Layout::new::<char>();
         let mr_1 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_1)?;
-        println!("{:?}", mr_1);
         assert_eq!(&mr_1.read_inner().pd().inner_pd, &pd_1.inner_pd);
         let mr_2 = allocator.alloc_zeroed(&layout, *DEFAULT_ACCESS, &pd_2)?;
-        println!("{:?}", mr_2);
         assert_eq!(&mr_2.read_inner().pd().inner_pd, &pd_2.inner_pd);
         Ok(())
+    }
+}
+
+/// Test `LocalMr` APIs with multi-pd & multi-connection
+#[cfg(test)]
+mod mr_with_multi_pd_test {
+    use crate::AccessFlag;
+    use crate::{LocalMrReadAccess, RdmaBuilder};
+    use portpicker::pick_unused_port;
+    use std::{
+        alloc::Layout,
+        io,
+        net::{Ipv4Addr, SocketAddrV4},
+        time::Duration,
+    };
+
+    async fn client(addr: SocketAddrV4) -> io::Result<()> {
+        let rdma = RdmaBuilder::default().connect(addr).await?;
+        let rdma = rdma.set_new_pd()?;
+        let layout = Layout::new::<char>();
+        // then the `Rdma`s created by `new_connect` will have a new `ProtectionDomain`
+        let new_rdma = rdma.new_connect(addr).await?;
+
+        let mr_1 = rdma.alloc_local_mr(layout)?;
+        let mr_2 = new_rdma.alloc_local_mr(layout)?;
+        assert_ne!(
+            &mr_1.read_inner().pd().inner_pd,
+            &mr_2.read_inner().pd().inner_pd
+        );
+
+        // SAFETY: test without memory access
+        let mr_3 = unsafe { rdma.alloc_local_mr_uninit(layout)? };
+        // SAFETY: test without memory access
+        let mr_4 = unsafe { new_rdma.alloc_local_mr_uninit(layout)? };
+        assert_ne!(
+            &mr_3.read_inner().pd().inner_pd,
+            &mr_4.read_inner().pd().inner_pd
+        );
+
+        let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead | AccessFlag::RemoteWrite;
+        let mr_5 = rdma.alloc_local_mr_with_access(layout, access)?;
+        let mr_6 = new_rdma.alloc_local_mr_with_access(layout, access)?;
+        assert_ne!(
+            &mr_5.read_inner().pd().inner_pd,
+            &mr_6.read_inner().pd().inner_pd
+        );
+
+        // SAFETY: test without memory access
+        let mr_7 = unsafe { rdma.alloc_local_mr_uninit_with_access(layout, access)? };
+        // SAFETY: test without memory access
+        let mr_8 = unsafe { new_rdma.alloc_local_mr_uninit_with_access(layout, access)? };
+        assert_ne!(
+            &mr_7.read_inner().pd().inner_pd,
+            &mr_8.read_inner().pd().inner_pd
+        );
+
+        Ok(())
+    }
+
+    #[tokio::main]
+    async fn server(addr: SocketAddrV4) -> io::Result<()> {
+        let rdma = RdmaBuilder::default().listen(addr).await?;
+        let _new_rdma = rdma.listen().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn main() {
+        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+        let server_handle = std::thread::spawn(move || server(addr));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        client(addr)
+            .await
+            .map_err(|err| println!("{}", err))
+            .unwrap();
+        server_handle.join().unwrap().unwrap();
     }
 }

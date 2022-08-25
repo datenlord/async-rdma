@@ -78,7 +78,7 @@ impl RawMemoryRegion {
     }
 
     /// Get pd of this memory region
-    #[allow(dead_code)] // used by test
+    #[cfg(test)]
     pub(crate) fn pd(&self) -> &Arc<ProtectionDomain> {
         &self.pd
     }

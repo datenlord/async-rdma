@@ -911,7 +911,6 @@ pub(crate) struct CloneAttr {
     /// Tcp listener used for new connections
     pub(crate) tcp_listener: Option<Arc<Mutex<TcpListener>>>,
     /// Clone `Rdma` with new `ProtectionDomain`
-    #[allow(dead_code)] // not yet fully implemented
     pub(crate) pd: Option<Arc<ProtectionDomain>>,
     /// Clone `Rdma` with new `Port number`
     pub(crate) port_num: Option<u8>,
@@ -969,7 +968,6 @@ pub struct Rdma {
 
 impl Rdma {
     /// create a new `Rdma` instance
-    #[allow(clippy::too_many_arguments)] // TODO: fix with builder pattern
     fn new(
         dev_attr: &DeviceInitAttr,
         cq_attr: CQInitAttr,
@@ -1029,7 +1027,6 @@ impl Rdma {
             Ok,
         )?;
         let port_num = self.clone_attr.port_num.unwrap_or(self.qp.port_num);
-        // TODO: add multi-pd support for allocator
         let pd = self
             .clone_attr
             .pd
@@ -2276,7 +2273,8 @@ impl Rdma {
     /// ```
     #[inline]
     pub fn alloc_local_mr(&self, layout: Layout) -> io::Result<LocalMr> {
-        self.allocator.alloc_zeroed_default(&layout)
+        self.allocator
+            .alloc_zeroed_default_access(&layout, &self.pd)
     }
 
     /// Allocate a local memory region that has not been initialized
@@ -2341,7 +2339,7 @@ impl Rdma {
     /// ```
     #[inline]
     pub unsafe fn alloc_local_mr_uninit(&self, layout: Layout) -> io::Result<LocalMr> {
-        self.allocator.alloc_default(&layout)
+        self.allocator.alloc_default_access(&layout, &self.pd)
     }
 
     /// Allocate a local memory region with specified access
@@ -2994,6 +2992,54 @@ impl Rdma {
     pub fn set_new_port_num(mut self, port_num: u8) -> Self {
         self.clone_attr = self.clone_attr.set_port_num(port_num);
         self
+    }
+
+    /// Set new `ProtectionDomain` for new `Rdma` that created by `clone` to provide isolation.
+    ///
+    /// Used with `listen`, `new_connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::RdmaBuilder;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let rdma = rdma.set_new_pd()?;
+    ///     // then the `Rdma`s created by `new_connect` will have a new `ProtectionDomain`
+    ///     let _new_rdma = rdma.new_connect(addr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let _new_rdma = rdma.listen().await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub fn set_new_pd(mut self) -> io::Result<Self> {
+        let new_pd = self.ctx.create_protection_domain()?;
+        self.clone_attr = self.clone_attr.set_pd(new_pd);
+        Ok(self)
     }
 }
 

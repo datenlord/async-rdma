@@ -1,9 +1,11 @@
 use super::{raw::RawMemoryRegion, MrAccess, MrToken};
+#[cfg(test)]
+use crate::protection_domain::ProtectionDomain;
 use crate::{
     lock_utilities::{MappedRwLockReadGuard, MappedRwLockWriteGuard},
-    protection_domain::ProtectionDomain,
     MRManageStrategy,
 };
+
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rdma_sys::ibv_access_flags;
 use sealed::sealed;
@@ -543,7 +545,7 @@ impl LocalMrInner {
     }
 
     /// Get pd of this memory region
-    #[allow(dead_code)] // used by test
+    #[cfg(test)]
     pub(crate) fn pd(&self) -> &Arc<ProtectionDomain> {
         self.raw.pd()
     }

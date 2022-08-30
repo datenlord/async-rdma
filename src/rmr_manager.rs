@@ -1,5 +1,6 @@
-use crate::{memory_region::MrToken, LocalMr};
+use crate::{memory_region::MrToken, protection_domain::ProtectionDomain, LocalMr};
 use parking_lot::Mutex;
+use rdma_sys::ibv_access_flags;
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -27,11 +28,15 @@ pub(crate) struct RemoteMrManager {
     timer_tx: mpsc::Sender<MrToken>,
     /// `RemoteMrManager` task handler
     handler: JoinHandle<()>,
+    /// `Protection Domain` of remote mr
+    pub(crate) pd: Arc<ProtectionDomain>,
+    /// Max access permission for remote mr requests
+    pub(crate) max_rmr_access: ibv_access_flags,
 }
 
 impl RemoteMrManager {
     /// New a `RemoteMrManager`
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(pd: Arc<ProtectionDomain>, max_rmr_access: ibv_access_flags) -> Self {
         let mr_own = Arc::new(Mutex::new(HashMap::new()));
         let (timer_tx, timer_rx) = mpsc::channel::<MrToken>(TIMER_CHANNEL_BUF_SIZE);
         let handler = tokio::task::spawn(timeout_monitor(timer_rx, RmrMap::clone(&mr_own)));
@@ -39,6 +44,8 @@ impl RemoteMrManager {
             mr_map: mr_own,
             timer_tx,
             handler,
+            pd,
+            max_rmr_access,
         }
     }
 

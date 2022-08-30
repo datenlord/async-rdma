@@ -942,8 +942,8 @@ mod tests {
         let layout = Layout::new::<[u8; 4096]>();
         let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
         let mr = rdma.alloc_local_mr_with_access(layout, access)?;
-        assert_eq!(mr.access(), flags_into_ibv_access(access));
-        assert_ne!(mr.access(), *DEFAULT_ACCESS);
+        assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
+        assert_ne!(mr.ibv_access(), *DEFAULT_ACCESS);
         Ok(())
     }
 
@@ -953,8 +953,8 @@ mod tests {
         let layout = Layout::new::<[u8; 4096]>();
         let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
         let mr = rdma.alloc_local_mr_with_access(layout, access)?;
-        assert_eq!(mr.access(), flags_into_ibv_access(access));
-        assert_ne!(mr.access(), *DEFAULT_ACCESS);
+        assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
+        assert_ne!(mr.ibv_access(), *DEFAULT_ACCESS);
         Ok(())
     }
 

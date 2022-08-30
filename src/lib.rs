@@ -198,7 +198,7 @@ extern crate lazy_static;
 /// A wrapper for ibv_access_flag, hide the ibv binding types
 #[bitflags]
 #[repr(u64)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AccessFlag {
     /// local write permission
     LocalWrite,
@@ -234,7 +234,7 @@ pub enum AccessFlag {
 ///     let layout = Layout::new::<[u8; 4096]>();
 ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
 ///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
-///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+///     assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
 /// }
 ///
 /// ```
@@ -272,6 +272,60 @@ pub fn flags_into_ibv_access(flags: BitFlags<AccessFlag>) -> ibv_access_flags {
     ret
 }
 
+/// Convert `ibv_access_flags` into `BitFlags<AccessFlag>`
+///
+/// # Example
+///
+/// ```
+/// use async_rdma::{ibv_access_into_flags, AccessFlag, MrAccess, RdmaBuilder};
+/// use std::alloc::Layout;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let rdma = RdmaBuilder::default().build().unwrap();
+///     let layout = Layout::new::<[u8; 4096]>();
+///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
+///     assert_eq!(access, ibv_access_into_flags(mr.ibv_access()));
+/// }
+///
+/// ```
+#[inline]
+#[must_use]
+pub fn ibv_access_into_flags(access: ibv_access_flags) -> BitFlags<AccessFlag> {
+    let mut ret = BitFlags::<AccessFlag>::empty();
+    if (access & ibv_access_flags::IBV_ACCESS_LOCAL_WRITE).0 != 0 {
+        ret |= AccessFlag::LocalWrite;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_LOCAL_WRITE).0 != 0 {
+        ret |= AccessFlag::LocalWrite;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_READ).0 != 0 {
+        ret |= AccessFlag::RemoteRead;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_WRITE).0 != 0 {
+        ret |= AccessFlag::RemoteWrite;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC).0 != 0 {
+        ret |= AccessFlag::RemoteAtomic;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_MW_BIND).0 != 0 {
+        ret |= AccessFlag::MwBind;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_ZERO_BASED).0 != 0 {
+        ret |= AccessFlag::ZeroBased;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_ON_DEMAND).0 != 0 {
+        ret |= AccessFlag::OnDemand;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_HUGETLB).0 != 0 {
+        ret |= AccessFlag::HugeTlb;
+    }
+    if (access & ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING).0 != 0 {
+        ret |= AccessFlag::RelaxOrder;
+    }
+    ret
+}
 /// initial device attributes
 #[derive(Debug)]
 pub struct DeviceInitAttr {
@@ -380,6 +434,8 @@ impl Default for MRInitAttr {
 pub struct AgentInitAttr {
     /// Max length of message send/recv by Agent
     max_message_length: usize,
+    /// Max access permission for remote mr requests
+    max_rmr_access: ibv_access_flags,
 }
 
 impl Default for AgentInitAttr {
@@ -387,6 +443,7 @@ impl Default for AgentInitAttr {
     fn default() -> Self {
         Self {
             max_message_length: MAX_MSG_LEN,
+            max_rmr_access: *DEFAULT_ACCESS,
         }
     }
 }
@@ -471,7 +528,11 @@ impl RdmaBuilder {
                 let mut rdma = self.build()?;
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
-                rdma.init_agent(self.agent_attr.max_message_length).await?;
+                rdma.init_agent(
+                    self.agent_attr.max_message_length,
+                    self.agent_attr.max_rmr_access,
+                )
+                .await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -579,9 +640,10 @@ impl RdmaBuilder {
             )),
             ConnectionType::RCCM => {
                 let max_message_length = self.agent_attr.max_message_length;
+                let max_rmr_access = self.agent_attr.max_rmr_access;
                 let mut rdma = self.build()?;
                 cm_connect_helper(&mut rdma, node, service)?;
-                rdma.init_agent(max_message_length).await?;
+                rdma.init_agent(max_message_length, max_rmr_access).await?;
                 Ok(rdma)
             }
         }
@@ -632,7 +694,11 @@ impl RdmaBuilder {
                 let remote = tcp_listen(&tcp_listener, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
                 debug!("handshake done");
-                rdma.init_agent(self.agent_attr.max_message_length).await?;
+                rdma.init_agent(
+                    self.agent_attr.max_message_length,
+                    self.agent_attr.max_rmr_access,
+                )
+                .await?;
                 rdma.clone_attr = CloneAttr::default().set_tcp_listener(tcp_listener);
                 Ok(rdma)
             }
@@ -752,6 +818,14 @@ impl RdmaBuilder {
     #[must_use]
     pub fn set_max_message_length(mut self, max_msg_len: usize) -> Self {
         self.agent_attr.max_message_length = max_msg_len;
+        self
+    }
+
+    /// Set max access permission for remote mr requests
+    #[inline]
+    #[must_use]
+    pub fn set_max_rmr_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
+        self.agent_attr.max_rmr_access = flags_into_ibv_access(flags);
         self
     }
 }
@@ -1076,12 +1150,17 @@ impl Rdma {
     }
 
     /// Agent init helper
-    async fn init_agent(&mut self, max_message_length: usize) -> io::Result<()> {
+    async fn init_agent(
+        &mut self,
+        max_message_length: usize,
+        max_rmr_access: ibv_access_flags,
+    ) -> io::Result<()> {
         if !self.raw {
             let agent = Arc::new(Agent::new(
                 Arc::<QueuePair>::clone(&self.qp),
                 Arc::<MrAllocator>::clone(&self.allocator),
                 max_message_length,
+                max_rmr_access,
             )?);
             self.agent = Some(agent);
             // wait for the remote agent to prepare
@@ -1154,13 +1233,13 @@ impl Rdma {
                 rdma.qp_handshake(remote)?;
                 debug!("handshake done");
                 #[allow(clippy::unreachable)]
-                let max_message_length = self.agent.as_ref().map_or_else(
+                let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
                     || {
                         unreachable!("agent of parent rdma is None");
                     },
-                    |agent| agent.max_sr_data_len,
+                    |agent| (agent.max_msg_len(), agent.max_rmr_access()),
                 );
-                rdma.init_agent(max_message_length).await?;
+                rdma.init_agent(max_message_length, max_rmr_access).await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -1220,13 +1299,13 @@ impl Rdma {
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
                 rdma.qp_handshake(remote)?;
                 #[allow(clippy::unreachable)]
-                let max_message_length = self.agent.as_ref().map_or_else(
+                let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
                     || {
                         unreachable!("agent of parent rdma is None");
                     },
-                    |agent| agent.max_sr_data_len,
+                    |agent| (agent.max_msg_len(), agent.max_rmr_access()),
                 );
-                rdma.init_agent(max_message_length).await?;
+                rdma.init_agent(max_message_length, max_rmr_access).await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -2100,7 +2179,7 @@ impl Rdma {
         );
         let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
         rdma.qp_handshake(remote)?;
-        rdma.init_agent(max_message_length).await?;
+        rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
@@ -2210,7 +2289,7 @@ impl Rdma {
             "should set connection type to RCSocket"
         );
         cm_connect_helper(&mut rdma, node, service)?;
-        rdma.init_agent(max_message_length).await?;
+        rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(rdma)
@@ -2361,7 +2440,7 @@ impl Rdma {
     ///     let layout = Layout::new::<[u8; 4096]>();
     ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
     ///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
-    ///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+    ///     assert_eq!(mr.access(), access);
     /// }
     ///
     /// ```
@@ -2402,7 +2481,7 @@ impl Rdma {
     ///         rdma.alloc_local_mr_uninit_with_access(layout, access)
     ///             .unwrap()
     ///     };
-    ///     assert_eq!(mr.access(), flags_into_ibv_access(access));
+    ///     assert_eq!(mr.access(), access);
     /// }
     ///
     /// ```
@@ -3166,7 +3245,7 @@ impl RdmaListener {
         stream.write_all(&local).await?;
         rdma.qp_handshake(remote)?;
         debug!("handshake done");
-        rdma.init_agent(max_message_length).await?;
+        rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         Ok(rdma)
     }
 }

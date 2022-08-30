@@ -37,7 +37,7 @@ impl MrAccess for RawMemoryRegion {
         unsafe { self.inner_mr.as_ref().rkey }
     }
 
-    fn access(&self) -> ibv_access_flags {
+    fn ibv_access(&self) -> ibv_access_flags {
         self.access
     }
 }

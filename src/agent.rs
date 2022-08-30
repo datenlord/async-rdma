@@ -13,6 +13,7 @@ use crate::{
     queue_pair::QueuePair,
 };
 use clippy_utilities::Cast;
+use rdma_sys::ibv_access_flags;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -59,8 +60,6 @@ pub(crate) struct Agent {
     /// Agent thread resource
     #[allow(dead_code)]
     agent_thread: Arc<AgentThread>,
-    /// Max message length
-    pub(crate) max_sr_data_len: usize,
 }
 
 impl Drop for Agent {
@@ -77,9 +76,10 @@ impl Agent {
         qp: Arc<QueuePair>,
         allocator: Arc<MrAllocator>,
         max_sr_data_len: usize,
+        max_rmr_access: ibv_access_flags,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-        let rmr_manager = RemoteMrManager::new();
+        let rmr_manager = RemoteMrManager::new(Arc::clone(&qp.pd), max_rmr_access);
         let (local_mr_send, local_mr_recv) = channel(1024);
         let (remote_mr_send, remote_mr_recv) = channel(1024);
         let (data_send, data_recv) = channel(1024);
@@ -112,7 +112,6 @@ impl Agent {
             imm_recv,
             handles,
             agent_thread,
-            max_sr_data_len,
         })
     }
 
@@ -209,7 +208,7 @@ impl Agent {
         let mut start = 0;
         let lm_len = lm.length();
         while start < lm_len {
-            let end = (start.saturating_add(self.max_sr_data_len)).min(lm_len);
+            let end = (start.saturating_add(self.max_msg_len())).min(lm_len);
             let kind = RequestKind::SendData(SendDataRequest {
                 len: end.wrapping_sub(start),
             });
@@ -265,6 +264,16 @@ impl Agent {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "imm data channel closed"))
+    }
+
+    /// Get the max length of message for send/recv
+    pub(crate) fn max_msg_len(&self) -> usize {
+        self.inner.max_sr_data_len
+    }
+
+    /// Get the max access permission for remote mr requests
+    pub(crate) fn max_rmr_access(&self) -> ibv_access_flags {
+        self.inner.rmr_manager.max_rmr_access
     }
 }
 
@@ -426,9 +435,11 @@ impl AgentThread {
         let response = match request.kind {
             RequestKind::AllocMR(param) => {
                 // TODO: error handling
-                let mr = self.inner.allocator.alloc_zeroed_default(
+                let mr = self.inner.allocator.alloc_zeroed(
                     &Layout::from_size_align(param.size, param.align)
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                    self.inner.rmr_manager.max_rmr_access,
+                    &self.inner.rmr_manager.pd,
                 )?;
                 // SAFETY: no date race here
                 let token = unsafe { mr.token_with_timeout_unchecked(param.timeout) }.map_or_else(
@@ -718,7 +729,7 @@ lazy_static! {
     };
 }
 /// Used for checking if `header_buf` is clean.
-const CLEAN_STATE: [u8; 52] = [0_u8; 52];
+const CLEAN_STATE: [u8; 56] = [0_u8; 56];
 
 lazy_static! {
     static ref REQUEST_HEADER_MAX_LEN: usize = {
@@ -734,6 +745,7 @@ lazy_static! {
                     len: 0,
                     rkey: 0,
                     ddl: SystemTime::now(),
+                    access:0,
                 },
             }),
             RequestKind::SendMR(SendMRRequest {
@@ -742,6 +754,7 @@ lazy_static! {
                     len: 0,
                     rkey: 0,
                     ddl: SystemTime::now(),
+                    access:0,
                 }),
             }),
             RequestKind::SendMR(SendMRRequest {
@@ -750,6 +763,7 @@ lazy_static! {
                     len: 0,
                     rkey: 0,
                     ddl: SystemTime::now(),
+                    access:0,
                 }),
             }),
             RequestKind::SendData(SendDataRequest { len: 0 }),
@@ -781,6 +795,7 @@ lazy_static! {
                     len: 0,
                     rkey: 0,
                     ddl: SystemTime::now(),
+                    access:0,
                 },
             }),
             ResponseKind::ReleaseMR(ReleaseMRResponse { status: 0 }),

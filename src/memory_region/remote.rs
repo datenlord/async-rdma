@@ -1,7 +1,7 @@
 use rdma_sys::ibv_access_flags;
 
 use super::{MrAccess, MrToken};
-use crate::{agent::AgentInner, DEFAULT_ACCESS};
+use crate::agent::AgentInner;
 use std::{io, ops::Range, sync::Arc, time::SystemTime};
 
 /// Remote Memory Region Accrss
@@ -45,9 +45,8 @@ impl MrAccess for RemoteMr {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        // TODO: add access control for rmr
-        *DEFAULT_ACCESS
+    fn ibv_access(&self) -> ibv_access_flags {
+        ibv_access_flags(self.token.access)
     }
 }
 
@@ -88,6 +87,7 @@ impl RemoteMr {
                 len: i.end.wrapping_sub(i.start),
                 rkey: self.rkey(),
                 ddl: self.token.ddl,
+                access: self.ibv_access().0,
             };
             Ok(RemoteMrSlice::new_from_token(self, slice_token))
         }
@@ -105,6 +105,7 @@ impl RemoteMr {
                 len: i.end.wrapping_sub(i.start),
                 rkey: self.rkey(),
                 ddl: self.token.ddl,
+                access: self.ibv_access().0,
             };
             Ok(RemoteMrSliceMut::new_from_token(self, slice_token))
         }
@@ -128,12 +129,10 @@ impl MrAccess for &RemoteMr {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        // TODO: add access control for rmr
-        *DEFAULT_ACCESS
+    fn ibv_access(&self) -> ibv_access_flags {
+        ibv_access_flags(self.token.access)
     }
 }
-
 impl RemoteMrReadAccess for &RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
@@ -158,9 +157,8 @@ impl MrAccess for &mut RemoteMr {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        // TODO: add access control for rmr
-        *DEFAULT_ACCESS
+    fn ibv_access(&self) -> ibv_access_flags {
+        ibv_access_flags(self.token.access)
     }
 }
 impl RemoteMrReadAccess for &mut RemoteMr {
@@ -207,9 +205,8 @@ impl MrAccess for RemoteMrSlice<'_> {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        // TODO: add access control for rmr
-        *DEFAULT_ACCESS
+    fn ibv_access(&self) -> ibv_access_flags {
+        ibv_access_flags(self.token.access)
     }
 }
 
@@ -246,9 +243,8 @@ impl MrAccess for RemoteMrSliceMut<'_> {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        // TODO: add access control for rmr
-        *DEFAULT_ACCESS
+    fn ibv_access(&self) -> ibv_access_flags {
+        ibv_access_flags(self.token.access)
     }
 }
 

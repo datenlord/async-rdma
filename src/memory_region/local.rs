@@ -154,6 +154,7 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
                     len: self.length(),
                     rkey: self.rkey(),
                     ddl,
+                    access: self.ibv_access().0,
                 })
             },
         )
@@ -178,6 +179,7 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
                     len: self.length(),
                     rkey: self.rkey_unchecked(),
                     ddl,
+                    access: self.ibv_access().0,
                 })
             },
         )
@@ -326,8 +328,8 @@ impl MrAccess for LocalMr {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        self.read_inner().access()
+    fn ibv_access(&self) -> ibv_access_flags {
+        self.read_inner().ibv_access()
     }
 }
 
@@ -518,8 +520,8 @@ impl MrAccess for LocalMrInner {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        self.raw.access()
+    fn ibv_access(&self) -> ibv_access_flags {
+        self.raw.ibv_access()
     }
 }
 
@@ -568,8 +570,8 @@ impl MrAccess for &LocalMr {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        self.read_inner().access()
+    fn ibv_access(&self) -> ibv_access_flags {
+        self.read_inner().ibv_access()
     }
 }
 
@@ -616,8 +618,8 @@ impl MrAccess for LocalMrSlice<'_> {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        self.read_inner().access()
+    fn ibv_access(&self) -> ibv_access_flags {
+        self.read_inner().ibv_access()
     }
 }
 
@@ -697,8 +699,8 @@ impl MrAccess for LocalMrSliceMut<'_> {
     }
 
     #[inline]
-    fn access(&self) -> ibv_access_flags {
-        self.read_inner().access()
+    fn ibv_access(&self) -> ibv_access_flags {
+        self.read_inner().ibv_access()
     }
 }
 

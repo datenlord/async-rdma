@@ -990,6 +990,8 @@ pub(crate) struct CloneAttr {
     pub(crate) port_num: Option<u8>,
     /// Clone `Rdma` with new qp access
     pub(crate) qp_access: Option<ibv_access_flags>,
+    /// Clone `Rdma` with new max access permission for remote mr requests
+    pub(crate) max_rmr_access: Option<ibv_access_flags>,
 }
 
 impl CloneAttr {
@@ -1015,6 +1017,12 @@ impl CloneAttr {
     /// Set qp access
     fn set_qp_access(mut self, access: ibv_access_flags) -> Self {
         self.qp_access = Some(access);
+        self
+    }
+
+    /// Set max access permission for remote mr requests with new agent
+    fn set_max_rmr_access(mut self, access: ibv_access_flags) -> Self {
+        self.max_rmr_access = Some(access);
         self
     }
 }
@@ -1239,6 +1247,10 @@ impl Rdma {
                     },
                     |agent| (agent.max_msg_len(), agent.max_rmr_access()),
                 );
+                let max_rmr_access = self
+                    .clone_attr
+                    .max_rmr_access
+                    .map_or(max_rmr_access, |new_access| new_access);
                 rdma.init_agent(max_message_length, max_rmr_access).await?;
                 Ok(rdma)
             }
@@ -1305,6 +1317,10 @@ impl Rdma {
                     },
                     |agent| (agent.max_msg_len(), agent.max_rmr_access()),
                 );
+                let max_rmr_access = self
+                    .clone_attr
+                    .max_rmr_access
+                    .map_or(max_rmr_access, |new_access| new_access);
                 rdma.init_agent(max_message_length, max_rmr_access).await?;
                 Ok(rdma)
             }
@@ -3023,6 +3039,67 @@ impl Rdma {
         self.clone_attr = self
             .clone_attr
             .set_qp_access(flags_into_ibv_access(qp_access));
+        self
+    }
+
+    /// Set max access permission for remote mr requests for new `Rdma` that created by `clone`
+    ///
+    /// Used with `listen`, `new_connect`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{AccessFlag, RdmaBuilder, MrAccess};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let rmr = rdma.request_remote_mr(Layout::new::<char>()).await?;
+    ///     let new_rdma = rdma.new_connect(addr).await?;
+    ///     let new_rmr = new_rdma.request_remote_mr(Layout::new::<char>()).await?;
+    ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+    ///     assert_eq!(new_rmr.access(), access);
+    ///     assert_ne!(rmr.access(), new_rmr.access());
+    ///     new_rdma.send_remote_mr(new_rmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
+    ///     let rdma = rdma.set_new_max_rmr_access(access);
+    ///     let new_rdma = rdma.listen().await?;
+    ///     // receive the metadata of the lmr that had been requested by client
+    ///     let _lmr = new_rdma.receive_local_mr().await?;
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn set_new_max_rmr_access(mut self, max_rmr_access: BitFlags<AccessFlag>) -> Self {
+        self.clone_attr = self
+            .clone_attr
+            .set_max_rmr_access(flags_into_ibv_access(max_rmr_access));
         self
     }
 

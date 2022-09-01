@@ -72,15 +72,15 @@ static mut RDMA_EXTENT_HOOKS: extent_hooks_t = extent_hooks_t {
     merge: Some(RDMA_MERGE_EXTENT_HOOK),
 };
 
-/// Combination of `ProtectionDomain`'s ptr and `ibv_access_falgs` as a key.
+/// The tuple of `ibv_access_falgs` and `ProtectionDomain` as a key.
 #[derive(PartialEq, Eq, Hash)]
-pub(crate) struct AccessPDKey(u128);
+pub(crate) struct AccessPDKey(u32, usize);
 
 impl AccessPDKey {
-    /// Cast the `ProtectionDomain`'s ptr and `ibv_access_flags` into a `u128`
+    /// Create a new `AccessPDKey`
     #[allow(clippy::as_conversions)]
     pub(crate) fn new(pd: &Arc<ProtectionDomain>, access: ibv_access_flags) -> Self {
-        Self((u128::from(access.0)).wrapping_shl(64) | (pd.as_ptr() as u128))
+        Self(access.0, pd.as_ptr() as usize)
     }
 }
 

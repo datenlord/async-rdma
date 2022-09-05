@@ -251,23 +251,12 @@ impl MrAllocator {
 
         match self.strategy {
             MRManageStrategy::Jemalloc => {
-                if access == self.default_access && pd.inner_pd == self.default_pd.inner_pd {
-                    alloc_from_je(self.default_arena_ind, layout, flag).map_or_else(||{
-                            Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
-                        }, |addr|{
-                            #[allow(clippy::unreachable)]
-                            let raw_mr = lookup_raw_mr(self.default_arena_ind, addr as usize).map_or_else(
-                                || {
-                                    unreachable!("can not find raw mr by addr {}", addr as usize);
-                                },
-                                |raw_mr| raw_mr,
-                            );
-                            Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
-                        })
+                let arena_id = if access == self.default_access && pd.inner_pd == self.default_pd.inner_pd {
+                    self.default_arena_ind
                 }else {
                     let access_pd_key = AccessPDKey::new(pd, access);
                     let arena_id = ACCESS_PD_ARENA_MAP.lock().get(&access_pd_key).copied();
-                    let arena_id = arena_id.map_or_else(||{
+                    arena_id.map_or_else(||{
                         // didn't use this access before, so create an arena to mange this kind of MR
                         let ind = init_je_statics(Arc::<ProtectionDomain>::clone(pd), access)?;
                         if ACCESS_PD_ARENA_MAP.lock().insert(access_pd_key, ind).is_some(){
@@ -277,21 +266,20 @@ impl MrAllocator {
                             ))
                         };
                         Ok(ind)
-                    }, |ind|{Ok(ind)})?;
-
-                    alloc_from_je(arena_id, layout, flag).map_or_else(||{
-                        Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
-                    }, |addr|{
-                        #[allow(clippy::unreachable)]
-                        let raw_mr = lookup_raw_mr(arena_id, addr as usize).map_or_else(
-                            || {
-                                unreachable!("can not find raw mr with arena_id: {} by addr: {}",arena_id, addr as usize);
-                            },
-                            |raw_mr| raw_mr,
-                        );
-                        Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
-                    })
-                }
+                    }, |ind|{Ok(ind)})?
+                };
+                alloc_from_je(arena_id, layout, flag).map_or_else(||{
+                    Err(io::Error::new(io::ErrorKind::OutOfMemory, "insufficient contiguous memory was available to service the allocation request"))
+                }, |addr|{
+                    #[allow(clippy::unreachable)]
+                    let raw_mr = lookup_raw_mr(arena_id, addr as usize).map_or_else(
+                        || {
+                            unreachable!("can not find raw mr with arena_id: {} by addr: {}",arena_id, addr as usize);
+                        },
+                        |raw_mr| raw_mr,
+                    );
+                    Ok(LocalMrInner::new(addr as usize, *layout, raw_mr, self.strategy))
+                })
             },
             MRManageStrategy::Raw => {
                 alloc_raw_mem(layout, flag).map_or_else(||{

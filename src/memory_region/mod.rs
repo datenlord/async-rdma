@@ -10,10 +10,10 @@ use rdma_sys::ibv_access_flags;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, time::SystemTime};
 
-use crate::{ibv_access_into_flags, AccessFlag};
+use crate::{access::ibv_access_into_flags, AccessFlag};
 
 /// Rdma Memory Region Access
-pub trait MrAccess: Sync + Send + Debug {
+pub trait MrAccess: Sync + Send + Debug + IbvAccess {
     /// Get the start addr
     fn addr(&self) -> usize;
 
@@ -23,14 +23,17 @@ pub trait MrAccess: Sync + Send + Debug {
     /// Get the remote key
     fn rkey(&self) -> u32;
 
-    /// Get the `ibv_access_flags` of mr
-    fn ibv_access(&self) -> ibv_access_flags;
-
     /// Get the `BitFlags<AccessFlag>` of mr
     #[inline]
     fn access(&self) -> BitFlags<AccessFlag> {
         ibv_access_into_flags(self.ibv_access())
     }
+}
+
+/// Get `ibv_access_flags` of mr
+pub trait IbvAccess {
+    /// Get `ibv_access_flags` of mr
+    fn ibv_access(&self) -> ibv_access_flags;
 }
 
 /// Memory region token used for the remote access

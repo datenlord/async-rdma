@@ -1,7 +1,6 @@
-use rdma_sys::ibv_access_flags;
-
-use super::{MrAccess, MrToken};
+use super::{IbvAccess, MrAccess, MrToken};
 use crate::agent::AgentInner;
+use rdma_sys::ibv_access_flags;
 use std::{io, ops::Range, sync::Arc, time::SystemTime};
 
 /// Remote Memory Region Accrss
@@ -43,7 +42,9 @@ impl MrAccess for RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl IbvAccess for RemoteMr {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         ibv_access_flags(self.token.access)
@@ -127,12 +128,15 @@ impl MrAccess for &RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl IbvAccess for &RemoteMr {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         ibv_access_flags(self.token.access)
     }
 }
+
 impl RemoteMrReadAccess for &RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
@@ -155,12 +159,15 @@ impl MrAccess for &mut RemoteMr {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl IbvAccess for &mut RemoteMr {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         ibv_access_flags(self.token.access)
     }
 }
+
 impl RemoteMrReadAccess for &mut RemoteMr {
     #[inline]
     fn token(&self) -> MrToken {
@@ -203,7 +210,9 @@ impl MrAccess for RemoteMrSlice<'_> {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl IbvAccess for RemoteMrSlice<'_> {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         ibv_access_flags(self.token.access)
@@ -241,7 +250,9 @@ impl MrAccess for RemoteMrSliceMut<'_> {
     fn rkey(&self) -> u32 {
         self.token.rkey
     }
+}
 
+impl IbvAccess for RemoteMrSliceMut<'_> {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         ibv_access_flags(self.token.access)

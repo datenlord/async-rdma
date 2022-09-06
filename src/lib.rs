@@ -128,6 +128,8 @@ mod context;
 /// The rmda device
 pub mod device;
 
+/// Access of `QP` and `MR`
+mod access;
 /// Error handling utilities
 mod error_utilities;
 /// The event channel that notifies the completion or error of a request
@@ -157,11 +159,13 @@ mod rmr_manager;
 /// Work Request wrapper
 mod work_request;
 
+use access::flags_into_ibv_access;
+pub use access::AccessFlag;
 use agent::{Agent, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::BitFlags;
 use error_utilities::log_ret_last_os_err;
 use event_listener::EventListener;
 pub use memory_region::{
@@ -195,137 +199,6 @@ use tracing::debug;
 #[macro_use]
 extern crate lazy_static;
 
-/// A wrapper for ibv_access_flag, hide the ibv binding types
-#[bitflags]
-#[repr(u64)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum AccessFlag {
-    /// local write permission
-    LocalWrite,
-    /// remote write permission
-    RemoteWrite,
-    /// remote read permission
-    RemoteRead,
-    /// remote atomic operation permission
-    RemoteAtomic,
-    /// enable memory window binding
-    MwBind,
-    /// use byte offset from beginning of MR to access this MR, instead of a pointer address
-    ZeroBased,
-    /// create an on-demand paging MR
-    OnDemand,
-    /// huge pages are guaranteed to be used for this MR, only used with `OnDemand`
-    HugeTlb,
-    /// allow system to reorder accesses to the MR to improve performance
-    RelaxOrder,
-}
-
-/// Convert `BitFlags<AccessFlag>` into `ibv_access_flags`
-///
-/// # Example
-///
-/// ```
-/// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
-/// use std::alloc::Layout;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     let rdma = RdmaBuilder::default().build().unwrap();
-///     let layout = Layout::new::<[u8; 4096]>();
-///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
-///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
-///     assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
-/// }
-///
-/// ```
-#[inline]
-#[must_use]
-pub fn flags_into_ibv_access(flags: BitFlags<AccessFlag>) -> ibv_access_flags {
-    let mut ret = ibv_access_flags(0);
-    if flags.contains(AccessFlag::LocalWrite) {
-        ret |= ibv_access_flags::IBV_ACCESS_LOCAL_WRITE;
-    }
-    if flags.contains(AccessFlag::RemoteWrite) {
-        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
-    }
-    if flags.contains(AccessFlag::RemoteRead) {
-        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_READ;
-    }
-    if flags.contains(AccessFlag::RemoteAtomic) {
-        ret |= ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC;
-    }
-    if flags.contains(AccessFlag::MwBind) {
-        ret |= ibv_access_flags::IBV_ACCESS_MW_BIND;
-    }
-    if flags.contains(AccessFlag::ZeroBased) {
-        ret |= ibv_access_flags::IBV_ACCESS_ZERO_BASED;
-    }
-    if flags.contains(AccessFlag::OnDemand) {
-        ret |= ibv_access_flags::IBV_ACCESS_ON_DEMAND;
-    }
-    if flags.contains(AccessFlag::HugeTlb) {
-        ret |= ibv_access_flags::IBV_ACCESS_HUGETLB;
-    }
-    if flags.contains(AccessFlag::RelaxOrder) {
-        ret |= ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING;
-    }
-    ret
-}
-
-/// Convert `ibv_access_flags` into `BitFlags<AccessFlag>`
-///
-/// # Example
-///
-/// ```
-/// use async_rdma::{ibv_access_into_flags, AccessFlag, MrAccess, RdmaBuilder};
-/// use std::alloc::Layout;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     let rdma = RdmaBuilder::default().build().unwrap();
-///     let layout = Layout::new::<[u8; 4096]>();
-///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
-///     let mr = rdma.alloc_local_mr_with_access(layout, access).unwrap();
-///     assert_eq!(access, ibv_access_into_flags(mr.ibv_access()));
-/// }
-///
-/// ```
-#[inline]
-#[must_use]
-pub fn ibv_access_into_flags(access: ibv_access_flags) -> BitFlags<AccessFlag> {
-    let mut ret = BitFlags::<AccessFlag>::empty();
-    if (access & ibv_access_flags::IBV_ACCESS_LOCAL_WRITE).0 != 0 {
-        ret |= AccessFlag::LocalWrite;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_LOCAL_WRITE).0 != 0 {
-        ret |= AccessFlag::LocalWrite;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_READ).0 != 0 {
-        ret |= AccessFlag::RemoteRead;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_WRITE).0 != 0 {
-        ret |= AccessFlag::RemoteWrite;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC).0 != 0 {
-        ret |= AccessFlag::RemoteAtomic;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_MW_BIND).0 != 0 {
-        ret |= AccessFlag::MwBind;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_ZERO_BASED).0 != 0 {
-        ret |= AccessFlag::ZeroBased;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_ON_DEMAND).0 != 0 {
-        ret |= AccessFlag::OnDemand;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_HUGETLB).0 != 0 {
-        ret |= AccessFlag::HugeTlb;
-    }
-    if (access & ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING).0 != 0 {
-        ret |= AccessFlag::RelaxOrder;
-    }
-    ret
-}
 /// initial device attributes
 #[derive(Debug)]
 pub struct DeviceInitAttr {
@@ -2447,7 +2320,7 @@ impl Rdma {
     /// # Example
     ///
     /// ```
-    /// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
+    /// use async_rdma::{AccessFlag, MrAccess, RdmaBuilder};
     /// use std::alloc::Layout;
     ///
     /// #[tokio::main]
@@ -2485,7 +2358,7 @@ impl Rdma {
     /// # Example
     ///
     /// ```
-    /// use async_rdma::{flags_into_ibv_access, AccessFlag, MrAccess, RdmaBuilder};
+    /// use async_rdma::{AccessFlag, MrAccess, RdmaBuilder};
     /// use std::alloc::Layout;
     ///
     /// #[tokio::main]

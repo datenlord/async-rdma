@@ -122,36 +122,40 @@ And finally client `send_mr` to make server aware of this memory region.
 Server `receive_local_mr`, and then get data from this mr.
 
 ```rust
-use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaListener};
+use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
 use portpicker::pick_unused_port;
 use std::{
     alloc::Layout,
-    io,
+    io::{self, Write},
     net::{Ipv4Addr, SocketAddrV4},
     time::Duration,
 };
 
-struct Data(String);
-
 async fn client(addr: SocketAddrV4) -> io::Result<()> {
-    let rdma = Rdma::connect(addr, 1, 1, 512).await?;
-    let mut lmr = rdma.alloc_local_mr(Layout::new::<Data>())?;
-    let mut rmr = rdma.request_remote_mr(Layout::new::<Data>()).await?;
-    // then send this mr to server to make server aware of this mr.
-    unsafe { *(*lmr.as_mut_ptr() as *mut Data) = Data("hello world".to_string()) };
-    rdma.write(&lmr, &mut rmr).await?;
-    // send the content of lmr to server
+    let layout = Layout::new::<[u8; 8]>();
+    let rdma = RdmaBuilder::default().connect(addr).await?;
+    // alloc 8 bytes remote memory
+    let mut rmr = rdma.request_remote_mr(layout).await?;
+    // alloc 8 bytes local memory
+    let mut lmr = rdma.alloc_local_mr(layout)?;
+    // write data into lmr
+    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    // write the second half of the data in lmr to the rmr
+    rdma.write(&lmr.get(4..8).unwrap(), &mut rmr.get_mut(4..8).unwrap())
+        .await?;
+    // send rmr's meta data to the remote end
     rdma.send_remote_mr(rmr).await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    let rdma_listener = RdmaListener::bind(addr).await?;
-    let rdma = rdma_listener.accept(1, 1, 512).await?;
+    let rdma = RdmaBuilder::default().listen(addr).await?;
+    // receive mr's meta data from client
     let lmr = rdma.receive_local_mr().await?;
-    // print the content of lmr, which was `write` by client
-    unsafe { println!("{}", &*(*(*lmr.as_ptr() as *const Data)).0) };
+    let data = *lmr.as_slice();
+    println!("Data written by the client using RDMA WRITE: {:?}", data);
+    assert_eq!(data, [[0_u8; 4], [1_u8; 4]].concat());
     Ok(())
 }
 
@@ -165,6 +169,7 @@ async fn main() {
         .map_err(|err| println!("{}", err))
         .unwrap();
 }
+
 ```
 
 ## Getting Help

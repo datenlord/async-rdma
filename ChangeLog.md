@@ -1,5 +1,44 @@
 # ChangeLog
 
+## 0.4.0
+
+  In this release, we add some APIs to make it easier to establish connections and 
+  provide more configurable options.
+
+  We provide support for sending/receiving raw data and allocating raw memory region
+  to enable users to implement the upper layer protocol or memory pool by themselves.
+
+  APIs for supporting multi-connection can be used to easily establish multiple connections 
+  with more than one remote end and reuse resources.
+
+### New features
+
+* Adapt RDMA CM APIs. Add `cm_connect` to establish connection with CM Server.
+  Add `{send/recv}_raw` APIs to send/recv raw data without the help of agent.
+* Add APIs to set attributes of queue pair like `set_max_{send/recv}_{sge/wr}`.
+* Add APIs for `RdmaBuilder` to establish connections conveniently.
+* Add APIs to alloc raw mr. Sometimes users want to setup memory pool by themselves 
+  instead of using `Jemalloc` to manage mrs. So we define two strategies.
+* Add APIs to alloc mrs with different accesses and protection domains from `Jemalloc`.
+ `MrAllocator` will create a new arena when we alloc mr with not the default access and pd.
+* Add access API for mrs to query access.
+* Support multi-connection APIs. Add APIs for `Rdma` to create a new `Rdma` that has the 
+  same `mr_allocator` and `event_listener` as parent.
+* Add `RemoteMr` access control. Add `set_max_rmr_access` API to set the maximum permission on 
+  `RemoteMr` that the remote end can request.
+
+### Optimizations and refactors
+
+* Use submodule to setup CI environment.
+* Reorganize some attributes to avoid too many arguments.
+* Update examples. Replace unsafe blocks and add more comments. Show more APIs.
+
+### Bug fixes
+
+* Disable `tcache` of `Jemalloc` as default. `tcache` is a feature of `Jemalloc` to speed up 
+  memory allocation. However `Jemalloc` may alloc `MR` with wrong `arena_index` from `tcache` 
+  when we create more than one `Jemalloc` enabled `mr_allocator`s. So we disable `tcache` by default.
+
 ## 0.3.0
 
   In this release, we adapted `Jemalloc` to manage RDMA memory region to improve memory

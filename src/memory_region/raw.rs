@@ -1,4 +1,4 @@
-use super::MrAccess;
+use super::{IbvAccess, MrAccess};
 use crate::protection_domain::ProtectionDomain;
 use clippy_utilities::Cast;
 use rdma_sys::{ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr};
@@ -36,7 +36,10 @@ impl MrAccess for RawMemoryRegion {
         // TODO: check safety
         unsafe { self.inner_mr.as_ref().rkey }
     }
+}
 
+impl IbvAccess for RawMemoryRegion {
+    #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.access
     }

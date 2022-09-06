@@ -1,4 +1,4 @@
-use super::{raw::RawMemoryRegion, MrAccess, MrToken};
+use super::{raw::RawMemoryRegion, IbvAccess, MrAccess, MrToken};
 #[cfg(test)]
 use crate::protection_domain::ProtectionDomain;
 use crate::{
@@ -326,7 +326,9 @@ impl MrAccess for LocalMr {
     fn rkey(&self) -> u32 {
         self.read_inner().rkey()
     }
+}
 
+impl IbvAccess for LocalMr {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.read_inner().ibv_access()
@@ -518,7 +520,9 @@ impl MrAccess for LocalMrInner {
     fn rkey(&self) -> u32 {
         self.raw.rkey()
     }
+}
 
+impl IbvAccess for LocalMrInner {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.raw.ibv_access()
@@ -568,7 +572,9 @@ impl MrAccess for &LocalMr {
     fn rkey(&self) -> u32 {
         self.read_inner().rkey()
     }
+}
 
+impl IbvAccess for &LocalMr {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.read_inner().ibv_access()
@@ -616,7 +622,9 @@ impl MrAccess for LocalMrSlice<'_> {
     fn rkey(&self) -> u32 {
         self.lmr.rkey()
     }
+}
 
+impl IbvAccess for LocalMrSlice<'_> {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.read_inner().ibv_access()
@@ -697,7 +705,9 @@ impl MrAccess for LocalMrSliceMut<'_> {
     fn rkey(&self) -> u32 {
         self.lmr.rkey()
     }
+}
 
+impl IbvAccess for LocalMrSliceMut<'_> {
     #[inline]
     fn ibv_access(&self) -> ibv_access_flags {
         self.read_inner().ibv_access()

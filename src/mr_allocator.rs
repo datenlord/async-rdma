@@ -662,7 +662,7 @@ pub(crate) fn register_extent_mr(addr: *mut c_void, size: usize, arena_ind: u32)
 mod tests {
     use super::*;
     use crate::{
-        context::Context, flags_into_ibv_access, AccessFlag, LocalMrReadAccess, MrAccess,
+        access::ibv_access_into_flags, context::Context, AccessFlag, LocalMrReadAccess, MrAccess,
         RdmaBuilder, DEFAULT_ACCESS,
     };
     use std::{alloc::Layout, io, thread};
@@ -930,8 +930,8 @@ mod tests {
         let layout = Layout::new::<[u8; 4096]>();
         let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
         let mr = rdma.alloc_local_mr_with_access(layout, access)?;
-        assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
-        assert_ne!(mr.ibv_access(), *DEFAULT_ACCESS);
+        assert_eq!(mr.access(), access);
+        assert_ne!(mr.access(), ibv_access_into_flags(*DEFAULT_ACCESS));
         Ok(())
     }
 
@@ -941,8 +941,8 @@ mod tests {
         let layout = Layout::new::<[u8; 4096]>();
         let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
         let mr = rdma.alloc_local_mr_with_access(layout, access)?;
-        assert_eq!(mr.ibv_access(), flags_into_ibv_access(access));
-        assert_ne!(mr.ibv_access(), *DEFAULT_ACCESS);
+        assert_eq!(mr.access(), access);
+        assert_ne!(mr.access(), ibv_access_into_flags(*DEFAULT_ACCESS));
         Ok(())
     }
 

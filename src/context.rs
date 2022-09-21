@@ -123,6 +123,7 @@ impl Context {
     }
 
     /// Get the port MTU
+    #[allow(dead_code)] // TODO: provide related pub API to choose mtu
     pub(crate) fn get_active_mtu(&self) -> u32 {
         self.inner_port_attr.active_mtu
     }

@@ -11,10 +11,14 @@ use crate::{
     work_request::{RecvWr, SendWr},
 };
 use clippy_utilities::Cast;
+use derive_builder::Builder;
 use futures::{ready, Future, FutureExt};
+use getset::{Getters, Setters};
+use parking_lot::RwLock;
 use rdma_sys::{
-    ibv_access_flags, ibv_cq, ibv_destroy_qp, ibv_modify_qp, ibv_post_recv, ibv_post_send, ibv_qp,
-    ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr, ibv_qp_state, ibv_recv_wr, ibv_send_wr,
+    ibv_access_flags, ibv_ah_attr, ibv_cq, ibv_destroy_qp, ibv_global_route, ibv_modify_qp,
+    ibv_mtu, ibv_post_recv, ibv_post_send, ibv_qp, ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr,
+    ibv_qp_state,ibv_recv_wr, ibv_send_wr,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,7 +44,48 @@ pub(crate) static MAX_RECV_WR: u32 = 10;
 pub(crate) static MAX_SEND_SGE: u32 = 10;
 /// Maximum value of `recv_sge`
 pub(crate) static MAX_RECV_SGE: u32 = 10;
+/// Default `port_num`
+pub(crate) static DEFAULT_PORT_NUM: u8 = 1;
+/// Default `gid_index`
+pub(crate) static DEFAULT_GID_INDEX: usize = 1;
+/// Default `pkey_index`
+pub(crate) static DEFAULT_PKEY_INDEX: u16 = 0;
 
+/// Default `flow_label`
+pub(crate) static DEFAULT_FLOW_LABEL: u32 = 0;
+/// Default `hop_limit`
+pub(crate) static DEFAULT_HOP_LIMIT: u8 = 0xff;
+/// Default `traffic_class`
+pub(crate) static DEFAULT_TRAFFIC_CLASS: u8 = 0;
+
+/// Default `service_level`
+pub(crate) static DEFAULT_SERVICE_LEVEL: u8 = 0;
+/// Default `src_path_bits`
+pub(crate) static DEFAULT_SRC_PATH_BITS: u8 = 0;
+/// Default `static_rate`
+pub(crate) static DEFAULT_STATIC_RATE: u8 = 0;
+/// Default `is_global`
+pub(crate) static DEFAULT_IS_GLOBAL: u8 = 1;
+
+/// Default `rq_psn`
+pub(crate) static DEFAULT_RQ_PSN: u32 = 0;
+/// Default `max_dest_rd_atomic`
+pub(crate) static DEFAULT_MAX_DEST_RD_ATOMIC: u8 = 1;
+/// Default `min_rnr_timer`
+pub(crate) static DEFAULT_MIN_RNR_TIMER: u8 = 0x12;
+/// Default `mtu`
+pub(crate) static DEFAULT_MTU: MTU = MTU::MTU512;
+
+/// Default `timeout`
+pub(crate) static DEFAULT_TIMEOUT: u8 = 0x12;
+/// Default `retry_cnt`
+pub(crate) static DEFAULT_RETRY_CNT: u8 = 6;
+/// Default `rnr_retry`
+pub(crate) static DEFAULT_RNR_RETRY: u8 = 6;
+/// Default `sq_psn`
+pub(crate) static DEFAULT_SQ_PSN: u32 = 0;
+/// Default `max_rd_atomic`
+pub(crate) static DEFAULT_MAX_RD_ATOMIC: u8 = 1;
 /// Queue pair initialized attribute
 #[derive(Clone)]
 pub(crate) struct QueuePairInitAttr {
@@ -112,8 +157,8 @@ impl QueuePairBuilder {
             pd: Arc::<ProtectionDomain>::clone(pd),
             qp_init_attr: QueuePairInitAttr::default(),
             event_listener: None,
-            port_num: 1,
-            gid_index: 0,
+            port_num: DEFAULT_PORT_NUM,
+            gid_index: DEFAULT_GID_INDEX,
         }
     }
 
@@ -147,6 +192,7 @@ impl QueuePairBuilder {
             gid_index: self.gid_index,
             qp_init_attr: self.qp_init_attr,
             access: None,
+            cur_state: RwLock::new(QueuePairState::Init),
         })
     }
 
@@ -196,7 +242,8 @@ impl QueuePairBuilder {
 }
 
 /// Queue pair information used to hand shake
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Getters, Setters)]
+#[getset(set, get = "with_prefix")]
 pub(crate) struct QueuePairEndpoint {
     /// queue pair number
     qp_num: u32,
@@ -204,6 +251,330 @@ pub(crate) struct QueuePairEndpoint {
     lid: u16,
     /// device gid
     gid: Gid,
+}
+
+/// All of the necessary data to reach a remote destination. In connected transport modes (RC, UC)
+/// the AH is associated with a queue pair (QP). In the datagram transport modes (UD), the AH is
+/// associated with a work request (WR)
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+#[getset(set, get = "with_prefix")]
+pub(crate) struct AddressHandler {
+    /// Attributes of the Global Routing Headers (GRH), as described in the table below.
+    /// This is useful when sending packets to another subnet
+    #[builder(
+        field(type = "GlobalRouteHeaderBuilder", build = "self.grh.build()?"),
+        setter(custom)
+    )]
+    grh: GlobalRouteHeader,
+    /// If the destination is in same subnet, the LID of the port to which the subnet delivers the packets to.
+    /// If the destination is in another subnet, the LID of the Router
+    dest_lid: u16,
+    /// 4 bits. The Service Level to be used
+    #[builder(default = "DEFAULT_SERVICE_LEVEL")]
+    service_level: u8,
+    /// The used Source Path Bits. This is useful when LMC is used in the port, i.e. each port covers a
+    /// range of LIDs. The packets are being sent with the port's base LID, bitwised ORed with the value
+    /// of the source path bits. The value 0 indicates the port's base LID is used
+    #[builder(default = "DEFAULT_SRC_PATH_BITS")]
+    src_path_bits: u8,
+    /// A value which limits the rate of packets that being sent to the subnet. This can be useful if the
+    /// rate of the packet origin is higher than the rate of the destination
+    #[builder(default = "DEFAULT_STATIC_RATE")]
+    static_rate: u8,
+    /// If this value contains any value other than zero, then GRH information exists in this AH, thus the
+    /// field grh if valid
+    #[builder(default = "DEFAULT_IS_GLOBAL")]
+    is_global: u8,
+    /// The local physical port that the packets will be sent from
+    port_num: u8,
+}
+
+impl AddressHandlerBuilder {
+    /// Get sub builder's mutable reference
+    pub(crate) fn grh(&mut self) -> &mut GlobalRouteHeaderBuilder {
+        &mut self.grh
+    }
+}
+
+impl From<GlobalRouteHeaderBuilderError> for AddressHandlerBuilderError {
+    #[inline]
+    fn from(e: GlobalRouteHeaderBuilderError) -> Self {
+        Self::ValidationError(e.to_string())
+    }
+}
+
+impl From<AddressHandlerBuilderError> for RQAttrBuilderError {
+    #[inline]
+    fn from(e: AddressHandlerBuilderError) -> Self {
+        Self::ValidationError(e.to_string())
+    }
+}
+
+impl From<RQAttrBuilderError> for io::Error {
+    #[inline]
+    fn from(e: RQAttrBuilderError) -> Self {
+        io::Error::new(io::ErrorKind::Other, e.to_string())
+    }
+}
+
+impl From<SQAttrBuilderError> for io::Error {
+    #[inline]
+    fn from(e: SQAttrBuilderError) -> Self {
+        io::Error::new(io::ErrorKind::Other, e.to_string())
+    }
+}
+
+impl From<AddressHandler> for ibv_ah_attr {
+    #[inline]
+    fn from(ah: AddressHandler) -> Self {
+        // SAFETY: POD FFI type
+        let mut ah_attr = unsafe { std::mem::zeroed::<ibv_ah_attr>() };
+        ah_attr.dlid = ah.dest_lid;
+        ah_attr.sl = ah.service_level;
+        ah_attr.src_path_bits = ah.src_path_bits;
+        ah_attr.static_rate = ah.static_rate;
+        ah_attr.is_global = ah.is_global;
+        ah_attr.port_num = ah.port_num;
+        ah_attr.grh = ah.grh.into();
+        ah_attr
+    }
+}
+
+/// Gloabel route information about remote end.
+/// This is useful when sending packets to another subnet.
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+#[getset(set, get = "with_prefix")]
+pub(crate) struct GlobalRouteHeader {
+    /// The GID that is used to identify the destination port of the packets
+    dgid: Gid,
+    /// 20 bits. If this value is set to a non-zero value, it gives a hint for switches and routers
+    /// with multiple outbound paths that these sequence of packets must be delivered in order,
+    /// those staying on the same path, so that they won't be reordered.
+    #[builder(default = "DEFAULT_FLOW_LABEL")]
+    flow_label: u32,
+    /// An index in the port's GID table that will be used to identify the originator of the packet
+    sgid_index: u8,
+    /// The number of hops (i.e. the number of routers) that the packet is permitted to take before
+    /// being discarded. This ensures that a packet will not loop indefinitely between routers if a
+    /// routing loop occur. Each router decrement by one this value at the packet and when this value
+    /// reaches 0, this packet is discarded. Setting the value to 0 or 1 will ensure that the packet
+    /// won't leave the local subnet.
+    #[builder(default = "DEFAULT_HOP_LIMIT")]
+    hop_limit: u8,
+    /// Using this value, the originator of the packets specifies the required delivery priority for
+    /// handling them by the routers
+    #[builder(default = "DEFAULT_TRAFFIC_CLASS")]
+    traffic_class: u8,
+}
+
+impl From<GlobalRouteHeader> for ibv_global_route {
+    #[inline]
+    fn from(grh: GlobalRouteHeader) -> Self {
+        // SAFETY: POD FFI type
+        let mut ibv_grh = unsafe { std::mem::zeroed::<ibv_global_route>() };
+        ibv_grh.dgid = grh.dgid.into();
+        ibv_grh.flow_label = grh.flow_label;
+        ibv_grh.hop_limit = grh.hop_limit;
+        ibv_grh.sgid_index = grh.sgid_index;
+        ibv_grh.traffic_class = grh.traffic_class;
+        ibv_grh
+    }
+}
+
+/// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
+/// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
+/// automatically fragment the messages to packet of this size.
+#[derive(Debug, Clone, Copy)]
+pub enum MTU {
+    /// IBV_MTU_256 - 256 bytes
+    MTU256,
+    /// IBV_MTU_512 - 512 bytes
+    MTU512,
+    /// IBV_MTU_1024 - 1024 bytes
+    MTU1024,
+    /// IBV_MTU_2048 - 2048 bytes
+    MTU2048,
+    /// IBV_MTU_4096 - 4096 bytes
+    MTU4096,
+}
+
+impl From<MTU> for u32 {
+    #[inline]
+    fn from(mtu: MTU) -> Self {
+        match mtu {
+            MTU::MTU256 => ibv_mtu::IBV_MTU_256,
+            MTU::MTU512 => ibv_mtu::IBV_MTU_512,
+            MTU::MTU1024 => ibv_mtu::IBV_MTU_1024,
+            MTU::MTU2048 => ibv_mtu::IBV_MTU_2048,
+            MTU::MTU4096 => ibv_mtu::IBV_MTU_4096,
+        }
+    }
+}
+
+/// Attributes for QP's receive queue to receive messages
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+#[getset(set, get = "with_prefix")]
+pub(crate) struct RQAttr {
+    /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that can be
+    /// transferred in the path. For UC and RC QPs, when needed, the RDMA device will automatically
+    /// fragment the messages to packet of this size.
+    #[builder(default = "DEFAULT_MTU")]
+    mtu: MTU,
+    /// Retmoe destination qp number
+    dest_qp_number: u32,
+    /// Queue pair information used to establish connection
+    #[builder(
+        field(
+            type = "AddressHandlerBuilder",
+            build = "self.address_handler.build()?"
+        ),
+        setter(custom)
+    )]
+    address_handler: AddressHandler,
+    /// A 24 bits value of the Packet Sequence Number of the received packets for RC and UC QPs
+    #[builder(default = "DEFAULT_RQ_PSN")]
+    rq_psn: u32,
+    /// The number of RDMA Reads & atomic operations outstanding at any time that can be handled by
+    /// this QP as a destination. Relevant only for RC QPs
+    #[builder(default = "DEFAULT_MAX_DEST_RD_ATOMIC")]
+    max_dest_rd_atomic: u8,
+    /// Minimum RNR NAK Timer Field Value. When an incoming message to this QP should consume a Work
+    /// Request from the Receive Queue, but not Work Request is outstanding on that Queue, the QP will
+    /// send an RNR NAK packet to the initiator. It does not affect RNR NAKs sent for other reasons.
+    /// The value can be one of the following numeric values since those values aren’t enumerated:
+    ///     0 - 655.36 milliseconds delay
+    ///     1 - 0.01 milliseconds delay
+    ///     2 - 0.02 milliseconds delay
+    ///     3 - 0.03 milliseconds delay
+    ///     4 - 0.04 milliseconds delay
+    ///     5 - 0.06 milliseconds delay
+    ///     6 - 0.08 milliseconds delay
+    ///     7 - 0.12 milliseconds delay
+    ///     8 - 0.16 milliseconds delay
+    ///     9 - 0.24 milliseconds delay
+    ///     10 - 0.32 milliseconds delay
+    ///     11 - 0.48 milliseconds delay
+    ///     12 - 0.64 milliseconds delay
+    ///     13 - 0.96 milliseconds delay
+    ///     14 - 1.28 milliseconds delay
+    ///     15 - 1.92 milliseconds delay
+    ///     16 - 2.56 milliseconds delay
+    ///     17 - 3.84 milliseconds delay
+    ///     18 - 5.12 milliseconds delay
+    ///     19 - 7.68 milliseconds delay
+    ///     20 - 10.24 milliseconds delay
+    ///     21 - 15.36 milliseconds delay
+    ///     22 - 20.48 milliseconds delay
+    ///     23 - 30.72 milliseconds delay
+    ///     24 - 40.96 milliseconds delay
+    ///     25 - 61.44 milliseconds delay
+    ///     26 - 81.92 milliseconds delay
+    ///     27 - 122.88 milliseconds delay
+    ///     28 - 163.84 milliseconds delay
+    ///     29 - 245.76 milliseconds delay
+    ///     30 - 327.68 milliseconds delay
+    ///     31 - 491.52 milliseconds delay
+    /// Relevant only for RC QPs
+    #[builder(default = "DEFAULT_MIN_RNR_TIMER")]
+    min_rnr_timer: u8,
+}
+
+impl RQAttr {
+    /// Reset the infomation of remote end
+    pub(crate) fn reset(&mut self, remote: &QueuePairEndpoint, gid_index: u8, port_num: u8) {
+        let _ = self
+            .address_handler
+            .grh
+            .set_sgid_index(gid_index)
+            .set_dgid(*remote.get_gid());
+        let _ = self
+            .address_handler
+            .set_dest_lid(*remote.get_lid())
+            .set_port_num(port_num);
+        let _ = self.set_dest_qp_number(*remote.get_qp_num());
+    }
+}
+
+impl RQAttrBuilder {
+    /// Get sub builder's mutable reference
+    pub(crate) fn address_handler(&mut self) -> &mut AddressHandlerBuilder {
+        &mut self.address_handler
+    }
+}
+
+/// Attributes for QP's send queue to receive messages
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+pub(crate) struct SQAttr {
+    /// The minimum timeout that a QP waits for ACK/NACK from remote QP before retransmitting the packet.
+    /// The value zero is special value which means wait an infinite time for the ACK/NACK (useful for
+    /// debugging). For any other value of timeout, the time calculation is: `4.09*2^timeout`.
+    /// Relevant only to RC QPs.
+    #[builder(default = "DEFAULT_TIMEOUT")]
+    timeout: u8,
+    /// A 3 bits value of the total number of times that the QP will try to resend the packets before
+    /// reporting an error because the remote side doesn't answer in the primary path
+    #[builder(default = "DEFAULT_RETRY_CNT")]
+    retry_cnt: u8,
+    /// A 3 bits value of the total number of times that the QP will try to resend the packets when an
+    /// RNR NACK was sent by the remote QP before reporting an error. The value 7 is special and specify
+    /// to retry infinite times in case of RNR.
+    #[builder(default = "DEFAULT_RNR_RETRY")]
+    rnr_retry: u8,
+    /// A 24 bits value of the Packet Sequence Number of the sent packets for any QP.
+    #[builder(default = "DEFAULT_SQ_PSN")]
+    sq_psn: u32,
+    /// The number of RDMA Reads & atomic operations outstanding at any time that can be handled by
+    /// this QP as an initiator. Relevant only for RC QPs.
+    #[builder(default = "DEFAULT_MAX_RD_ATOMIC")]
+    max_rd_atomic: u8,
+}
+
+/// The state of qp
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QueuePairState {
+    /// IBV_QPS_RESET - Reset state
+    Reset,
+    /// IBV_QPS_INIT - Initialized state
+    Init,
+    /// IBV_QPS_RTR - Ready To Receive state
+    ReadyToRecv,
+    /// IBV_QPS_RTS - Ready To Send state
+    ReadyToSend,
+    /// IBV_QPS_SQD - Send Queue Drain state
+    SQDrain,
+    /// IBV_QPS_SQE - Send Queue Error state
+    SQErr,
+    /// IBV_QPS_ERR - Error state
+    Err,
+    /// IBV_QPS_UNKNOWN - Unknown state
+    Unknown,
+}
+
+impl From<u32> for QueuePairState {
+    fn from(num: u32) -> Self {
+        if num == ibv_qp_state::IBV_QPS_RTS {
+            Self::ReadyToSend
+        } else if num == ibv_qp_state::IBV_QPS_RTR {
+            Self::ReadyToRecv
+        } else if num == ibv_qp_state::IBV_QPS_INIT {
+            Self::Init
+        } else if num == ibv_qp_state::IBV_QPS_ERR {
+            Self::Err
+        } else if num == ibv_qp_state::IBV_QPS_RESET {
+            Self::Reset
+        } else if num == ibv_qp_state::IBV_QPS_UNKNOWN {
+            Self::Unknown
+        } else if num == ibv_qp_state::IBV_QPS_SQE {
+            Self::SQErr
+        } else {
+            Self::SQDrain
+        }
+    }
 }
 
 /// Queue pair wrapper
@@ -223,6 +594,10 @@ pub(crate) struct QueuePair {
     pub(crate) qp_init_attr: QueuePairInitAttr,
     /// access of this qp
     pub(crate) access: Option<ibv_access_flags>,
+    /// Assume that this is the current QP state. This is useful if it is known
+    /// to the application that the QP state is different from the assumed state
+    /// by the low-level driver. It can be one of the enumerated values as qp_state.
+    pub(crate) cur_state: RwLock<QueuePairState>,
 }
 
 impl QueuePair {
@@ -253,24 +628,25 @@ impl QueuePair {
         &mut self,
         flag: ibv_access_flags,
         port_num: u8,
+        pkey_index: u16,
     ) -> io::Result<()> {
         // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
-        attr.pkey_index = 0;
-        attr.port_num = port_num;
         attr.qp_state = ibv_qp_state::IBV_QPS_INIT;
+        attr.pkey_index = pkey_index;
+        attr.port_num = port_num;
         attr.qp_access_flags = flag.0;
         let flags = ibv_qp_attr_mask::IBV_QP_PKEY_INDEX
             | ibv_qp_attr_mask::IBV_QP_STATE
             | ibv_qp_attr_mask::IBV_QP_PORT
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
-        // SAFETY: ffi
-        // TODO: check safety
+        // SAFETY: ffi, and qp will not modify by other threads
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
         self.access = Some(flag);
+        *self.cur_state.write() = QueuePairState::Init;
         Ok(())
     }
 
@@ -281,29 +657,16 @@ impl QueuePair {
     /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
     ///
     /// `ENOMEM`    Not enough resources to complete this operation
-    pub(crate) fn modify_to_rtr(
-        &self,
-        remote: QueuePairEndpoint,
-        start_psn: u32,
-        max_dest_rd_atomic: u8,
-        min_rnr_timer: u8,
-    ) -> io::Result<()> {
+    pub(crate) fn modify_to_rtr(&self, rq_attr: RQAttr) -> io::Result<()> {
         // SAFETY: POD FFI type
-        let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
-        attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
-        attr.path_mtu = self.pd.ctx.get_active_mtu();
-        attr.dest_qp_num = remote.qp_num;
-        attr.rq_psn = start_psn;
-        attr.max_dest_rd_atomic = max_dest_rd_atomic;
-        attr.min_rnr_timer = min_rnr_timer;
-        attr.ah_attr.dlid = remote.lid;
-        attr.ah_attr.sl = 0;
-        attr.ah_attr.src_path_bits = 0;
-        attr.ah_attr.is_global = 1;
-        attr.ah_attr.port_num = self.port_num;
-        attr.ah_attr.grh.dgid = remote.gid.into();
-        attr.ah_attr.grh.hop_limit = 0xff;
-        attr.ah_attr.grh.sgid_index = self.gid_index.cast();
+        let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
+        qp_attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
+        qp_attr.path_mtu = rq_attr.mtu.into();
+        qp_attr.dest_qp_num = rq_attr.dest_qp_number;
+        qp_attr.rq_psn = rq_attr.rq_psn;
+        qp_attr.max_dest_rd_atomic = rq_attr.max_dest_rd_atomic;
+        qp_attr.min_rnr_timer = rq_attr.min_rnr_timer;
+        qp_attr.ah_attr = rq_attr.address_handler.into();
         let flags = ibv_qp_attr_mask::IBV_QP_STATE
             | ibv_qp_attr_mask::IBV_QP_AV
             | ibv_qp_attr_mask::IBV_QP_PATH_MTU
@@ -311,12 +674,12 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_RQ_PSN
             | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC
             | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
-        // SAFETY: ffi
-        // TODO: check safety
-        let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
+        // SAFETY: ffi, and qp will not modify by other threads
+        let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut qp_attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
+        *self.cur_state.write() = QueuePairState::ReadyToRecv;
         Ok(())
     }
 
@@ -337,34 +700,27 @@ impl QueuePair {
     /// `EINVAL`    Invalid value provided in attr or in `attr_mask`
     ///
     /// `ENOMEM`    Not enough resources to complete this operation
-    pub(crate) fn modify_to_rts(
-        &self,
-        timeout: u8,
-        retry_cnt: u8,
-        rnr_retry: u8,
-        start_psn: u32,
-        max_rd_atomic: u8,
-    ) -> io::Result<()> {
+    pub(crate) fn modify_to_rts(&self, sq_attr: SQAttr) -> io::Result<()> {
         // SAFETY: POD FFI type
         let mut attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
-        attr.timeout = timeout;
-        attr.retry_cnt = retry_cnt;
-        attr.rnr_retry = rnr_retry;
-        attr.sq_psn = start_psn;
-        attr.max_rd_atomic = max_rd_atomic;
+        attr.timeout = sq_attr.timeout;
+        attr.retry_cnt = sq_attr.retry_cnt;
+        attr.rnr_retry = sq_attr.rnr_retry;
+        attr.sq_psn = sq_attr.sq_psn;
+        attr.max_rd_atomic = sq_attr.max_rd_atomic;
         let flags = ibv_qp_attr_mask::IBV_QP_STATE
             | ibv_qp_attr_mask::IBV_QP_TIMEOUT
             | ibv_qp_attr_mask::IBV_QP_RETRY_CNT
             | ibv_qp_attr_mask::IBV_QP_RNR_RETRY
             | ibv_qp_attr_mask::IBV_QP_SQ_PSN
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
-        // SAFETY: ffi
-        // TODO: check safety
+        // SAFETY: ffi, and qp will not modify by other threads
         let errno = unsafe { ibv_modify_qp(self.as_ptr(), &mut attr, flags.0.cast()) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
+        *self.cur_state.write() = QueuePairState::ReadyToSend;
         Ok(())
     }
 
@@ -896,4 +1252,27 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
             }
         }
     }
+}
+
+/// Builders to attributes helper
+pub(crate) fn builders_into_attrs(
+    mut recv_queue_attr: RQAttrBuilder,
+    send_queue_attr: SQAttrBuilder,
+    remote: &QueuePairEndpoint,
+    port_num: u8,
+    gid_index: u8,
+) -> io::Result<(RQAttr, SQAttr)> {
+    let _ = recv_queue_attr.dest_qp_number(remote.qp_num);
+    let _ = recv_queue_attr
+        .address_handler()
+        .port_num(port_num)
+        .dest_lid(*remote.get_lid());
+    let _ = recv_queue_attr
+        .address_handler()
+        .grh()
+        .sgid_index(gid_index)
+        .dgid(*remote.get_gid());
+    let sr = send_queue_attr.build()?;
+    let rr = recv_queue_attr.build()?;
+    Ok((rr, sr))
 }

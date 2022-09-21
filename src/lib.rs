@@ -175,9 +175,12 @@ pub use memory_region::{
 };
 pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;
+use parking_lot::RwLock;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairEndpoint, MAX_RECV_SGE, MAX_RECV_WR, MAX_SEND_SGE, MAX_SEND_WR,
+    QueuePair, QueuePairEndpoint, QueuePairState, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
+    DEFAULT_GID_INDEX, DEFAULT_MTU, DEFAULT_PKEY_INDEX, DEFAULT_PORT_NUM, MAX_RECV_SGE,
+    MAX_RECV_WR, MAX_SEND_SGE, MAX_SEND_WR,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -196,12 +199,14 @@ use tokio::{
 };
 use tracing::debug;
 
+use crate::queue_pair::builders_into_attrs;
+pub use queue_pair::MTU;
 #[macro_use]
 extern crate lazy_static;
 
 /// initial device attributes
 #[derive(Debug)]
-pub struct DeviceInitAttr {
+pub(crate) struct DeviceInitAttr {
     /// Rdma device name
     dev_name: Option<String>,
     /// Device port number
@@ -215,15 +220,15 @@ impl Default for DeviceInitAttr {
     fn default() -> Self {
         Self {
             dev_name: None,
-            port_num: 1,
-            gid_index: 1,
+            port_num: DEFAULT_PORT_NUM,
+            gid_index: DEFAULT_GID_INDEX,
         }
     }
 }
 
 /// initial CQ attributes
 #[derive(Debug, Clone, Copy)]
-pub struct CQInitAttr {
+pub(crate) struct CQInitAttr {
     /// Complete queue size
     cq_size: u32,
     /// Maximum number of completion queue entries (CQE) to poll at a time.
@@ -243,7 +248,7 @@ impl Default for CQInitAttr {
 
 /// initial QP attributes
 #[derive(Debug, Clone, Copy)]
-pub struct QPInitAttr {
+pub(crate) struct QPInitAttr {
     /// Access flag
     access: ibv_access_flags,
     /// Connection type
@@ -258,6 +263,18 @@ pub struct QPInitAttr {
     max_send_sge: u32,
     /// Maximum number of scatter/gather elements (SGE) in a WR on the receive queue
     max_recv_sge: u32,
+    /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
+    /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
+    /// automatically fragment the messages to packet of this size.
+    mtu: MTU,
+    /// Primary P_Key index. The value of the entry in the P_Key table that outgoing
+    /// packets from this QP will be sent with and incoming packets to this QP will
+    /// be verified within the Primary path.
+    pkey_index: u16,
+    /// Attributes for QP's send queue to receive messages
+    sq_attr: SQAttrBuilder,
+    /// Attributes for QP's receive queue to receive messages
+    rq_attr: RQAttrBuilder,
 }
 
 lazy_static! {
@@ -279,13 +296,17 @@ impl Default for QPInitAttr {
             access: *DEFAULT_ACCESS,
             conn_type: ConnectionType::RCSocket,
             raw: false,
+            mtu: DEFAULT_MTU,
+            pkey_index: DEFAULT_PKEY_INDEX,
+            sq_attr: SQAttrBuilder::default(),
+            rq_attr: RQAttrBuilder::default(),
         }
     }
 }
 
 /// Initial `MR` attributes
 #[derive(Debug, Clone, Copy)]
-pub struct MRInitAttr {
+pub(crate) struct MRInitAttr {
     /// Access flag
     access: ibv_access_flags,
     /// Strategy to manage `MR`s
@@ -304,7 +325,7 @@ impl Default for MRInitAttr {
 
 /// initial Agent attributes
 #[derive(Debug, Clone, Copy)]
-pub struct AgentInitAttr {
+pub(crate) struct AgentInitAttr {
     /// Max length of message send/recv by Agent
     max_message_length: usize,
     /// Max access permission for remote mr requests
@@ -398,14 +419,25 @@ impl RdmaBuilder {
     pub async fn connect<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
+                let recv_queue_attr = self.qp_attr.rq_attr;
+                let send_queue_attr = self.qp_attr.sq_attr;
                 let mut rdma = self.build()?;
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-                rdma.qp_handshake(remote)?;
+                let (rr, sr) = builders_into_attrs(
+                    recv_queue_attr,
+                    send_queue_attr,
+                    &remote,
+                    self.dev_attr.port_num,
+                    self.dev_attr.gid_index.cast(),
+                )?;
+                rdma.qp_handshake(rr, sr)?;
                 rdma.init_agent(
                     self.agent_attr.max_message_length,
                     self.agent_attr.max_rmr_access,
                 )
                 .await?;
+                rdma.clone_attr.rq_attr = Some(rr);
+                rdma.clone_attr.sq_attr = Some(sr);
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -562,10 +594,19 @@ impl RdmaBuilder {
     pub async fn listen<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
+                let recv_queue_attr = self.qp_attr.rq_attr;
+                let send_queue_attr = self.qp_attr.sq_attr;
                 let mut rdma = self.build()?;
                 let tcp_listener = TcpListener::bind(addr).await?;
                 let remote = tcp_listen(&tcp_listener, &rdma.endpoint()).await?;
-                rdma.qp_handshake(remote)?;
+                let (rr, sr) = builders_into_attrs(
+                    recv_queue_attr,
+                    send_queue_attr,
+                    &remote,
+                    self.dev_attr.port_num,
+                    self.dev_attr.gid_index.cast(),
+                )?;
+                rdma.qp_handshake(rr, sr)?;
                 debug!("handshake done");
                 rdma.init_agent(
                     self.agent_attr.max_message_length,
@@ -573,6 +614,8 @@ impl RdmaBuilder {
                 )
                 .await?;
                 rdma.clone_attr = CloneAttr::default().set_tcp_listener(tcp_listener);
+                rdma.clone_attr.rq_attr = Some(rr);
+                rdma.clone_attr.sq_attr = Some(sr);
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -699,6 +742,251 @@ impl RdmaBuilder {
     #[must_use]
     pub fn set_max_rmr_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
         self.agent_attr.max_rmr_access = flags_into_ibv_access(flags);
+        self
+    }
+
+    // TODO: check values of rq/sq_attr
+
+    /// Set the number of RDMA Reads & atomic operations outstanding at any time that can be
+    /// handled by this QP as a destination. Relevant only for RC QPs.
+    #[inline]
+    #[must_use]
+    pub fn set_max_dest_rd_atomic(mut self, max_dest_rd_atomic: u8) -> Self {
+        let _ = self.qp_attr.rq_attr.max_dest_rd_atomic(max_dest_rd_atomic);
+        self
+    }
+
+    /// Set the minimum RNR NAK Timer Field Value. When an incoming message to this QP should consume a Work
+    /// Request from the Receive Queue, but not Work Request is outstanding on that Queue, the QP will
+    /// send an RNR NAK packet to the initiator. It does not affect RNR NAKs sent for other reasons.
+    ///
+    /// The value can be one of the following numeric values since those values aren’t enumerated:
+    ///
+    /// 0 - 655.36 milliseconds delay
+    ///
+    /// 1 - 0.01 milliseconds delay
+    ///
+    /// 2 - 0.02 milliseconds delay
+    ///
+    /// 3 - 0.03 milliseconds delay
+    ///
+    /// 4 - 0.04 milliseconds delay
+    ///
+    /// 5 - 0.06 milliseconds delay
+    ///
+    /// 6 - 0.08 milliseconds delay
+    ///
+    /// 7 - 0.12 milliseconds delay
+    ///
+    /// 8 - 0.16 milliseconds delay
+    ///
+    /// 9 - 0.24 milliseconds delay
+    ///
+    /// 10 - 0.32 milliseconds delay
+    ///
+    /// 11 - 0.48 milliseconds delay
+    ///
+    /// 12 - 0.64 milliseconds delay
+    ///
+    /// 13 - 0.96 milliseconds delay
+    ///
+    /// 14 - 1.28 milliseconds delay
+    ///
+    /// 15 - 1.92 milliseconds delay
+    ///
+    /// 16 - 2.56 milliseconds delay
+    ///
+    /// 17 - 3.84 milliseconds delay
+    ///
+    /// 18 - 5.12 milliseconds delay
+    ///
+    /// 19 - 7.68 milliseconds delay
+    ///
+    /// 20 - 10.24 milliseconds delay
+    ///
+    /// 21 - 15.36 milliseconds delay
+    ///
+    /// 22 - 20.48 milliseconds delay
+    ///
+    /// 23 - 30.72 milliseconds delay
+    ///
+    /// 24 - 40.96 milliseconds delay
+    ///
+    /// 25 - 61.44 milliseconds delay
+    ///
+    /// 26 - 81.92 milliseconds delay
+    ///
+    /// 27 - 122.88 milliseconds delay
+    ///
+    /// 28 - 163.84 milliseconds delay
+    ///
+    /// 29 - 245.76 milliseconds delay
+    ///
+    /// 30 - 327.68 milliseconds delay
+    ///
+    /// 31 - 491.52 milliseconds delay
+    ///
+    /// Relevant only for RC QPs
+    #[inline]
+    #[must_use]
+    pub fn set_min_rnr_timer(mut self, min_rnr_timer: u8) -> Self {
+        let _ = self.qp_attr.rq_attr.min_rnr_timer(min_rnr_timer);
+        self
+    }
+
+    /// Set a 24 bits value of the Packet Sequence Number of the received packets for RC and UC QPs
+    #[inline]
+    #[must_use]
+    pub fn set_rq_psn(mut self, rq_psn: u32) -> Self {
+        let _ = self.qp_attr.rq_attr.rq_psn(rq_psn);
+        self
+    }
+
+    /// Set the number of RDMA Reads & atomic operations outstanding at any time that can be handled by
+    /// this QP as an initiator. Relevant only for RC QPs.
+    #[inline]
+    #[must_use]
+    pub fn set_max_rd_atomic(mut self, max_rd_atomic: u8) -> Self {
+        let _ = self.qp_attr.sq_attr.max_rd_atomic(max_rd_atomic);
+        self
+    }
+
+    /// Set a 3 bits value of the total number of times that the QP will try to resend the packets before
+    /// reporting an error because the remote side doesn't answer in the primary path
+    #[inline]
+    #[must_use]
+    pub fn set_retry_cnt(mut self, retry_cnt: u8) -> Self {
+        let _ = self.qp_attr.sq_attr.retry_cnt(retry_cnt);
+        self
+    }
+
+    /// Set a 3 bits value of the total number of times that the QP will try to resend the packets when an
+    /// RNR NACK was sent by the remote QP before reporting an error. The value 7 is special and specify
+    /// to retry infinite times in case of RNR.
+    #[inline]
+    #[must_use]
+    pub fn set_rnr_retry(mut self, rnr_retry: u8) -> Self {
+        let _ = self.qp_attr.sq_attr.rnr_retry(rnr_retry);
+        self
+    }
+
+    /// Set a 24 bits value of the Packet Sequence Number of the sent packets for any QP.
+    #[inline]
+    #[must_use]
+    pub fn set_sq_psn(mut self, sq_psn: u32) -> Self {
+        let _ = self.qp_attr.sq_attr.sq_psn(sq_psn);
+        self
+    }
+
+    /// Set the minimum timeout that a QP waits for ACK/NACK from remote QP before retransmitting the packet.
+    /// The value zero is special value which means wait an infinite time for the ACK/NACK (useful for
+    /// debugging). For any other value of timeout, the time calculation is: `4.09*2^timeout`.
+    /// Relevant only to RC QPs.
+    #[inline]
+    #[must_use]
+    pub fn set_timeout(mut self, timeout: u8) -> Self {
+        let _ = self.qp_attr.sq_attr.timeout(timeout);
+        self
+    }
+
+    /// Set the Service Level to be used. 4 bits.
+    #[inline]
+    #[must_use]
+    pub fn set_service_level(mut self, sl: u8) -> Self {
+        let _ = self.qp_attr.rq_attr.address_handler().service_level(sl);
+        self
+    }
+
+    /// Set the used Source Path Bits. This is useful when LMC is used in the port, i.e. each port
+    /// covers a range of LIDs. The packets are being sent with the port's base LID, bitwised `ORed`
+    /// with the value of the source path bits. The value 0 indicates the port's base LID is used.
+    #[inline]
+    #[must_use]
+    pub fn set_src_path_bits(mut self, src_path_bits: u8) -> Self {
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .src_path_bits(src_path_bits);
+        self
+    }
+
+    /// Set the value which limits the rate of packets that being sent to the subnet. This can be
+    /// useful if the rate of the packet origin is higher than the rate of the destination.
+    #[inline]
+    #[must_use]
+    pub fn set_static_rate(mut self, static_rate: u8) -> Self {
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .static_rate(static_rate);
+        self
+    }
+
+    /// If this value is set to a non-zero value, it gives a hint for switches and routers
+    /// with multiple outbound paths that these sequence of packets must be delivered in order,
+    /// those staying on the same path, so that they won't be reordered. 20 bits.
+    #[inline]
+    #[must_use]
+    pub fn set_flow_label(mut self, flow_label: u32) -> Self {
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .grh()
+            .flow_label(flow_label);
+        self
+    }
+
+    /// Set the number of hops (i.e. the number of routers) that the packet is permitted to take before
+    /// being discarded. This ensures that a packet will not loop indefinitely between routers if a
+    /// routing loop occur. Each router decrement by one this value at the packet and when this value
+    /// reaches 0, this packet is discarded. Setting the value to 0 or 1 will ensure that the packet
+    /// won't leave the local subnet.
+    #[inline]
+    #[must_use]
+    pub fn set_hop_limit(mut self, hop_limit: u8) -> Self {
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .grh()
+            .hop_limit(hop_limit);
+        self
+    }
+
+    /// Using this value, the originator of the packets specifies the required delivery priority for
+    /// handling them by the routers.
+    #[inline]
+    #[must_use]
+    pub fn set_traffic_class(mut self, traffic_class: u8) -> Self {
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .grh()
+            .traffic_class(traffic_class);
+        self
+    }
+
+    /// Set Primary key index. The value of the entry in the pkey table that outgoing
+    /// packets from this QP will be sent with and incoming packets to this QP will be
+    /// verified within the Primary path.
+    #[inline]
+    #[must_use]
+    pub fn set_pkey_index(mut self, pkey_index: u16) -> Self {
+        self.qp_attr.pkey_index = pkey_index;
+        self
+    }
+
+    /// Set the path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
+    /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
+    /// automatically fragment the messages to packet of this size.
+    #[inline]
+    #[must_use]
+    pub fn set_mtu(mut self, mtu: MTU) -> Self {
+        self.qp_attr.mtu = mtu;
         self
     }
 }
@@ -865,6 +1153,12 @@ pub(crate) struct CloneAttr {
     pub(crate) qp_access: Option<ibv_access_flags>,
     /// Clone `Rdma` with new max access permission for remote mr requests
     pub(crate) max_rmr_access: Option<ibv_access_flags>,
+    /// Attributes for QP's send queue to receive messages
+    pub(crate) sq_attr: Option<SQAttr>,
+    /// Attributes for QP's receive queue to receive messages
+    pub(crate) rq_attr: Option<RQAttr>,
+    /// Pkey index
+    pub(crate) pkey_index: u16,
 }
 
 impl CloneAttr {
@@ -952,7 +1246,7 @@ impl Rdma {
             .set_max_recv_wr(qp_attr.max_recv_wr)
             .set_max_recv_sge(qp_attr.max_recv_sge)
             .build()?;
-        qp.modify_to_init(qp_attr.access, dev_attr.port_num)?;
+        qp.modify_to_init(qp_attr.access, dev_attr.port_num, qp_attr.pkey_index)?;
         Ok(Self {
             ctx,
             pd,
@@ -1002,8 +1296,9 @@ impl Rdma {
             gid_index: self.qp.gid_index,
             qp_init_attr,
             access: Some(qp_access),
+            cur_state: RwLock::new(QueuePairState::Unknown),
         };
-        qp.modify_to_init(qp_access, self.qp.port_num)?;
+        qp.modify_to_init(qp_access, self.qp.port_num, self.clone_attr.pkey_index)?;
         Ok(Self {
             ctx: Arc::clone(&self.ctx),
             pd: Arc::clone(pd),
@@ -1022,11 +1317,12 @@ impl Rdma {
     }
 
     /// to hand shake the qp so that it works
-    fn qp_handshake(&mut self, remote: QueuePairEndpoint) -> io::Result<()> {
-        self.qp.modify_to_rtr(remote, 0, 1, 0x12)?;
-        debug!("rtr");
-        self.qp.modify_to_rts(0x12, 6, 6, 0, 1)?;
+    fn qp_handshake(&mut self, recv_queue_attr: RQAttr, send_queue_attr: SQAttr) -> io::Result<()> {
+        self.qp.modify_to_rtr(recv_queue_attr)?;
+        self.qp.modify_to_rts(send_queue_attr)?;
         debug!("rts");
+        self.clone_attr.rq_attr = Some(recv_queue_attr);
+        self.clone_attr.sq_attr = Some(send_queue_attr);
         Ok(())
     }
 
@@ -1111,7 +1407,9 @@ impl Rdma {
                         },
                     )?
                     .await?;
-                rdma.qp_handshake(remote)?;
+                let (mut rr, sr) = self.get_rq_sq_attr()?;
+                rr.reset(&remote, rdma.qp.gid_index.cast(), self.qp.port_num);
+                rdma.qp_handshake(rr, sr)?;
                 debug!("handshake done");
                 #[allow(clippy::unreachable)]
                 let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
@@ -1182,7 +1480,10 @@ impl Rdma {
             ConnectionType::RCSocket => {
                 let mut rdma = self.clone()?;
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-                rdma.qp_handshake(remote)?;
+                let (mut rr, sr) = self.get_rq_sq_attr()?;
+                rr.reset(&remote, rdma.qp.gid_index.cast(), self.qp.port_num);
+                rdma.qp_handshake(rr, sr)?;
+                // TODO: add APIs to set attr
                 #[allow(clippy::unreachable)]
                 let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
                     || {
@@ -2067,7 +2368,11 @@ impl Rdma {
             "should set connection type to RCSocket"
         );
         let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-        rdma.qp_handshake(remote)?;
+        let rr = RQAttrBuilder::default();
+        let sr = SQAttrBuilder::default();
+        let (rr, sr) =
+            builders_into_attrs(rr, sr, &remote, rdma.qp.port_num, rdma.qp.gid_index.cast())?;
+        rdma.qp_handshake(rr, sr)?;
         rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3070,6 +3375,21 @@ impl Rdma {
         self.clone_attr = self.clone_attr.set_pd(new_pd);
         Ok(self)
     }
+
+    /// Get the attrs of send queue and recv queue or create and return a pair of default attrs if
+    /// they are none.
+    #[inline]
+    pub(crate) fn get_rq_sq_attr(&self) -> io::Result<(RQAttr, SQAttr)> {
+        let recv_queue_attr = self
+            .clone_attr
+            .rq_attr
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "parent rq_attr is none"))?;
+        let send_queue_attr = self
+            .clone_attr
+            .sq_attr
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "parent sq_attr is none"))?;
+        Ok((recv_queue_attr, send_queue_attr))
+    }
 }
 
 /// Rdma Listener is the wrapper of a `TcpListener`, which is used to
@@ -3193,7 +3513,12 @@ impl RdmaListener {
             )
         })?;
         stream.write_all(&local).await?;
-        rdma.qp_handshake(remote)?;
+        let rr = RQAttrBuilder::default();
+        let sr = SQAttrBuilder::default();
+        let (rr, sr) =
+            builders_into_attrs(rr, sr, &remote, rdma.qp.port_num, rdma.qp.gid_index.cast())?;
+        rdma.qp_handshake(rr, sr)?;
+
         debug!("handshake done");
         rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         Ok(rdma)

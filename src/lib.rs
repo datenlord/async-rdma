@@ -178,9 +178,9 @@ use mr_allocator::MrAllocator;
 use parking_lot::RwLock;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairEndpoint, QueuePairState, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
-    DEFAULT_GID_INDEX, DEFAULT_MTU, DEFAULT_PKEY_INDEX, DEFAULT_PORT_NUM, MAX_RECV_SGE,
-    MAX_RECV_WR, MAX_SEND_SGE, MAX_SEND_WR,
+    QueuePair, QueuePairEndpoint, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder, DEFAULT_GID_INDEX,
+    DEFAULT_MTU, DEFAULT_PKEY_INDEX, DEFAULT_PORT_NUM, MAX_RECV_SGE, MAX_RECV_WR, MAX_SEND_SGE,
+    MAX_SEND_WR,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -200,7 +200,7 @@ use tokio::{
 use tracing::debug;
 
 use crate::queue_pair::builders_into_attrs;
-pub use queue_pair::MTU;
+pub use queue_pair::{QueuePairState, MTU};
 #[macro_use]
 extern crate lazy_static;
 
@@ -3374,6 +3374,95 @@ impl Rdma {
         let new_pd = self.ctx.create_protection_domain()?;
         self.clone_attr = self.clone_attr.set_pd(new_pd);
         Ok(self)
+    }
+
+    /// Get the real state of qp by quering
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{RdmaBuilder, QueuePairState};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_init = RdmaBuilder::default().build()?;
+    ///     assert_eq!(rdma_init.get_cur_qp_state(), QueuePairState::Init);
+    ///     let rdma_send = RdmaBuilder::default().connect(addr).await?;
+    ///     assert_eq!(rdma_send.get_cur_qp_state(), QueuePairState::ReadyToSend);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     assert_eq!(rdma.get_cur_qp_state(), QueuePairState::ReadyToSend);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn get_cur_qp_state(&self) -> QueuePairState {
+        *self.qp.cur_state.read()
+    }
+
+    /// Get the real state of qp by quering
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{RdmaBuilder, QueuePairState};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma_init = RdmaBuilder::default().build()?;
+    ///     assert_eq!(rdma_init.query_qp_state()?, QueuePairState::Init);
+    ///     let rdma_send = RdmaBuilder::default().connect(addr).await?;
+    ///     assert_eq!(rdma_send.query_qp_state()?, QueuePairState::ReadyToSend);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     assert_eq!(rdma.query_qp_state()?, QueuePairState::ReadyToSend);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub fn query_qp_state(&self) -> io::Result<QueuePairState> {
+        self.qp.query_state()
     }
 
     /// Get the attrs of send queue and recv queue or create and return a pair of default attrs if

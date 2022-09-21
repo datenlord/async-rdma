@@ -1,6 +1,6 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
-    error_utilities::{log_last_os_err, log_ret_last_os_err},
+    error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     event_listener::{EventListener, LmrInners},
     gid::Gid,
     memory_region::{
@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use rdma_sys::{
     ibv_access_flags, ibv_ah_attr, ibv_cq, ibv_destroy_qp, ibv_global_route, ibv_modify_qp,
     ibv_mtu, ibv_post_recv, ibv_post_send, ibv_qp, ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr,
-    ibv_qp_state,ibv_recv_wr, ibv_send_wr,
+    ibv_qp_state, ibv_query_qp, ibv_recv_wr, ibv_send_wr,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -535,8 +535,8 @@ pub(crate) struct SQAttr {
 
 /// The state of qp
 #[repr(u32)]
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum QueuePairState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePairState {
     /// IBV_QPS_RESET - Reset state
     Reset,
     /// IBV_QPS_INIT - Initialized state
@@ -556,6 +556,7 @@ pub(crate) enum QueuePairState {
 }
 
 impl From<u32> for QueuePairState {
+    #[inline]
     fn from(num: u32) -> Self {
         if num == ibv_qp_state::IBV_QPS_RTS {
             Self::ReadyToSend
@@ -604,6 +605,37 @@ impl QueuePair {
     /// get `ibv_qp` pointer
     pub(crate) fn as_ptr(&self) -> *mut ibv_qp {
         self.inner_qp.as_ptr()
+    }
+
+    /// Get attributes of this qp.
+    /// Make sure only get masked member from attrs.
+    pub(crate) fn query_attrs(
+        &self,
+        mask: ibv_qp_attr_mask,
+    ) -> io::Result<(ibv_qp_attr, ibv_qp_init_attr)> {
+        // SAFETY: POD FFI type
+        let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
+        // SAFETY: POD FFI type
+        let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+        let errno = unsafe {
+            ibv_query_qp(
+                self.as_ptr(),
+                &mut qp_attr,
+                mask.0.cast(),
+                &mut qp_init_attr,
+            )
+        };
+        if errno != 0_i32 {
+            return Err(log_ret_last_os_err_with_note("ibv_query_qp failed"));
+        }
+        Ok((qp_attr, qp_init_attr))
+    }
+
+    /// Query the state of this qp
+    pub(crate) fn query_state(&self) -> io::Result<QueuePairState> {
+        let mask = ibv_qp_attr_mask::IBV_QP_STATE;
+        let res = self.query_attrs(mask)?;
+        Ok(res.0.qp_state.into())
     }
 
     /// get queue pair endpoint

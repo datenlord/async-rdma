@@ -214,17 +214,26 @@ impl From<QueuePairInitAttr> for ibv_qp_init_attr {
     }
 }
 
-/// Queue pair information used to hand shake
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Getters, Setters)]
+/// Queue pair information used to establish connection.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Getters, Setters, Builder)]
 #[getset(set, get = "pub")]
-pub(crate) struct QueuePairEndpoint {
-    /// queue pair number
+pub struct QueuePairEndpoint {
+    /// A 24 bits value of the QP number of RC and UC QPs; when sending data, packets will be
+    /// sent to this QP number and when receiving data, packets will be accepted only from this
+    /// QP number
     qp_num: u32,
-    /// lid
+    /// A 16 bit address assigned to end nodes by the subnet manager.Each LID is unique within
+    /// its subnet.
     lid: u16,
-    /// device gid
+    /// A 128-bit identifier used to identify a Port on a network adapter, a port on a Router,
+    /// or a Multicast Group.
+    ///
+    /// A GID is a valid 128-bit IPv6 address (per RFC 2373) with additional properties / restrictions
+    /// defined within IBA to facilitate efficient discovery, communication, and routing.
     gid: Gid,
 }
+
+impl_into_io_error!(QueuePairEndpointBuilderError);
 
 /// All of the necessary data to reach a remote destination. In connected transport modes (RC, UC)
 /// the AH is associated with a queue pair (QP). In the datagram transport modes (UD), the AH is
@@ -335,6 +344,13 @@ impl From<GlobalRouteHeader> for ibv_global_route {
 }
 
 impl_from_buidler_error_for_another!(GlobalRouteHeaderBuilderError, AddressHandlerBuilderError);
+
+impl GlobalRouteHeaderBuilder {
+    /// Get source gid index of this buidler
+    pub(crate) fn get_sgid_index(&self) -> Option<u8> {
+        self.sgid_index
+    }
+}
 
 /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
 /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will

@@ -3,15 +3,19 @@ use std::fmt;
 use rdma_sys::ibv_gid;
 use serde::{Deserialize, Serialize};
 
-/// Rdma device gid
+/// A 128-bit identifier used to identify a Port on a network adapter, a port on a Router,
+/// or a Multicast Group.
+///
+/// A GID is a valid 128-bit IPv6 address (per RFC 2373) with additional properties / restrictions
+/// defined within IBA to facilitate efficient discovery, communication, and routing.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub(crate) struct Gid(ibv_gid);
+pub struct Gid(ibv_gid);
 
 #[allow(dead_code)]
 impl Gid {
     /// Build [`Gid`] from bytes
-    fn from_raw(raw: [u8; 16]) -> Self {
+    pub(crate) fn from_raw(raw: [u8; 16]) -> Self {
         Self(ibv_gid { raw })
     }
 

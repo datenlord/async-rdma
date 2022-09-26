@@ -181,8 +181,8 @@ use mr_allocator::MrAllocator;
 use parking_lot::RwLock;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairBuilder, QueuePairEndpoint, QueuePairInitAttrBuilder, RQAttr,
-    RQAttrBuilder, SQAttr, SQAttrBuilder, DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
+    QueuePair, QueuePairBuilder, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr,
+    SQAttrBuilder, DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -203,7 +203,7 @@ use tracing::debug;
 
 use crate::queue_pair::builders_into_attrs;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
-pub use queue_pair::{QueuePairState, MTU};
+pub use queue_pair::{QueuePairEndpoint, QueuePairEndpointBuilder, QueuePairState, MTU};
 
 #[macro_use]
 extern crate lazy_static;
@@ -405,9 +405,36 @@ impl RdmaBuilder {
                 .await?;
                 Ok(rdma)
             }
-            ConnectionType::RCCM => Err(io::Error::new(
+            ConnectionType::RCCM | ConnectionType::RCIBV => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "ConnectionType should be XXSocket",
+            )),
+        }
+    }
+
+    /// Connect to remote end by raw ibv information.
+    ///
+    /// You can get the destination qp information in any way and use this interface to establish connection.
+    ///
+    /// The example is the same as `Rdma::ibv_connect`.
+    #[inline]
+    pub async fn ibv_connect(self, remote: QueuePairEndpoint) -> io::Result<Rdma> {
+        match self.qp_attr.conn_type {
+            ConnectionType::RCIBV => {
+                let mut rdma = self.build()?;
+                let (recv_attr, send_attr) =
+                    builders_into_attrs(self.qp_attr.rq_attr, self.qp_attr.sq_attr, &remote)?;
+                rdma.qp_handshake(recv_attr, send_attr)?;
+                rdma.init_agent(
+                    self.agent_attr.max_message_length,
+                    self.agent_attr.max_rmr_access,
+                )
+                .await?;
+                Ok(rdma)
+            }
+            ConnectionType::RCCM | ConnectionType::RCSocket => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXIBV",
             )),
         }
     }
@@ -504,9 +531,9 @@ impl RdmaBuilder {
     #[cfg(feature = "cm")]
     pub async fn cm_connect(self, node: &str, service: &str) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
-            ConnectionType::RCSocket => Err(io::Error::new(
+            ConnectionType::RCSocket | ConnectionType::RCIBV => Err(io::Error::new(
                 io::ErrorKind::Other,
-                "ConnectionType should be XXSocket",
+                "ConnectionType should be XXCM",
             )),
             ConnectionType::RCCM => {
                 let max_message_length = self.agent_attr.max_message_length;
@@ -578,7 +605,7 @@ impl RdmaBuilder {
                     .set_tcp_listener(Some(Arc::new(Mutex::new(tcp_listener))));
                 Ok(rdma)
             }
-            ConnectionType::RCCM => Err(io::Error::new(
+            ConnectionType::RCCM | ConnectionType::RCIBV => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "ConnectionType should be XXSocket",
             )),
@@ -1104,6 +1131,8 @@ pub enum ConnectionType {
     RCSocket,
     /// Establish reliable connection through `CM` APIs.
     RCCM,
+    /// Establish reliable connection through `IBV` APIs.
+    RCIBV,
 }
 
 /// Attributes for creating new `Rdma`s through `clone`
@@ -1215,6 +1244,84 @@ impl Rdma {
             raw: qp_attr.raw,
             clone_attr,
         })
+    }
+
+    /// Connect to remote end by raw ibv information.
+    ///
+    /// You can get the destination qp information in any way and use this interface to establish connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{
+    ///     ConnectionType, LocalMrReadAccess, LocalMrWriteAccess, QueuePairEndpoint, Rdma, RdmaBuilder,
+    /// };
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(client_rdma: Rdma, server_info: QueuePairEndpoint) -> io::Result<()> {
+    ///     let rdma = client_rdma.ibv_connect(server_info).await?;
+    ///     // alloc 8 bytes local memory
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    ///     // write data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    ///     // send data in mr to the remote end
+    ///     rdma.send(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(server_rdma: Rdma, client_info: QueuePairEndpoint) -> io::Result<()> {
+    ///     let rdma = server_rdma.ibv_connect(client_info).await?;
+    ///     // receive data
+    ///     let lmr = rdma.receive().await?;
+    ///     let data = *lmr.as_slice();
+    ///     assert_eq!(data, [1_u8; 8]);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let server_rdma = RdmaBuilder::default()
+    ///         .set_conn_type(ConnectionType::RCIBV)
+    ///         .build()
+    ///         .unwrap();
+    ///     let server_info = server_rdma.get_qp_endpoint();
+    ///     let client_rdma = RdmaBuilder::default()
+    ///         .set_conn_type(ConnectionType::RCIBV)
+    ///         .build()
+    ///         .unwrap();
+    ///     let client_info = client_rdma.get_qp_endpoint();
+    ///     std::thread::spawn(move || server(server_rdma, client_info));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(client_rdma, server_info)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn ibv_connect(mut self, remote: QueuePairEndpoint) -> io::Result<Self> {
+        match self.conn_type {
+            ConnectionType::RCIBV => {
+                let (recv_attr, send_attr) =
+                    builders_into_attrs(self.clone_attr.rq_attr, self.clone_attr.sq_attr, &remote)?;
+                self.qp_handshake(recv_attr, send_attr)?;
+                self.init_agent(
+                    self.clone_attr.agent_attr.max_message_length,
+                    self.clone_attr.agent_attr.max_rmr_access,
+                )
+                .await?;
+                Ok(self)
+            }
+            ConnectionType::RCCM | ConnectionType::RCSocket => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ConnectionType should be XXIBV",
+            )),
+        }
     }
 
     /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
@@ -1357,7 +1464,7 @@ impl Rdma {
                 .await?;
                 Ok(rdma)
             }
-            ConnectionType::RCCM => Err(io::Error::new(
+            ConnectionType::RCCM | ConnectionType::RCIBV => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "ConnectionType should be XXSocket",
             )),
@@ -1422,7 +1529,7 @@ impl Rdma {
                 .await?;
                 Ok(rdma)
             }
-            ConnectionType::RCCM => Err(io::Error::new(
+            ConnectionType::RCCM | ConnectionType::RCIBV => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "ConnectionType should be XXSocket",
             )),
@@ -3390,6 +3497,15 @@ impl Rdma {
     #[inline]
     pub fn query_qp_state(&self) -> io::Result<QueuePairState> {
         self.qp.query_state()
+    }
+
+    /// Get information of this qp for establishing a connection.
+    ///
+    ///  
+    #[inline]
+    #[must_use]
+    pub fn get_qp_endpoint(&self) -> QueuePairEndpoint {
+        self.qp.endpoint()
     }
 
     /// Get the attrs of send queue and recv queue or create and return a pair of default attrs if

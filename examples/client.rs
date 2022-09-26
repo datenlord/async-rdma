@@ -103,7 +103,7 @@ async fn request_then_write_with_imm(rdma: &Rdma) -> io::Result<()> {
 async fn main() {
     println!("client start");
     let addr = "localhost:5555";
-    let rdma = RdmaBuilder::default().connect(addr).await.unwrap();
+    let mut rdma = RdmaBuilder::default().connect(addr).await.unwrap();
     println!("connected");
     send_data_to_server(&rdma).await.unwrap();
     send_data_with_imm_to_server(&rdma).await.unwrap();

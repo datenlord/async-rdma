@@ -35,7 +35,7 @@ impl ProtectionDomain {
 
     /// Create a queue pair builder
     pub(crate) fn create_queue_pair_builder(self: &Arc<Self>) -> QueuePairBuilder {
-        QueuePairBuilder::new(self)
+        QueuePairBuilder::default().pd(Arc::clone(self)).clone()
     }
 }
 

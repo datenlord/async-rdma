@@ -75,7 +75,7 @@ async fn receive_mr_after_being_written_with_imm(rdma: &Rdma) -> io::Result<()> 
 #[tokio::main]
 async fn main() {
     println!("server start");
-    let rdma = RdmaBuilder::default()
+    let mut rdma = RdmaBuilder::default()
         .listen("localhost:5555")
         .await
         .unwrap();

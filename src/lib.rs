@@ -144,6 +144,8 @@ mod hashmap_extension;
 mod id;
 /// Lock utilities
 mod lock_utilities;
+/// Macro utilities
+mod macro_utilities;
 /// Memory region abstraction
 mod memory_region;
 /// Memory window abstraction
@@ -165,6 +167,7 @@ use agent::{Agent, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
+use derive_builder::Builder;
 use enumflags2::BitFlags;
 use error_utilities::log_ret_last_os_err;
 use event_listener::EventListener;
@@ -178,9 +181,8 @@ use mr_allocator::MrAllocator;
 use parking_lot::RwLock;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairEndpoint, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder, DEFAULT_GID_INDEX,
-    DEFAULT_MTU, DEFAULT_PKEY_INDEX, DEFAULT_PORT_NUM, MAX_RECV_SGE, MAX_RECV_WR, MAX_SEND_SGE,
-    MAX_SEND_WR,
+    QueuePair, QueuePairBuilder, QueuePairEndpoint, QueuePairInitAttrBuilder, RQAttr,
+    RQAttrBuilder, SQAttr, SQAttrBuilder, DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -200,30 +202,17 @@ use tokio::{
 use tracing::debug;
 
 use crate::queue_pair::builders_into_attrs;
+use getset::{CopyGetters, Getters, MutGetters, Setters};
 pub use queue_pair::{QueuePairState, MTU};
+
 #[macro_use]
 extern crate lazy_static;
 
 /// initial device attributes
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct DeviceInitAttr {
     /// Rdma device name
     dev_name: Option<String>,
-    /// Device port number
-    port_num: u8,
-    /// Gid index
-    gid_index: usize,
-}
-
-impl Default for DeviceInitAttr {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            dev_name: None,
-            port_num: DEFAULT_PORT_NUM,
-            gid_index: DEFAULT_GID_INDEX,
-        }
-    }
 }
 
 /// initial CQ attributes
@@ -249,28 +238,12 @@ impl Default for CQInitAttr {
 /// initial QP attributes
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QPInitAttr {
-    /// Access flag
-    access: ibv_access_flags,
     /// Connection type
     conn_type: ConnectionType,
     /// If send/recv raw data
     raw: bool,
-    /// Maximum number of outstanding send requests in the send queue
-    max_send_wr: u32,
-    /// Maximum number of outstanding receive requests in the receive queue
-    max_recv_wr: u32,
-    /// Maximum number of scatter/gather elements (SGE) in a WR on the send queue
-    max_send_sge: u32,
-    /// Maximum number of scatter/gather elements (SGE) in a WR on the receive queue
-    max_recv_sge: u32,
-    /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
-    /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
-    /// automatically fragment the messages to packet of this size.
-    mtu: MTU,
-    /// Primary P_Key index. The value of the entry in the P_Key table that outgoing
-    /// packets from this QP will be sent with and incoming packets to this QP will
-    /// be verified within the Primary path.
-    pkey_index: u16,
+    /// Attributes for init QP
+    init_attr: QueuePairInitAttrBuilder,
     /// Attributes for QP's send queue to receive messages
     sq_attr: SQAttrBuilder,
     /// Attributes for QP's receive queue to receive messages
@@ -289,15 +262,9 @@ impl Default for QPInitAttr {
     #[inline]
     fn default() -> Self {
         Self {
-            max_send_wr: MAX_SEND_WR,
-            max_recv_wr: MAX_RECV_WR,
-            max_send_sge: MAX_SEND_SGE,
-            max_recv_sge: MAX_RECV_SGE,
-            access: *DEFAULT_ACCESS,
             conn_type: ConnectionType::RCSocket,
             raw: false,
-            mtu: DEFAULT_MTU,
-            pkey_index: DEFAULT_PKEY_INDEX,
+            init_attr: QueuePairInitAttrBuilder::default(),
             sq_attr: SQAttrBuilder::default(),
             rq_attr: RQAttrBuilder::default(),
         }
@@ -323,8 +290,9 @@ impl Default for MRInitAttr {
     }
 }
 
-/// initial Agent attributes
-#[derive(Debug, Clone, Copy)]
+/// Initial Agent attributes
+#[derive(Debug, Clone, Copy, Getters, Setters)]
+#[getset(set, get)]
 pub(crate) struct AgentInitAttr {
     /// Max length of message send/recv by Agent
     max_message_length: usize,
@@ -376,7 +344,13 @@ impl RdmaBuilder {
     /// Create a `Rdma` from this builder
     #[inline]
     pub fn build(&self) -> io::Result<Rdma> {
-        Rdma::new(&self.dev_attr, self.cq_attr, self.qp_attr, self.mr_attr)
+        Rdma::new(
+            &self.dev_attr,
+            self.cq_attr,
+            self.qp_attr,
+            self.mr_attr,
+            self.agent_attr,
+        )
     }
 
     /// Establish connection with RDMA server
@@ -419,25 +393,16 @@ impl RdmaBuilder {
     pub async fn connect<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
-                let recv_queue_attr = self.qp_attr.rq_attr;
-                let send_queue_attr = self.qp_attr.sq_attr;
                 let mut rdma = self.build()?;
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-                let (rr, sr) = builders_into_attrs(
-                    recv_queue_attr,
-                    send_queue_attr,
-                    &remote,
-                    self.dev_attr.port_num,
-                    self.dev_attr.gid_index.cast(),
-                )?;
-                rdma.qp_handshake(rr, sr)?;
+                let (recv_attr, send_attr) =
+                    builders_into_attrs(self.qp_attr.rq_attr, self.qp_attr.sq_attr, &remote)?;
+                rdma.qp_handshake(recv_attr, send_attr)?;
                 rdma.init_agent(
                     self.agent_attr.max_message_length,
                     self.agent_attr.max_rmr_access,
                 )
                 .await?;
-                rdma.clone_attr.rq_attr = Some(rr);
-                rdma.clone_attr.sq_attr = Some(sr);
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -594,28 +559,23 @@ impl RdmaBuilder {
     pub async fn listen<A: ToSocketAddrs>(self, addr: A) -> io::Result<Rdma> {
         match self.qp_attr.conn_type {
             ConnectionType::RCSocket => {
-                let recv_queue_attr = self.qp_attr.rq_attr;
-                let send_queue_attr = self.qp_attr.sq_attr;
+                let recv_attr_builder = self.qp_attr.rq_attr;
+                let send_attr_builder = self.qp_attr.sq_attr;
                 let mut rdma = self.build()?;
                 let tcp_listener = TcpListener::bind(addr).await?;
                 let remote = tcp_listen(&tcp_listener, &rdma.endpoint()).await?;
-                let (rr, sr) = builders_into_attrs(
-                    recv_queue_attr,
-                    send_queue_attr,
-                    &remote,
-                    self.dev_attr.port_num,
-                    self.dev_attr.gid_index.cast(),
-                )?;
-                rdma.qp_handshake(rr, sr)?;
+                let (recv_attr, send_attr) =
+                    builders_into_attrs(recv_attr_builder, send_attr_builder, &remote)?;
+                rdma.qp_handshake(recv_attr, send_attr)?;
                 debug!("handshake done");
                 rdma.init_agent(
                     self.agent_attr.max_message_length,
                     self.agent_attr.max_rmr_access,
                 )
                 .await?;
-                rdma.clone_attr = CloneAttr::default().set_tcp_listener(tcp_listener);
-                rdma.clone_attr.rq_attr = Some(rr);
-                rdma.clone_attr.sq_attr = Some(sr);
+                let _ = rdma
+                    .clone_attr
+                    .set_tcp_listener(Some(Arc::new(Mutex::new(tcp_listener))));
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -645,7 +605,13 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_gid_index(mut self, gid_index: usize) -> Self {
-        self.dev_attr.gid_index = gid_index;
+        // TODO: check gid_index scope(ibv_port_attr.gid_tbl_len)
+        let _ = self
+            .qp_attr
+            .rq_attr
+            .address_handler()
+            .grh()
+            .sgid_index(gid_index.cast());
         self
     }
 
@@ -653,7 +619,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_port_num(mut self, port_num: u8) -> Self {
-        self.dev_attr.port_num = port_num;
+        let _ = self.qp_attr.init_attr.port_num(port_num);
         self
     }
 
@@ -677,7 +643,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_qp_max_send_wr(mut self, max_send_wr: u32) -> Self {
-        self.qp_attr.max_send_wr = max_send_wr;
+        let _ = self.qp_attr.init_attr.qp_cap().max_send_wr(max_send_wr);
         self
     }
 
@@ -685,7 +651,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_qp_max_recv_wr(mut self, max_recv_wr: u32) -> Self {
-        self.qp_attr.max_recv_wr = max_recv_wr;
+        let _ = self.qp_attr.init_attr.qp_cap().max_recv_wr(max_recv_wr);
         self
     }
 
@@ -693,7 +659,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_qp_max_send_sge(mut self, max_send_sge: u32) -> Self {
-        self.qp_attr.max_send_sge = max_send_sge;
+        let _ = self.qp_attr.init_attr.qp_cap().max_send_sge(max_send_sge);
         self
     }
 
@@ -701,7 +667,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_qp_max_recv_sge(mut self, max_recv_sge: u32) -> Self {
-        self.qp_attr.max_recv_sge = max_recv_sge;
+        let _ = self.qp_attr.init_attr.qp_cap().max_recv_sge(max_recv_sge);
         self
     }
 
@@ -709,7 +675,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_qp_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
-        self.qp_attr.access = flags_into_ibv_access(flags);
+        let _ = self.qp_attr.init_attr.access(flags_into_ibv_access(flags));
         self
     }
 
@@ -717,7 +683,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_mr_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
-        self.mr_attr.access = flags_into_ibv_access(flags);
+        let _ = self.qp_attr.init_attr.access(flags_into_ibv_access(flags));
         self
     }
 
@@ -976,7 +942,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_pkey_index(mut self, pkey_index: u16) -> Self {
-        self.qp_attr.pkey_index = pkey_index;
+        let _ = self.qp_attr.init_attr.pkey_index(pkey_index);
         self
     }
 
@@ -986,7 +952,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_mtu(mut self, mtu: MTU) -> Self {
-        self.qp_attr.mtu = mtu;
+        let _ = self.qp_attr.rq_attr.mtu(mtu);
         self
     }
 }
@@ -1103,10 +1069,10 @@ fn cm_connect_helper(rdma: &mut Rdma, node: &str, service: &str) -> io::Result<(
         (*id).qp = rdma.qp.as_ptr();
         (*id).pd = rdma.pd.as_ptr();
         (*id).verbs = rdma.ctx.as_ptr();
-        (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-        (*id).recv_cq_channel = rdma.qp.event_listener.cq.event_channel().as_ptr();
-        (*id).recv_cq = rdma.qp.event_listener.cq.as_ptr();
-        (*id).send_cq = rdma.qp.event_listener.cq.as_ptr();
+        (*id).recv_cq_channel = rdma.qp.event_listener().cq.event_channel().as_ptr();
+        (*id).recv_cq_channel = rdma.qp.event_listener().cq.event_channel().as_ptr();
+        (*id).recv_cq = rdma.qp.event_listener().cq.as_ptr();
+        (*id).send_cq = rdma.qp.event_listener().cq.as_ptr();
         debug!(
             "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
             (*id).qp,
@@ -1141,58 +1107,26 @@ pub enum ConnectionType {
 }
 
 /// Attributes for creating new `Rdma`s through `clone`
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Builder, Getters, MutGetters, Setters, CopyGetters)]
+#[getset(set, get, get_mut)]
 pub(crate) struct CloneAttr {
     /// Tcp listener used for new connections
-    pub(crate) tcp_listener: Option<Arc<Mutex<TcpListener>>>,
+    #[builder(default = "None")]
+    tcp_listener: Option<Arc<Mutex<TcpListener>>>,
     /// Clone `Rdma` with new `ProtectionDomain`
-    pub(crate) pd: Option<Arc<ProtectionDomain>>,
-    /// Clone `Rdma` with new `Port number`
-    pub(crate) port_num: Option<u8>,
-    /// Clone `Rdma` with new qp access
-    pub(crate) qp_access: Option<ibv_access_flags>,
-    /// Clone `Rdma` with new max access permission for remote mr requests
-    pub(crate) max_rmr_access: Option<ibv_access_flags>,
+    pd: Arc<ProtectionDomain>,
+    /// Clone `Rdma` with new agent attributes
+    #[builder(default = "AgentInitAttr::default()")]
+    agent_attr: AgentInitAttr,
+    /// Attributes for init QP
+    qp_init_attr: QueuePairInitAttrBuilder,
     /// Attributes for QP's send queue to receive messages
-    pub(crate) sq_attr: Option<SQAttr>,
+    sq_attr: SQAttrBuilder,
     /// Attributes for QP's receive queue to receive messages
-    pub(crate) rq_attr: Option<RQAttr>,
-    /// Pkey index
-    pub(crate) pkey_index: u16,
+    rq_attr: RQAttrBuilder,
 }
 
-impl CloneAttr {
-    /// Set `TcpListener`
-    fn set_tcp_listener(mut self, tcp_listener: TcpListener) -> Self {
-        self.tcp_listener = Some(Arc::new(Mutex::new(tcp_listener)));
-        self
-    }
-
-    /// Set `ProtectionDomain`
-    #[allow(dead_code)] // not yet fully implemented
-    fn set_pd(mut self, pd: ProtectionDomain) -> Self {
-        self.pd = Some(Arc::new(pd));
-        self
-    }
-
-    /// Set port number
-    fn set_port_num(mut self, port_num: u8) -> Self {
-        self.port_num = Some(port_num);
-        self
-    }
-
-    /// Set qp access
-    fn set_qp_access(mut self, access: ibv_access_flags) -> Self {
-        self.qp_access = Some(access);
-        self
-    }
-
-    /// Set max access permission for remote mr requests with new agent
-    fn set_max_rmr_access(mut self, access: ibv_access_flags) -> Self {
-        self.max_rmr_access = Some(access);
-        self
-    }
-}
+impl_into_io_error!(CloneAttrBuilderError);
 
 /// Rdma handler, the only interface that the users deal with rdma
 #[derive(Debug)]
@@ -1220,33 +1154,57 @@ impl Rdma {
     fn new(
         dev_attr: &DeviceInitAttr,
         cq_attr: CQInitAttr,
-        qp_attr: QPInitAttr,
+        mut qp_attr: QPInitAttr,
         mr_attr: MRInitAttr,
+        agent_attr: AgentInitAttr,
     ) -> io::Result<Self> {
         let ctx = Arc::new(Context::open(
             dev_attr.dev_name.as_deref(),
-            dev_attr.port_num,
-            dev_attr.gid_index,
+            qp_attr.init_attr.get_port_num().unwrap_or(DEFAULT_PORT_NUM),
+            qp_attr
+                .rq_attr
+                .address_handler()
+                .grh()
+                .get_sgid_index()
+                .unwrap_or_else(|| DEFAULT_GID_INDEX.cast())
+                .cast(),
         )?);
         let ec = ctx.create_event_channel()?;
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
-        let event_listener = EventListener::new(cq);
+        let event_listener = EventListener::new(Arc::clone(&cq));
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(
             Arc::<ProtectionDomain>::clone(&pd),
             mr_attr,
         ));
+
+        let _ = qp_attr.init_attr.send_cq(cq.as_ptr()).recv_cq(cq.as_ptr());
+        let clone_attr = CloneAttrBuilder::default()
+            .pd(Arc::clone(&pd))
+            .qp_init_attr(qp_attr.init_attr)
+            .sq_attr(qp_attr.sq_attr)
+            .rq_attr(qp_attr.rq_attr)
+            .agent_attr(agent_attr)
+            .build()?;
+        // SAFETY: ffi
+        let qp_init_attr = qp_attr.init_attr.clone().build()?;
+        let inner_qp =
+            NonNull::new(unsafe { rdma_sys::ibv_create_qp(pd.as_ptr(), &mut qp_init_attr.into()) })
+                .ok_or_else(log_ret_last_os_err)?;
+
         let mut qp = pd
             .create_queue_pair_builder()
-            .set_event_listener(event_listener)
-            .set_port_num(dev_attr.port_num)
-            .set_gid_index(dev_attr.gid_index)
-            .set_max_send_wr(qp_attr.max_send_wr)
-            .set_max_send_sge(qp_attr.max_send_sge)
-            .set_max_recv_wr(qp_attr.max_recv_wr)
-            .set_max_recv_sge(qp_attr.max_recv_sge)
+            .event_listener(Arc::new(event_listener))
+            .inner_qp(inner_qp)
+            .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
             .build()?;
-        qp.modify_to_init(qp_attr.access, dev_attr.port_num, qp_attr.pkey_index)?;
+
+        qp.modify_to_init(
+            *qp_init_attr.access(),
+            *qp_init_attr.port_num(),
+            *qp_init_attr.pkey_index(),
+        )?;
+
         Ok(Self {
             ctx,
             pd,
@@ -1255,53 +1213,36 @@ impl Rdma {
             allocator,
             conn_type: qp_attr.conn_type,
             raw: qp_attr.raw,
-            clone_attr: CloneAttr::default(),
+            clone_attr,
         })
     }
 
     /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
     fn clone(&self) -> io::Result<Self> {
-        let qp_access = self.clone_attr.qp_access.map_or_else(
-            || {
-                self.qp.access.map_or_else(
-                    || {
-                        Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            "parent qp access is none",
-                        ))
-                    },
-                    Ok,
-                )
-            },
-            Ok,
-        )?;
-        let port_num = self.clone_attr.port_num.unwrap_or(self.qp.port_num);
-        let pd = self
-            .clone_attr
-            .pd
-            .as_ref()
-            .map_or_else(|| &self.pd, |pd| pd);
+        let qp_init_attr = self.clone_attr.qp_init_attr().build()?;
 
-        let mut qp_init_attr = self.qp.qp_init_attr.clone();
         // SAFETY: ffi
         let inner_qp = NonNull::new(unsafe {
-            rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut qp_init_attr.qp_init_attr_inner)
+            rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut qp_init_attr.into())
         })
         .ok_or_else(log_ret_last_os_err)?;
-        let mut qp = QueuePair {
-            pd: Arc::clone(pd),
-            event_listener: Arc::clone(&self.qp.event_listener),
-            inner_qp,
-            port_num,
-            gid_index: self.qp.gid_index,
-            qp_init_attr,
-            access: Some(qp_access),
-            cur_state: RwLock::new(QueuePairState::Unknown),
-        };
-        qp.modify_to_init(qp_access, self.qp.port_num, self.clone_attr.pkey_index)?;
+
+        let mut qp = QueuePairBuilder::default()
+            .pd(Arc::clone(self.clone_attr.pd()))
+            .event_listener(Arc::clone(self.qp.event_listener()))
+            .inner_qp(inner_qp)
+            .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
+            .build()?;
+
+        qp.modify_to_init(
+            *qp_init_attr.access(),
+            *qp_init_attr.port_num(),
+            *qp_init_attr.pkey_index(),
+        )?;
+
         Ok(Self {
             ctx: Arc::clone(&self.ctx),
-            pd: Arc::clone(pd),
+            pd: Arc::clone(self.clone_attr.pd()),
             qp: Arc::new(qp),
             agent: None,
             allocator: Arc::clone(&self.allocator),
@@ -1317,12 +1258,10 @@ impl Rdma {
     }
 
     /// to hand shake the qp so that it works
-    fn qp_handshake(&mut self, recv_queue_attr: RQAttr, send_queue_attr: SQAttr) -> io::Result<()> {
-        self.qp.modify_to_rtr(recv_queue_attr)?;
-        self.qp.modify_to_rts(send_queue_attr)?;
+    fn qp_handshake(&mut self, recv_attr: RQAttr, send_attr: SQAttr) -> io::Result<()> {
+        self.qp.modify_to_rtr(recv_attr)?;
+        self.qp.modify_to_rts(send_attr)?;
         debug!("rts");
-        self.clone_attr.rq_attr = Some(recv_queue_attr);
-        self.clone_attr.sq_attr = Some(send_queue_attr);
         Ok(())
     }
 
@@ -1362,7 +1301,7 @@ impl Rdma {
     /// };
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().connect(addr).await?;
     ///     for _ in 0..3 {
     ///         let _new_rdma = rdma.new_connect(addr).await?;
     ///     }
@@ -1371,7 +1310,7 @@ impl Rdma {
     ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().listen(addr).await?;
     ///     for _ in 0..3 {
     ///         let _new_rdma = rdma.listen().await?;
     ///     }
@@ -1389,7 +1328,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn listen(&self) -> io::Result<Self> {
+    pub async fn listen(&mut self) -> io::Result<Self> {
         match self.conn_type {
             ConnectionType::RCSocket => {
                 let mut rdma = self.clone()?;
@@ -1407,22 +1346,15 @@ impl Rdma {
                         },
                     )?
                     .await?;
-                let (mut rr, sr) = self.get_rq_sq_attr()?;
-                rr.reset(&remote, rdma.qp.gid_index.cast(), self.qp.port_num);
-                rdma.qp_handshake(rr, sr)?;
+                self.clone_attr.rq_attr_mut().reset_remote_info(&remote);
+                let (recv_attr, send_attr) = self.get_rq_sq_attr()?;
+                rdma.qp_handshake(recv_attr, send_attr)?;
                 debug!("handshake done");
-                #[allow(clippy::unreachable)]
-                let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
-                    || {
-                        unreachable!("agent of parent rdma is None");
-                    },
-                    |agent| (agent.max_msg_len(), agent.max_rmr_access()),
-                );
-                let max_rmr_access = self
-                    .clone_attr
-                    .max_rmr_access
-                    .map_or(max_rmr_access, |new_access| new_access);
-                rdma.init_agent(max_message_length, max_rmr_access).await?;
+                rdma.init_agent(
+                    self.clone_attr.agent_attr.max_message_length,
+                    self.clone_attr.agent_attr.max_rmr_access,
+                )
+                .await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -1448,7 +1380,7 @@ impl Rdma {
     /// };
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().connect(addr).await?;
     ///     for _ in 0..3 {
     ///         let _new_rdma = rdma.new_connect(addr).await?;
     ///     }
@@ -1457,7 +1389,7 @@ impl Rdma {
     ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().listen(addr).await?;
     ///     for _ in 0..3 {
     ///         let _new_rdma = rdma.listen().await?;
     ///     }
@@ -1475,27 +1407,19 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn new_connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<Self> {
+    pub async fn new_connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<Self> {
         match self.conn_type {
             ConnectionType::RCSocket => {
                 let mut rdma = self.clone()?;
                 let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-                let (mut rr, sr) = self.get_rq_sq_attr()?;
-                rr.reset(&remote, rdma.qp.gid_index.cast(), self.qp.port_num);
-                rdma.qp_handshake(rr, sr)?;
-                // TODO: add APIs to set attr
-                #[allow(clippy::unreachable)]
-                let (max_message_length, max_rmr_access) = self.agent.as_ref().map_or_else(
-                    || {
-                        unreachable!("agent of parent rdma is None");
-                    },
-                    |agent| (agent.max_msg_len(), agent.max_rmr_access()),
-                );
-                let max_rmr_access = self
-                    .clone_attr
-                    .max_rmr_access
-                    .map_or(max_rmr_access, |new_access| new_access);
-                rdma.init_agent(max_message_length, max_rmr_access).await?;
+                self.clone_attr.rq_attr_mut().reset_remote_info(&remote);
+                let (recv_attr, send_attr) = self.get_rq_sq_attr()?;
+                rdma.qp_handshake(recv_attr, send_attr)?;
+                rdma.init_agent(
+                    self.clone_attr.agent_attr.max_message_length,
+                    self.clone_attr.agent_attr.max_rmr_access,
+                )
+                .await?;
                 Ok(rdma)
             }
             ConnectionType::RCCM => Err(io::Error::new(
@@ -2361,18 +2285,18 @@ impl Rdma {
     ) -> io::Result<Self> {
         let mut rdma = RdmaBuilder::default()
             .set_port_num(port_num)
-            .set_gid_index(gid_index)
+            .set_gid_index(gid_index.cast())
             .build()?;
         assert!(
             rdma.conn_type == ConnectionType::RCSocket,
             "should set connection type to RCSocket"
         );
         let remote = tcp_connect_helper(addr, &rdma.endpoint()).await?;
-        let rr = RQAttrBuilder::default();
-        let sr = SQAttrBuilder::default();
-        let (rr, sr) =
-            builders_into_attrs(rr, sr, &remote, rdma.qp.port_num, rdma.qp.gid_index.cast())?;
-        rdma.qp_handshake(rr, sr)?;
+        let recv_attr_builder = RQAttrBuilder::default();
+        let send_attr_builder = SQAttrBuilder::default();
+        let (recv_attr, send_attr) =
+            builders_into_attrs(recv_attr_builder, send_attr_builder, &remote)?;
+        rdma.qp_handshake(recv_attr, send_attr)?;
         rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;
         // wait for server to initialize
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3188,14 +3112,14 @@ impl Rdma {
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = RdmaBuilder::default().connect(addr).await?;
     ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
-    ///     let rdma = rdma.set_new_qp_access(access);
+    ///     let mut rdma = rdma.set_new_qp_access(access);
     ///     let _new_rdma = rdma.new_connect(addr).await?;
     ///     Ok(())
     /// }
     ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().listen(addr).await?;
     ///         let _new_rdma = rdma.listen().await?;
     ///     Ok(())
     /// }
@@ -3214,9 +3138,10 @@ impl Rdma {
     #[inline]
     #[must_use]
     pub fn set_new_qp_access(mut self, qp_access: BitFlags<AccessFlag>) -> Self {
-        self.clone_attr = self
+        let _ = self
             .clone_attr
-            .set_qp_access(flags_into_ibv_access(qp_access));
+            .qp_init_attr
+            .access(flags_into_ibv_access(qp_access));
         self
     }
 
@@ -3237,7 +3162,7 @@ impl Rdma {
     /// };
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().connect(addr).await?;
     ///     let rmr = rdma.request_remote_mr(Layout::new::<char>()).await?;
     ///     let new_rdma = rdma.new_connect(addr).await?;
     ///     let new_rmr = new_rdma.request_remote_mr(Layout::new::<char>()).await?;
@@ -3252,7 +3177,7 @@ impl Rdma {
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = RdmaBuilder::default().listen(addr).await?;
     ///     let access = AccessFlag::LocalWrite | AccessFlag::RemoteRead;
-    ///     let rdma = rdma.set_new_max_rmr_access(access);
+    ///     let mut rdma = rdma.set_new_max_rmr_access(access);
     ///     let new_rdma = rdma.listen().await?;
     ///     // receive the metadata of the lmr that had been requested by client
     ///     let _lmr = new_rdma.receive_local_mr().await?;
@@ -3275,8 +3200,9 @@ impl Rdma {
     #[inline]
     #[must_use]
     pub fn set_new_max_rmr_access(mut self, max_rmr_access: BitFlags<AccessFlag>) -> Self {
-        self.clone_attr = self
+        let _ = self
             .clone_attr
+            .agent_attr
             .set_max_rmr_access(flags_into_ibv_access(max_rmr_access));
         self
     }
@@ -3298,14 +3224,14 @@ impl Rdma {
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = RdmaBuilder::default().connect(addr).await?;
-    ///     let rdma = rdma.set_new_port_num(1_u8);
+    ///     let mut rdma = rdma.set_new_port_num(1_u8);
     ///     let _new_rdma = rdma.new_connect(addr).await?;
     ///     Ok(())
     /// }
     ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().listen(addr).await?;
     ///     let _new_rdma = rdma.listen().await?;
     ///     Ok(())
     /// }
@@ -3324,7 +3250,7 @@ impl Rdma {
     #[inline]
     #[must_use]
     pub fn set_new_port_num(mut self, port_num: u8) -> Self {
-        self.clone_attr = self.clone_attr.set_port_num(port_num);
+        let _ = self.clone_attr.qp_init_attr.port_num(port_num);
         self
     }
 
@@ -3345,7 +3271,7 @@ impl Rdma {
     ///
     /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
     ///     let rdma = RdmaBuilder::default().connect(addr).await?;
-    ///     let rdma = rdma.set_new_pd()?;
+    ///     let mut rdma = rdma.set_new_pd()?;
     ///     // then the `Rdma`s created by `new_connect` will have a new `ProtectionDomain`
     ///     let _new_rdma = rdma.new_connect(addr).await?;
     ///     Ok(())
@@ -3353,7 +3279,7 @@ impl Rdma {
     ///
     /// #[tokio::main]
     /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
-    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let mut rdma = RdmaBuilder::default().listen(addr).await?;
     ///     let _new_rdma = rdma.listen().await?;
     ///     Ok(())
     /// }
@@ -3371,8 +3297,9 @@ impl Rdma {
     /// ```
     #[inline]
     pub fn set_new_pd(mut self) -> io::Result<Self> {
-        let new_pd = self.ctx.create_protection_domain()?;
-        self.clone_attr = self.clone_attr.set_pd(new_pd);
+        let _ = self
+            .clone_attr
+            .set_pd(Arc::new(self.ctx.create_protection_domain()?));
         Ok(self)
     }
 
@@ -3418,7 +3345,7 @@ impl Rdma {
     #[inline]
     #[must_use]
     pub fn get_cur_qp_state(&self) -> QueuePairState {
-        *self.qp.cur_state.read()
+        self.qp.cur_state().read().to_owned()
     }
 
     /// Get the real state of qp by quering
@@ -3469,15 +3396,9 @@ impl Rdma {
     /// they are none.
     #[inline]
     pub(crate) fn get_rq_sq_attr(&self) -> io::Result<(RQAttr, SQAttr)> {
-        let recv_queue_attr = self
-            .clone_attr
-            .rq_attr
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "parent rq_attr is none"))?;
-        let send_queue_attr = self
-            .clone_attr
-            .sq_attr
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "parent sq_attr is none"))?;
-        Ok((recv_queue_attr, send_queue_attr))
+        let recv_attr = self.clone_attr.rq_attr.build()?;
+        let send_attr = self.clone_attr.sq_attr.build()?;
+        Ok((recv_attr, send_attr))
     }
 }
 
@@ -3574,7 +3495,7 @@ impl RdmaListener {
         let (mut stream, _) = self.tcp_listener.accept().await?;
         let mut rdma = RdmaBuilder::default()
             .set_port_num(port_num)
-            .set_gid_index(gid_index)
+            .set_gid_index(gid_index.cast())
             .build()?;
         assert!(
             rdma.conn_type == ConnectionType::RCSocket,
@@ -3602,11 +3523,16 @@ impl RdmaListener {
             )
         })?;
         stream.write_all(&local).await?;
-        let rr = RQAttrBuilder::default();
-        let sr = SQAttrBuilder::default();
-        let (rr, sr) =
-            builders_into_attrs(rr, sr, &remote, rdma.qp.port_num, rdma.qp.gid_index.cast())?;
-        rdma.qp_handshake(rr, sr)?;
+
+        let mut recv_attr = RQAttrBuilder::default();
+        let send_attr = SQAttrBuilder::default();
+        let _ = recv_attr
+            .address_handler()
+            .port_num(port_num)
+            .grh()
+            .sgid_index(gid_index.cast());
+        let (recv_attr, send_attr) = builders_into_attrs(recv_attr, send_attr, &remote)?;
+        rdma.qp_handshake(recv_attr, send_attr)?;
 
         debug!("handshake done");
         rdma.init_agent(max_message_length, *DEFAULT_ACCESS).await?;

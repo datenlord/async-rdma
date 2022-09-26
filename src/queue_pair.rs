@@ -3,12 +3,14 @@ use crate::{
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     event_listener::{EventListener, LmrInners},
     gid::Gid,
+    impl_from_buidler_error_for_another, impl_into_io_error,
     memory_region::{
         local::{LocalMrReadAccess, LocalMrWriteAccess, RwLocalMrInner},
         remote::{RemoteMrReadAccess, RemoteMrWriteAccess},
     },
     protection_domain::ProtectionDomain,
     work_request::{RecvWr, SendWr},
+    DEFAULT_ACCESS,
 };
 use clippy_utilities::Cast;
 use derive_builder::Builder;
@@ -18,7 +20,7 @@ use parking_lot::RwLock;
 use rdma_sys::{
     ibv_access_flags, ibv_ah_attr, ibv_cq, ibv_destroy_qp, ibv_global_route, ibv_modify_qp,
     ibv_mtu, ibv_post_recv, ibv_post_send, ibv_qp, ibv_qp_attr, ibv_qp_attr_mask, ibv_qp_init_attr,
-    ibv_qp_state, ibv_query_qp, ibv_recv_wr, ibv_send_wr,
+    ibv_qp_state, ibv_query_qp, ibv_recv_wr, ibv_send_wr, ibv_srq,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,6 +46,11 @@ pub(crate) static MAX_RECV_WR: u32 = 10;
 pub(crate) static MAX_SEND_SGE: u32 = 10;
 /// Maximum value of `recv_sge`
 pub(crate) static MAX_RECV_SGE: u32 = 10;
+/// Maximum value of `inline_data`
+pub(crate) static MAX_INLINE_DATA: u32 = 0;
+/// Default value of `sq_sig_all`
+pub(crate) static SQ_SIG_ALL: i32 = 0_i32;
+
 /// Default `port_num`
 pub(crate) static DEFAULT_PORT_NUM: u8 = 1;
 /// Default `gid_index`
@@ -86,164 +93,130 @@ pub(crate) static DEFAULT_RNR_RETRY: u8 = 6;
 pub(crate) static DEFAULT_SQ_PSN: u32 = 0;
 /// Default `max_rd_atomic`
 pub(crate) static DEFAULT_MAX_RD_ATOMIC: u8 = 1;
-/// Queue pair initialized attribute
-#[derive(Clone)]
-pub(crate) struct QueuePairInitAttr {
-    /// Internal `ibv_qp_init_attr` structure
-    pub(crate) qp_init_attr_inner: ibv_qp_init_attr,
+
+/// The requested attributes of the newly created QP.
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+#[getset(set, get = "pub")]
+pub(crate) struct QueuePairCap {
+    /// The maximum number of outstanding Work Requests that can be posted to the Send Queue
+    /// in that Queue Pair. Value can be [1..dev_cap.max_qp_wr].
+    #[builder(default = "MAX_SEND_WR")]
+    max_send_wr: u32,
+    /// The maximum number of outstanding Work Requests that can be posted to the Receive Queue
+    /// in that Queue Pair. Value can be [1..dev_cap.max_qp_wr]. This value is ignored if the
+    /// Queue Pair is associated with an SRQ.
+    #[builder(default = "MAX_RECV_WR")]
+    max_recv_wr: u32,
+    /// The maximum number of scatter/gather elements in any Work Request that can be posted to
+    /// the Send Queue in that Queue Pair. Value can be [1..dev_cap.max_sge].
+    #[builder(default = "MAX_SEND_SGE")]
+    max_send_sge: u32,
+    /// The maximum number of scatter/gather elements in any Work Request that can be posted to
+    /// the Receive Queue in that Queue Pair. Value can be [1..dev_cap.max_sge]. This value is
+    /// ignored if the Queue Pair is associated with an SRQ.
+    #[builder(default = "MAX_RECV_SGE")]
+    max_recv_sge: u32,
+    /// The maximum message size (in bytes) that can be posted inline to the Send Queue. 0, if
+    /// no inline message is requested.
+    #[builder(default = "MAX_INLINE_DATA")]
+    max_inline_data: u32,
 }
 
-impl Default for QueuePairInitAttr {
-    fn default() -> Self {
+impl_from_buidler_error_for_another!(QueuePairCapBuilderError, QueuePairInitAttrBuilderError);
+
+impl_into_io_error!(QueuePairCapBuilderError);
+
+/// Describes the requested attributes of the newly created QP
+#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[builder(derive(Debug, Copy))]
+#[getset(set, get = "pub")]
+pub(crate) struct QueuePairInitAttr {
+    /// (optional) User defined value which will be available in qp->qp_context.
+    /// Not support for now.
+    #[builder(default = "None")]
+    qp_context: Option<*mut libc::c_void>,
+    /// A Completion Queue to be associated with the Send Queue
+    send_cq: *mut ibv_cq,
+    /// A Completion Queue to be associated with the Receive Queue
+    recv_cq: *mut ibv_cq,
+    /// (optional) A Shared Receive Queue, that was returned from ibv_create_srq(), that this
+    /// Queue Pair will be associated with. Otherwise, NULL. Not support for now.
+    #[builder(default = "None")]
+    srq: Option<*mut ibv_srq>,
+    /// Attributes of the Queue Pair size.
+    #[builder(
+        field(type = "QueuePairCapBuilder", build = "self.qp_cap.build()?"),
+        setter(custom)
+    )]
+    qp_cap: QueuePairCap,
+    // TODO: add high level enum wrapper
+    /// Requested Transport Service Type of this QP:
+    /// IBV_QPT_RC  Reliable Connection
+    /// IBV_QPT_UC  Unreliable Connection
+    /// IBV_QPT_UD  Unreliable Datagram
+    /// Only support RC for now.
+    #[builder(default = "rdma_sys::ibv_qp_type::IBV_QPT_RC")]
+    qp_type: u32,
+    /// The Signaling level of Work Requests that will be posted to the Send Queue in this QP.
+    /// If it is equal to 0, in every Work Request submitted to the Send Queue, the user must
+    /// decide whether to generate a Work Completion for successful completions or not.
+    /// Otherwise all Work Requests that will be submitted to the Send Queue will always generate
+    /// a Work Completion.
+    #[builder(default = "SQ_SIG_ALL")]
+    sq_sig_all: i32,
+    /// Access flag
+    #[builder(default = "*DEFAULT_ACCESS")]
+    access: ibv_access_flags,
+    /// Primary P_Key index. The value of the entry in the P_Key table that outgoing
+    /// packets from this QP will be sent with and incoming packets to this QP will
+    /// be verified within the Primary path.
+    #[builder(default = "DEFAULT_PKEY_INDEX")]
+    pkey_index: u16,
+    /// The local physical port that the packets will be sent from
+    #[builder(default = "DEFAULT_PORT_NUM")]
+    port_num: u8,
+}
+
+impl_into_io_error!(QueuePairInitAttrBuilderError);
+
+impl QueuePairInitAttrBuilder {
+    /// Get sub builder's mutable reference
+    pub(crate) fn qp_cap(&mut self) -> &mut QueuePairCapBuilder {
+        &mut self.qp_cap
+    }
+
+    /// Get `port_num` of this buidler
+    pub(crate) fn get_port_num(&self) -> Option<u8> {
+        self.port_num
+    }
+}
+
+impl From<QueuePairInitAttr> for ibv_qp_init_attr {
+    #[inline]
+    fn from(s: QueuePairInitAttr) -> Self {
         // SAFETY: POD FFI type
         let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
-        qp_init_attr.qp_context = ptr::null_mut::<libc::c_void>().cast();
-        qp_init_attr.send_cq = ptr::null_mut::<ibv_cq>().cast();
-        qp_init_attr.recv_cq = ptr::null_mut::<ibv_cq>().cast();
-        qp_init_attr.srq = ptr::null_mut::<ibv_cq>().cast();
-        qp_init_attr.cap.max_send_wr = MAX_SEND_WR;
-        qp_init_attr.cap.max_recv_wr = MAX_RECV_WR;
-        qp_init_attr.cap.max_send_sge = MAX_SEND_SGE;
-        qp_init_attr.cap.max_recv_sge = MAX_RECV_SGE;
-        qp_init_attr.cap.max_inline_data = 0;
-        qp_init_attr.qp_type = rdma_sys::ibv_qp_type::IBV_QPT_RC;
-        qp_init_attr.sq_sig_all = 0_i32;
-        Self {
-            qp_init_attr_inner: qp_init_attr,
-        }
-    }
-}
-
-impl Debug for QueuePairInitAttr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QueuePairInitAttr")
-            .field("qp_context", &self.qp_init_attr_inner.qp_context)
-            .field("send_cq", &self.qp_init_attr_inner.send_cq)
-            .field("recv_cq", &self.qp_init_attr_inner.recv_cq)
-            .field("srq", &self.qp_init_attr_inner.srq)
-            .field("max_send_wr", &self.qp_init_attr_inner.cap.max_send_wr)
-            .field("max_recv_wr", &self.qp_init_attr_inner.cap.max_recv_wr)
-            .field("max_send_sge", &self.qp_init_attr_inner.cap.max_send_sge)
-            .field("max_recv_sge", &self.qp_init_attr_inner.cap.max_recv_sge)
-            .field(
-                "max_inline_data",
-                &self.qp_init_attr_inner.cap.max_inline_data,
-            )
-            .field("qp_type", &self.qp_init_attr_inner.qp_type)
-            .field("sq_sig_all", &self.qp_init_attr_inner.sq_sig_all)
-            .finish()
-    }
-}
-
-/// Queue pair builder
-#[derive(Debug)]
-pub(crate) struct QueuePairBuilder {
-    /// Protection domain it belongs to
-    pd: Arc<ProtectionDomain>,
-    /// Event linstener
-    event_listener: Option<EventListener>,
-    /// Queue pair init attribute
-    qp_init_attr: QueuePairInitAttr,
-    /// Port Number
-    port_num: u8,
-    /// Gid Index
-    gid_index: usize,
-}
-
-impl QueuePairBuilder {
-    /// Create a new queue pair builder
-    pub(crate) fn new(pd: &Arc<ProtectionDomain>) -> Self {
-        Self {
-            pd: Arc::<ProtectionDomain>::clone(pd),
-            qp_init_attr: QueuePairInitAttr::default(),
-            event_listener: None,
-            port_num: DEFAULT_PORT_NUM,
-            gid_index: DEFAULT_GID_INDEX,
-        }
-    }
-
-    /// Create a queue pair
-    ///
-    /// On failure of `ibv_create_qp`, errno indicates the failure reason:
-    ///
-    /// `EINVAL`    Invalid pd, `send_cq`, `recv_cq`, srq or invalid value provided in `max_send_wr`, `max_recv_wr`, `max_send_sge`, `max_recv_sge` or in `max_inline_data`
-    ///
-    /// `ENOMEM`    Not enough resources to complete this operation
-    ///
-    /// `ENOSYS`    QP with this Transport Service Type isn't supported by this RDMA device
-    ///
-    /// `EPERM`     Not enough permissions to create a QP with this Transport Service Type
-    pub(crate) fn build(mut self) -> io::Result<QueuePair> {
-        // SAFETY: ffi
-        let inner_qp = NonNull::new(unsafe {
-            rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut self.qp_init_attr.qp_init_attr_inner)
-        })
-        .ok_or_else(log_ret_last_os_err)?;
-        Ok(QueuePair {
-            pd: Arc::<ProtectionDomain>::clone(&self.pd),
-            inner_qp,
-            event_listener: Arc::new(self.event_listener.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    "event channel is not set for the queue pair builder",
-                )
-            })?),
-            port_num: self.port_num,
-            gid_index: self.gid_index,
-            qp_init_attr: self.qp_init_attr,
-            access: None,
-            cur_state: RwLock::new(QueuePairState::Init),
-        })
-    }
-
-    /// Set event listener
-    pub(crate) fn set_event_listener(mut self, el: EventListener) -> Self {
-        self.qp_init_attr.qp_init_attr_inner.send_cq = el.cq.as_ptr();
-        self.qp_init_attr.qp_init_attr_inner.recv_cq = el.cq.as_ptr();
-        self.event_listener = Some(el);
-        self
-    }
-
-    /// Set port number
-    pub(crate) fn set_port_num(mut self, port_num: u8) -> Self {
-        self.port_num = port_num;
-        self
-    }
-
-    /// Set gid index
-    pub(crate) fn set_gid_index(mut self, gid_index: usize) -> Self {
-        self.gid_index = gid_index;
-        self
-    }
-
-    /// Set maximum number of outstanding send requests in the send queue
-    pub(crate) fn set_max_send_wr(mut self, max_send_wr: u32) -> Self {
-        self.qp_init_attr.qp_init_attr_inner.cap.max_send_wr = max_send_wr;
-        self
-    }
-
-    /// Set maximum number of outstanding receive requests in the receive queue
-    pub(crate) fn set_max_recv_wr(mut self, max_recv_wr: u32) -> Self {
-        self.qp_init_attr.qp_init_attr_inner.cap.max_recv_wr = max_recv_wr;
-        self
-    }
-
-    /// Set maximum number of scatter/gather elements (SGE) in a WR on the send queue
-    pub(crate) fn set_max_send_sge(mut self, max_send_sge: u32) -> Self {
-        self.qp_init_attr.qp_init_attr_inner.cap.max_send_sge = max_send_sge;
-        self
-    }
-
-    /// Set maximum number of scatter/gather elements (SGE) in a WR on the receive queue
-    pub(crate) fn set_max_recv_sge(mut self, max_recv_sge: u32) -> Self {
-        self.qp_init_attr.qp_init_attr_inner.cap.max_recv_sge = max_recv_sge;
-        self
+        qp_init_attr.qp_context = s
+            .qp_context
+            .unwrap_or(ptr::null_mut::<libc::c_void>().cast());
+        qp_init_attr.send_cq = s.send_cq;
+        qp_init_attr.recv_cq = s.recv_cq;
+        qp_init_attr.srq = s.srq.unwrap_or(ptr::null_mut::<ibv_srq>().cast());
+        qp_init_attr.cap.max_send_wr = s.qp_cap.max_send_wr;
+        qp_init_attr.cap.max_recv_wr = s.qp_cap.max_recv_wr;
+        qp_init_attr.cap.max_send_sge = s.qp_cap.max_send_sge;
+        qp_init_attr.cap.max_recv_sge = s.qp_cap.max_recv_sge;
+        qp_init_attr.cap.max_inline_data = s.qp_cap.max_inline_data;
+        qp_init_attr.qp_type = s.qp_type;
+        qp_init_attr.sq_sig_all = s.sq_sig_all;
+        qp_init_attr
     }
 }
 
 /// Queue pair information used to hand shake
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Getters, Setters)]
-#[getset(set, get = "with_prefix")]
+#[getset(set, get = "pub")]
 pub(crate) struct QueuePairEndpoint {
     /// queue pair number
     qp_num: u32,
@@ -258,7 +231,7 @@ pub(crate) struct QueuePairEndpoint {
 /// associated with a work request (WR)
 #[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
-#[getset(set, get = "with_prefix")]
+#[getset(set, get = "pub")]
 pub(crate) struct AddressHandler {
     /// Attributes of the Global Routing Headers (GRH), as described in the table below.
     /// This is useful when sending packets to another subnet
@@ -287,6 +260,7 @@ pub(crate) struct AddressHandler {
     #[builder(default = "DEFAULT_IS_GLOBAL")]
     is_global: u8,
     /// The local physical port that the packets will be sent from
+    #[builder(default = "DEFAULT_PORT_NUM")]
     port_num: u8,
 }
 
@@ -297,33 +271,7 @@ impl AddressHandlerBuilder {
     }
 }
 
-impl From<GlobalRouteHeaderBuilderError> for AddressHandlerBuilderError {
-    #[inline]
-    fn from(e: GlobalRouteHeaderBuilderError) -> Self {
-        Self::ValidationError(e.to_string())
-    }
-}
-
-impl From<AddressHandlerBuilderError> for RQAttrBuilderError {
-    #[inline]
-    fn from(e: AddressHandlerBuilderError) -> Self {
-        Self::ValidationError(e.to_string())
-    }
-}
-
-impl From<RQAttrBuilderError> for io::Error {
-    #[inline]
-    fn from(e: RQAttrBuilderError) -> Self {
-        io::Error::new(io::ErrorKind::Other, e.to_string())
-    }
-}
-
-impl From<SQAttrBuilderError> for io::Error {
-    #[inline]
-    fn from(e: SQAttrBuilderError) -> Self {
-        io::Error::new(io::ErrorKind::Other, e.to_string())
-    }
-}
+impl_into_io_error!(SQAttrBuilderError);
 
 impl From<AddressHandler> for ibv_ah_attr {
     #[inline]
@@ -341,11 +289,13 @@ impl From<AddressHandler> for ibv_ah_attr {
     }
 }
 
+impl_from_buidler_error_for_another!(AddressHandlerBuilderError, RQAttrBuilderError);
+
 /// Gloabel route information about remote end.
 /// This is useful when sending packets to another subnet.
 #[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
-#[getset(set, get = "with_prefix")]
+#[getset(set, get = "pub")]
 pub(crate) struct GlobalRouteHeader {
     /// The GID that is used to identify the destination port of the packets
     dgid: Gid,
@@ -355,6 +305,7 @@ pub(crate) struct GlobalRouteHeader {
     #[builder(default = "DEFAULT_FLOW_LABEL")]
     flow_label: u32,
     /// An index in the port's GID table that will be used to identify the originator of the packet
+    #[builder(default = "DEFAULT_GID_INDEX.cast()")]
     sgid_index: u8,
     /// The number of hops (i.e. the number of routers) that the packet is permitted to take before
     /// being discarded. This ensures that a packet will not loop indefinitely between routers if a
@@ -382,6 +333,8 @@ impl From<GlobalRouteHeader> for ibv_global_route {
         ibv_grh
     }
 }
+
+impl_from_buidler_error_for_another!(GlobalRouteHeaderBuilderError, AddressHandlerBuilderError);
 
 /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
 /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
@@ -416,7 +369,7 @@ impl From<MTU> for u32 {
 /// Attributes for QP's receive queue to receive messages
 #[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
-#[getset(set, get = "with_prefix")]
+#[getset(set, get = "pub")]
 pub(crate) struct RQAttr {
     /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that can be
     /// transferred in the path. For UC and RC QPs, when needed, the RDMA device will automatically
@@ -444,70 +397,33 @@ pub(crate) struct RQAttr {
     /// Minimum RNR NAK Timer Field Value. When an incoming message to this QP should consume a Work
     /// Request from the Receive Queue, but not Work Request is outstanding on that Queue, the QP will
     /// send an RNR NAK packet to the initiator. It does not affect RNR NAKs sent for other reasons.
-    /// The value can be one of the following numeric values since those values aren’t enumerated:
-    ///     0 - 655.36 milliseconds delay
-    ///     1 - 0.01 milliseconds delay
-    ///     2 - 0.02 milliseconds delay
-    ///     3 - 0.03 milliseconds delay
-    ///     4 - 0.04 milliseconds delay
-    ///     5 - 0.06 milliseconds delay
-    ///     6 - 0.08 milliseconds delay
-    ///     7 - 0.12 milliseconds delay
-    ///     8 - 0.16 milliseconds delay
-    ///     9 - 0.24 milliseconds delay
-    ///     10 - 0.32 milliseconds delay
-    ///     11 - 0.48 milliseconds delay
-    ///     12 - 0.64 milliseconds delay
-    ///     13 - 0.96 milliseconds delay
-    ///     14 - 1.28 milliseconds delay
-    ///     15 - 1.92 milliseconds delay
-    ///     16 - 2.56 milliseconds delay
-    ///     17 - 3.84 milliseconds delay
-    ///     18 - 5.12 milliseconds delay
-    ///     19 - 7.68 milliseconds delay
-    ///     20 - 10.24 milliseconds delay
-    ///     21 - 15.36 milliseconds delay
-    ///     22 - 20.48 milliseconds delay
-    ///     23 - 30.72 milliseconds delay
-    ///     24 - 40.96 milliseconds delay
-    ///     25 - 61.44 milliseconds delay
-    ///     26 - 81.92 milliseconds delay
-    ///     27 - 122.88 milliseconds delay
-    ///     28 - 163.84 milliseconds delay
-    ///     29 - 245.76 milliseconds delay
-    ///     30 - 327.68 milliseconds delay
-    ///     31 - 491.52 milliseconds delay
-    /// Relevant only for RC QPs
+    /// Relevant only for RC QPs.
     #[builder(default = "DEFAULT_MIN_RNR_TIMER")]
     min_rnr_timer: u8,
 }
 
-impl RQAttr {
-    /// Reset the infomation of remote end
-    pub(crate) fn reset(&mut self, remote: &QueuePairEndpoint, gid_index: u8, port_num: u8) {
-        let _ = self
-            .address_handler
-            .grh
-            .set_sgid_index(gid_index)
-            .set_dgid(*remote.get_gid());
-        let _ = self
-            .address_handler
-            .set_dest_lid(*remote.get_lid())
-            .set_port_num(port_num);
-        let _ = self.set_dest_qp_number(*remote.get_qp_num());
-    }
-}
+impl_into_io_error!(RQAttrBuilderError);
 
 impl RQAttrBuilder {
     /// Get sub builder's mutable reference
     pub(crate) fn address_handler(&mut self) -> &mut AddressHandlerBuilder {
         &mut self.address_handler
     }
+    /// Reset the infomation of remote end
+    pub(crate) fn reset_remote_info(&mut self, remote: &QueuePairEndpoint) {
+        let _ = self
+            .dest_qp_number(*remote.qp_num())
+            .address_handler()
+            .dest_lid(*remote.lid())
+            .grh()
+            .dgid(*remote.gid());
+    }
 }
 
 /// Attributes for QP's send queue to receive messages
 #[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
+#[getset(set, get = "pub")]
 pub(crate) struct SQAttr {
     /// The minimum timeout that a QP waits for ACK/NACK from remote QP before retransmitting the packet.
     /// The value zero is special value which means wait an infinite time for the ACK/NACK (useful for
@@ -577,29 +493,23 @@ impl From<u32> for QueuePairState {
         }
     }
 }
-
 /// Queue pair wrapper
-#[derive(Debug)]
+#[derive(Debug, Getters, Setters, Builder)]
+#[getset(set, get = "pub")]
 pub(crate) struct QueuePair {
     /// protection domain it belongs to
-    pub(crate) pd: Arc<ProtectionDomain>,
+    pd: Arc<ProtectionDomain>,
     /// event listener
-    pub(crate) event_listener: Arc<EventListener>,
+    event_listener: Arc<EventListener>,
     /// internal `ibv_qp` pointer
-    pub(crate) inner_qp: NonNull<ibv_qp>,
-    /// port number
-    pub(crate) port_num: u8,
-    /// gid index
-    pub(crate) gid_index: usize,
-    /// backup for child qp
-    pub(crate) qp_init_attr: QueuePairInitAttr,
-    /// access of this qp
-    pub(crate) access: Option<ibv_access_flags>,
+    inner_qp: NonNull<ibv_qp>,
     /// Assume that this is the current QP state. This is useful if it is known
     /// to the application that the QP state is different from the assumed state
     /// by the low-level driver. It can be one of the enumerated values as qp_state.
-    pub(crate) cur_state: RwLock<QueuePairState>,
+    cur_state: Arc<RwLock<QueuePairState>>,
 }
+
+impl_into_io_error!(QueuePairBuilderError);
 
 impl QueuePair {
     /// get `ibv_qp` pointer
@@ -677,7 +587,6 @@ impl QueuePair {
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
-        self.access = Some(flag);
         *self.cur_state.write() = QueuePairState::Init;
         Ok(())
     }
@@ -770,7 +679,7 @@ impl QueuePair {
         LR: LocalMrReadAccess,
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        let mut sr = SendWr::new_send(lms, wr_id, imm);
+        let mut send_attr = SendWr::new_send(lms, wr_id, imm);
         self.event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
@@ -779,12 +688,12 @@ impl QueuePair {
                 lm.length(),
                 // SAFETY: no date race here
                 unsafe { lm.lkey_unchecked() },
-                sr.as_ref().wr_id,
+                send_attr.as_ref().wr_id,
             );
         }
         // SAFETY: ffi
         // TODO: check safety
-        let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
+        let errno = unsafe { ibv_post_send(self.as_ptr(), send_attr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
@@ -804,7 +713,7 @@ impl QueuePair {
     where
         LW: LocalMrWriteAccess,
     {
-        let mut rr = RecvWr::new_recv(lms, wr_id);
+        let mut recv_attr = RecvWr::new_recv(lms, wr_id);
         let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
         self.event_listener.cq.req_notify(false)?;
         for lm in lms {
@@ -814,12 +723,12 @@ impl QueuePair {
                 lm.length(),
                 // SAFETY: no date race here
                 unsafe { lm.lkey_unchecked() },
-                rr.as_ref().wr_id,
+                recv_attr.as_ref().wr_id,
             );
         }
         // SAFETY: ffi
         // TODO: check safety
-        let errno = unsafe { ibv_post_recv(self.as_ptr(), rr.as_mut(), &mut bad_wr) };
+        let errno = unsafe { ibv_post_recv(self.as_ptr(), recv_attr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
@@ -841,7 +750,7 @@ impl QueuePair {
         RR: RemoteMrReadAccess,
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        let mut sr = SendWr::new_read(lms, wr_id, rm);
+        let mut send_attr = SendWr::new_read(lms, wr_id, rm);
         self.event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
@@ -850,12 +759,12 @@ impl QueuePair {
                 lm.length(),
                 // SAFETY: no date race here
                 unsafe { lm.lkey_unchecked() },
-                sr.as_ref().wr_id,
+                send_attr.as_ref().wr_id,
             );
         }
         // SAFETY: ffi
         // TODO: check safety
-        let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
+        let errno = unsafe { ibv_post_send(self.as_ptr(), send_attr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
@@ -883,7 +792,7 @@ impl QueuePair {
         RW: RemoteMrWriteAccess,
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        let mut sr = SendWr::new_write(lms, wr_id, rm, imm);
+        let mut send_attr = SendWr::new_write(lms, wr_id, rm, imm);
         self.event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
@@ -892,12 +801,12 @@ impl QueuePair {
                 lm.length(),
                 // SAFETY: no date race here
                 unsafe { lm.lkey_unchecked() },
-                sr.as_ref().wr_id,
+                send_attr.as_ref().wr_id,
             );
         }
         // SAFETY: ffi
         // TODO: check safety
-        let errno = unsafe { ibv_post_send(self.as_ptr(), sr.as_mut(), &mut bad_wr) };
+        let errno = unsafe { ibv_post_send(self.as_ptr(), send_attr.as_mut(), &mut bad_wr) };
         if errno != 0_i32 {
             return Err(log_ret_last_os_err());
         }
@@ -1059,6 +968,10 @@ impl QueuePair {
 unsafe impl Sync for QueuePair {}
 
 unsafe impl Send for QueuePair {}
+
+unsafe impl Sync for QueuePairInitAttrBuilder {}
+
+unsafe impl Send for QueuePairInitAttrBuilder {}
 
 impl Drop for QueuePair {
     fn drop(&mut self) {
@@ -1288,23 +1201,17 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
 
 /// Builders to attributes helper
 pub(crate) fn builders_into_attrs(
-    mut recv_queue_attr: RQAttrBuilder,
-    send_queue_attr: SQAttrBuilder,
+    mut recv_attr_builder: RQAttrBuilder,
+    send_attr_builder: SQAttrBuilder,
     remote: &QueuePairEndpoint,
-    port_num: u8,
-    gid_index: u8,
 ) -> io::Result<(RQAttr, SQAttr)> {
-    let _ = recv_queue_attr.dest_qp_number(remote.qp_num);
-    let _ = recv_queue_attr
+    let _ = recv_attr_builder
+        .dest_qp_number(remote.qp_num)
         .address_handler()
-        .port_num(port_num)
-        .dest_lid(*remote.get_lid());
-    let _ = recv_queue_attr
-        .address_handler()
+        .dest_lid(*remote.lid())
         .grh()
-        .sgid_index(gid_index)
-        .dgid(*remote.get_gid());
-    let sr = send_queue_attr.build()?;
-    let rr = recv_queue_attr.build()?;
-    Ok((rr, sr))
+        .dgid(*remote.gid());
+    let send_attr = send_attr_builder.build()?;
+    let recv_attr = recv_attr_builder.build()?;
+    Ok((recv_attr, send_attr))
 }

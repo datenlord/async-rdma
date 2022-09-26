@@ -79,7 +79,7 @@ impl Agent {
         max_rmr_access: ibv_access_flags,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-        let rmr_manager = RemoteMrManager::new(Arc::clone(&qp.pd), max_rmr_access);
+        let rmr_manager = RemoteMrManager::new(Arc::clone(qp.pd()), max_rmr_access);
         let (local_mr_send, local_mr_recv) = channel(1024);
         let (remote_mr_send, remote_mr_recv) = channel(1024);
         let (data_send, data_recv) = channel(1024);
@@ -269,11 +269,6 @@ impl Agent {
     /// Get the max length of message for send/recv
     pub(crate) fn max_msg_len(&self) -> usize {
         self.inner.max_sr_data_len
-    }
-
-    /// Get the max access permission for remote mr requests
-    pub(crate) fn max_rmr_access(&self) -> ibv_access_flags {
-        self.inner.rmr_manager.max_rmr_access
     }
 }
 

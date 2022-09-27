@@ -12,33 +12,41 @@ use serde::{Deserialize, Serialize};
 #[repr(transparent)]
 pub struct Gid(ibv_gid);
 
-#[allow(dead_code)]
 impl Gid {
     /// Build [`Gid`] from bytes
-    pub(crate) fn from_raw(raw: [u8; 16]) -> Self {
+    #[inline]
+    #[must_use]
+    pub fn from_raw(raw: [u8; 16]) -> Self {
         Self(ibv_gid { raw })
     }
 
     /// Re-interprets [`&Gid`](Gid) as `&[u8;16]`.
-    fn as_raw(&self) -> &[u8; 16] {
+    #[inline]
+    #[must_use]
+    pub fn as_raw(&self) -> &[u8; 16] {
         // SAFETY: POD type
         unsafe { &self.0.raw }
     }
 
     /// First 32 bits
-    fn subnet_prefix(&self) -> u64 {
+    #[inline]
+    #[must_use]
+    pub fn subnet_prefix(&self) -> u64 {
         // SAFETY: POD type
         unsafe { u64::from_be(self.0.global.subnet_prefix) }
     }
 
     /// Last 32 bits
-    fn interface_id(&self) -> u64 {
+    #[inline]
+    #[must_use]
+    pub fn interface_id(&self) -> u64 {
         // SAFETY: POD type
         unsafe { u64::from_be(self.0.global.interface_id) }
     }
 }
 
 impl fmt::Debug for Gid {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // FIXME: any better representation?
         f.debug_tuple("Gid").field(self.as_raw()).finish()
@@ -46,6 +54,7 @@ impl fmt::Debug for Gid {
 }
 
 impl PartialEq for Gid {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.as_raw() == other.as_raw()
     }
@@ -54,6 +63,7 @@ impl PartialEq for Gid {
 impl Eq for Gid {}
 
 impl From<ibv_gid> for Gid {
+    #[inline]
     fn from(gid: ibv_gid) -> Self {
         Self(gid)
     }
@@ -67,6 +77,7 @@ impl From<Gid> for ibv_gid {
 }
 
 impl AsRef<ibv_gid> for Gid {
+    #[inline]
     fn as_ref(&self) -> &ibv_gid {
         // SAFETY: repr(transparent)
         unsafe { &*<*const Self>::cast::<ibv_gid>(self) }
@@ -74,6 +85,7 @@ impl AsRef<ibv_gid> for Gid {
 }
 
 impl AsMut<ibv_gid> for Gid {
+    #[inline]
     fn as_mut(&mut self) -> &mut ibv_gid {
         // SAFETY: repr(transparent)
         unsafe { &mut *<*mut Self>::cast::<ibv_gid>(self) }
@@ -81,6 +93,7 @@ impl AsMut<ibv_gid> for Gid {
 }
 
 impl Serialize for Gid {
+    #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -91,6 +104,7 @@ impl Serialize for Gid {
 }
 
 impl<'de> Deserialize<'de> for Gid {
+    #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,

@@ -203,6 +203,7 @@ use tracing::debug;
 
 use crate::queue_pair::builders_into_attrs;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
+pub use gid::Gid;
 pub use queue_pair::{QueuePairEndpoint, QueuePairEndpointBuilder, QueuePairState, MTU};
 
 #[macro_use]

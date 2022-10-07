@@ -4,13 +4,18 @@ pub(crate) mod local;
 mod raw;
 /// Remote Memory Region
 pub(crate) mod remote;
+use derive_builder::Builder;
 use enumflags2::BitFlags;
 pub(crate) use raw::RawMemoryRegion;
 use rdma_sys::ibv_access_flags;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, time::SystemTime};
+use std::{fmt::Debug, ops::Add, time::SystemTime};
 
-use crate::{access::ibv_access_into_flags, AccessFlag};
+use crate::{
+    access::{flags_into_ibv_access, ibv_access_into_flags},
+    rmr_manager::DEFAULT_RMR_TIMEOUT,
+    AccessFlag,
+};
 
 /// Rdma Memory Region Access
 pub trait MrAccess: Sync + Send + Debug + IbvAccess {
@@ -37,16 +42,22 @@ pub trait IbvAccess {
 }
 
 /// Memory region token used for the remote access
-#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy, Debug, Builder)]
 pub struct MrToken {
-    /// The start address
+    /// The start address of this memory region
     pub addr: usize,
-    /// The length
+    /// The length of this memory region
     pub len: usize,
-    /// The rkey
+    /// The remote key of this memory region
     pub rkey: u32,
-    /// Deadline for timeout
+    /// The Deadline of this memory region.
+    /// After ddl, this memory region maybe unavailable due to timeout.
+    #[builder(default = "SystemTime::now().add(DEFAULT_RMR_TIMEOUT)")]
     pub ddl: SystemTime,
     /// Remote mr `ibv_access_flags` inner
+    #[builder(field(
+        type = "BitFlags<AccessFlag>",
+        build = "flags_into_ibv_access(self.access).0"
+    ))]
     pub access: u32,
 }

@@ -478,7 +478,7 @@ impl AgentThread {
                         .remote_mr_send
                         .send(RemoteMr::new_from_token(
                             token,
-                            Arc::<AgentInner>::clone(&self.inner),
+                            Some(Arc::<AgentInner>::clone(&self.inner)),
                         ))
                         .await
                         .map_or_else(
@@ -611,7 +611,7 @@ impl AgentInner {
         if let ResponseKind::AllocMR(alloc_mr_response) = response {
             Ok(RemoteMr::new_from_token(
                 alloc_mr_response.token,
-                Arc::<Self>::clone(self),
+                Some(Arc::<Self>::clone(self)),
             ))
         } else {
             Err(io::Error::new(

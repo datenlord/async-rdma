@@ -174,7 +174,7 @@ use event_listener::EventListener;
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
     remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
-    MrAccess,
+    MrAccess, MrToken, MrTokenBuilder, MrTokenBuilderError,
 };
 pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;

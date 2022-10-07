@@ -2,6 +2,7 @@ use super::{IbvAccess, MrAccess, MrToken};
 use crate::agent::AgentInner;
 use rdma_sys::ibv_access_flags;
 use std::{io, ops::Range, sync::Arc, time::SystemTime};
+use tracing::debug;
 
 /// Remote Memory Region Accrss
 pub trait RemoteMrReadAccess: MrAccess {
@@ -24,7 +25,7 @@ pub struct RemoteMr {
     /// metadata of Remote mr
     token: MrToken,
     /// the agent which requested this remote mr.
-    agent: Arc<AgentInner>,
+    agent: Option<Arc<AgentInner>>,
 }
 
 impl MrAccess for RemoteMr {
@@ -62,18 +63,32 @@ impl RemoteMrWriteAccess for RemoteMr {}
 impl Drop for RemoteMr {
     #[inline]
     fn drop(&mut self) {
-        let agent = Arc::<AgentInner>::clone(&self.agent);
-        let token = self.token;
-        // detach the task
-        let _task = tokio::spawn(async move { AgentInner::release_mr(&agent, token).await });
+        self.agent.as_ref().map_or_else(
+            || debug!("drop a rmr created by user"),
+            |agent| {
+                // this rmr is requested by agent
+                let agent = Arc::<AgentInner>::clone(agent);
+                let token = self.token;
+                // detach the task
+                let _task =
+                    tokio::spawn(async move { AgentInner::release_mr(&agent, token).await });
+            },
+        );
     }
 }
 
 impl RemoteMr {
     /// Create a remote memory region from the `token`
     #[inline]
-    pub(crate) fn new_from_token(token: MrToken, agent: Arc<AgentInner>) -> Self {
+    pub(crate) fn new_from_token(token: MrToken, agent: Option<Arc<AgentInner>>) -> Self {
         Self { token, agent }
+    }
+
+    /// Create a remote memory region from the `token` manually
+    #[inline]
+    #[must_use]
+    pub fn new(token: MrToken) -> Self {
+        Self::new_from_token(token, None)
     }
 
     /// Get a remote mr slice

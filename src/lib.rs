@@ -1659,7 +1659,10 @@ impl Rdma {
     /// ```
     #[inline]
     #[cfg(feature = "raw")]
-    pub async fn send_raw(&self, lm: &LocalMr) -> io::Result<()> {
+    pub async fn send_raw<LR>(&self, lm: &LR) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+    {
         self.qp.send_sge_raw(&[lm], None).await
     }
 
@@ -1721,7 +1724,10 @@ impl Rdma {
     /// ```
     #[inline]
     #[cfg(feature = "raw")]
-    pub async fn send_raw_with_imm(&self, lm: &LocalMr, imm: u32) -> io::Result<()> {
+    pub async fn send_raw_with_imm<LR>(&self, lm: &LR, imm: u32) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+    {
         self.qp.send_sge_raw(&[lm], Some(imm)).await
     }
 

@@ -1263,22 +1263,22 @@ impl Rdma {
     ///     time::Duration,
     /// };
     ///
-    /// async fn client(client_rdma: Rdma, server_info: QueuePairEndpoint) -> io::Result<()> {
-    ///     let rdma = client_rdma.ibv_connect(server_info).await?;
+    /// async fn client(mut client_rdma: Rdma, server_info: QueuePairEndpoint) -> io::Result<()> {
+    ///     client_rdma.ibv_connect(server_info).await?;
     ///     // alloc 8 bytes local memory
-    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    ///     let mut lmr = client_rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
     ///     // write data into lmr
     ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
     ///     // send data in mr to the remote end
-    ///     rdma.send(&lmr).await?;
+    ///     client_rdma.send(&lmr).await?;
     ///     Ok(())
     /// }
     ///
     /// #[tokio::main]
-    /// async fn server(server_rdma: Rdma, client_info: QueuePairEndpoint) -> io::Result<()> {
-    ///     let rdma = server_rdma.ibv_connect(client_info).await?;
+    /// async fn server(mut server_rdma: Rdma, client_info: QueuePairEndpoint) -> io::Result<()> {
+    ///     server_rdma.ibv_connect(client_info).await?;
     ///     // receive data
-    ///     let lmr = rdma.receive().await?;
+    ///     let lmr = server_rdma.receive().await?;
     ///     let data = *lmr.as_slice();
     ///     assert_eq!(data, [1_u8; 8]);
     ///     Ok(())
@@ -1305,7 +1305,7 @@ impl Rdma {
     /// }
     /// ```
     #[inline]
-    pub async fn ibv_connect(mut self, remote: QueuePairEndpoint) -> io::Result<Self> {
+    pub async fn ibv_connect(&mut self, remote: QueuePairEndpoint) -> io::Result<()> {
         match self.conn_type {
             ConnectionType::RCIBV => {
                 let (recv_attr, send_attr) =
@@ -1316,7 +1316,7 @@ impl Rdma {
                     self.clone_attr.agent_attr.max_rmr_access,
                 )
                 .await?;
-                Ok(self)
+                Ok(())
             }
             ConnectionType::RCCM | ConnectionType::RCSocket => Err(io::Error::new(
                 io::ErrorKind::Other,

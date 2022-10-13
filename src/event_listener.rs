@@ -12,7 +12,7 @@ use tokio::{
     sync::mpsc::{channel, Receiver, Sender},
     time::timeout,
 };
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Provided by the requester and used by the manager task to send
 /// the command response back to the requester.
@@ -97,6 +97,7 @@ impl EventListener {
                             while let Some(wc) = wc_buf.pop() {
                                 match req_map.lock().remove(&wc.wr_id()) {
                                     Some(v) => {
+                                        debug!("polled wc wr_id {:?}", &wc.wr_id());
                                         v.0.try_send(wc).unwrap_or_else(|e| {
                                             warn!("The waiting task is dropped, {:?}", e);
                                         });

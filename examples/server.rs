@@ -72,6 +72,17 @@ async fn receive_mr_after_being_written_with_imm(rdma: &Rdma) -> io::Result<()> 
     Ok(())
 }
 
+/// receive lmr which was written by client through RDMA ATOMIC_CAS
+async fn receive_mr_after_being_written_by_cas(rdma: &Rdma) -> io::Result<()> {
+    // receive mr's meta data from client
+    let lmr = rdma.receive_local_mr().await?;
+    // assert the content of lmr, which was write by cas
+    let data = *lmr.as_slice();
+    println!("{:?}", data);
+    assert_eq!(data, [1_u8; 8]);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     println!("server start");
@@ -87,6 +98,7 @@ async fn main() {
     receive_mr_after_being_written_with_imm(&rdma)
         .await
         .unwrap();
+    receive_mr_after_being_written_by_cas(&rdma).await.unwrap();
     println!("server done");
 
     // create new `Rdma`s (connections) that has the same `mr_allocator` and `event_listener` as parent
@@ -100,6 +112,7 @@ async fn main() {
         receive_mr_after_being_written_with_imm(&rdma)
             .await
             .unwrap();
+        receive_mr_after_being_written_by_cas(&rdma).await.unwrap();
     }
     println!("server done");
 }

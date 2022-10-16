@@ -114,6 +114,29 @@ impl SendWr {
         }
         sr
     }
+
+    /// create a new send work requet for "cas"
+    pub(crate) fn new_cas<LR, RW>(
+        old_value: u64,
+        new_value: u64,
+        lmr: &LR,
+        rm: &mut RW,
+        wr_id: WorkRequestId,
+    ) -> Self
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
+        let mut sr = Self::new(&[lmr], wr_id);
+        sr.inner.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+        sr.inner.opcode = ibv_wr_opcode::IBV_WR_ATOMIC_CMP_AND_SWP;
+
+        sr.inner.wr.atomic.remote_addr = rm.addr().cast();
+        sr.inner.wr.atomic.rkey = rm.rkey();
+        sr.inner.wr.atomic.compare_add = old_value;
+        sr.inner.wr.atomic.swap = new_value;
+        sr
+    }
 }
 
 impl AsRef<ibv_send_wr> for SendWr {

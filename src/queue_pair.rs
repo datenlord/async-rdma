@@ -829,6 +829,39 @@ impl QueuePair {
         Ok(())
     }
 
+    /// submit a atomic cas request
+    ///
+    /// On failure of `ibv_post_send`, errno indicates the failure reason:
+    ///
+    /// `EINVAL`    Invalid value provided in wr
+    ///
+    /// `ENOMEM`    Send Queue is full or not enough resources to complete this operation
+    ///
+    /// `EFAULT`    Invalid value provided in qp
+    fn submit_cas<LR, RW>(
+        &self,
+        old_value: u64,
+        new_value: u64,
+        buf: &LR,
+        rm: &mut RW,
+        wr_id: WorkRequestId,
+    ) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
+        let mut cas_wr = SendWr::new_cas(old_value, new_value, buf, rm, wr_id);
+        let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
+        self.event_listener.cq.req_notify(false)?;
+
+        // SAFETY: ffi
+        let errno = unsafe { ibv_post_send(self.as_ptr(), cas_wr.as_mut(), &mut bad_wr) };
+        if errno != 0_i32 {
+            return Err(log_ret_last_os_err());
+        }
+        Ok(())
+    }
+
     /// send a slice of local memory regions
     pub(crate) fn send_sge<'a, LR>(
         self: &Arc<Self>,
@@ -946,6 +979,33 @@ impl QueuePair {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
             .result()
             .map(|sz| assert_eq!(sz, len))
+            .map_err(Into::into)
+    }
+
+    /// A 64 bits value in a remote mr being read, compared with `old_value` and if they are equal,
+    /// the `new_value` is being written to the remote mr in an atomic way. The original data, before
+    /// the compare operation, is being written to the local memory buffer `buf`.
+    pub(crate) async fn atomic_cas<LR, RW>(
+        &self,
+        old_value: u64,
+        new_value: u64,
+        buf: &LR,
+        rm: &mut RW,
+    ) -> io::Result<()>
+    where
+        LR: LocalMrReadAccess,
+        RW: RemoteMrWriteAccess,
+    {
+        let (wr_id, mut resp_rx) = self
+            .event_listener
+            .register_for_read(&get_lmr_inners(&[buf]))?;
+        self.submit_cas(old_value, new_value, buf, rm, wr_id)?;
+        resp_rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            .result()
+            .map(|sz| assert_eq!(sz, 8))
             .map_err(Into::into)
     }
 

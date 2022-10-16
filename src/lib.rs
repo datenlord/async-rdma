@@ -1605,6 +1605,81 @@ impl Rdma {
             .await
     }
 
+    /// A 64 bits value in a remote mr being read, compared with `old_value` and if they are equal,
+    /// the `new_value` is being written to the remote mr in an atomic way.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().connect(addr).await?;
+    ///     // alloc 8 bytes remote memory
+    ///     let mut rmr = rdma.request_remote_mr(Layout::new::<[u8; 8]>()).await?;
+    ///     let new_value = u64::from_le_bytes([1_u8; 8]);
+    ///     // read, compare with rmr and swap `old_value` with `new_value`
+    ///     rdma.atomic_cas(0, new_value, &mut rmr).await?;
+    ///     // send rmr's meta data to the remote end
+    ///     rdma.send_remote_mr(rmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     // receive mr's meta data from client
+    ///     let lmr = rdma.receive_local_mr().await?;
+    ///     // assert the content of lmr, which was write by cas
+    ///     let data = *lmr.as_slice();
+    ///     assert_eq!(data, [1_u8; 8]);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    /// ```
+    #[inline]
+    pub async fn atomic_cas<RW>(
+        &self,
+        old_value: u64,
+        new_value: u64,
+        rm: &mut RW,
+    ) -> io::Result<()>
+    where
+        RW: RemoteMrWriteAccess,
+    {
+        if rm.length() != 8 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The length of remote mr should be 8",
+            ))
+        } else if rm.addr() & 7 != 0 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Atomic operations are legal only when the remote address is on a naturally-aligned 8-byte boundary",
+            ))
+        } else {
+            let buf = self.alloc_local_mr(std::alloc::Layout::new::<[u8; 8]>())?;
+            self.qp.atomic_cas(old_value, new_value, &buf, rm).await
+        }
+    }
+
     /// Send raw data in the lm
     ///
     /// Used with `receive_raw`.

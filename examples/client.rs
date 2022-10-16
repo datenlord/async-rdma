@@ -99,6 +99,18 @@ async fn request_then_write_with_imm(rdma: &Rdma) -> io::Result<()> {
     Ok(())
 }
 
+/// request remote memory region and write data to it by RDMA ATOMIC_CAS
+async fn request_then_write_cas(rdma: &Rdma) -> io::Result<()> {
+    // alloc 8 bytes remote memory
+    let mut rmr = rdma.request_remote_mr(Layout::new::<[u8; 8]>()).await?;
+    let new_value = u64::from_le_bytes([1_u8; 8]);
+    // read, compare with rmr and swap `old_value` with `new_value`
+    rdma.atomic_cas(0, new_value, &mut rmr).await?;
+    // send rmr's meta data to the remote end
+    rdma.send_remote_mr(rmr).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     println!("client start");
@@ -110,6 +122,7 @@ async fn main() {
     send_lmr_to_server(&rdma).await.unwrap();
     request_then_write(&rdma).await.unwrap();
     request_then_write_with_imm(&rdma).await.unwrap();
+    request_then_write_cas(&rdma).await.unwrap();
     println!("client done");
 
     // create new `Rdma`s (connections) that has the same `mr_allocator` and `event_listener` as parent
@@ -121,6 +134,7 @@ async fn main() {
         send_lmr_to_server(&rdma).await.unwrap();
         request_then_write(&rdma).await.unwrap();
         request_then_write_with_imm(&rdma).await.unwrap();
+        request_then_write_cas(&rdma).await.unwrap();
     }
     println!("client done");
 }

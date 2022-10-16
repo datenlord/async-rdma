@@ -37,8 +37,8 @@ pub(crate) fn test_server_client<
     let server = std::thread::spawn(move || server_wrapper(addr, s));
     std::thread::sleep(std::time::Duration::from_secs(1));
     let client = std::thread::spawn(move || client_wrapper(addr, c));
-    let _ = client.join().unwrap();
-    let _ = server.join().unwrap();
+    client.join().unwrap().unwrap();
+    server.join().unwrap().unwrap();
 }
 
 pub(crate) fn get_unused_ipv4_addr() -> SocketAddrV4 {

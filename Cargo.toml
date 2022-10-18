@@ -51,3 +51,4 @@ required-features = ["cm", "raw"]
 cancel_safety_test = [] # only used for cancel_safety test
 raw = [] # send/recv raw data
 cm = [] # connect cm server
+exp = [] # experimental methods

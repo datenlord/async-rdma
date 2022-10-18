@@ -2071,6 +2071,158 @@ impl Rdma {
         Ok((lmr, imm))
     }
 
+    /// Receive raw data and excute an fn after `submit_receive` and before `poll`
+    ///
+    /// **This is an experimental API**
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    /// use tokio::sync::oneshot;
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    ///
+    /// async fn client(addr: SocketAddrV4, rx: oneshot::Receiver<()>) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     rx.await.unwrap();
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw(&lmr).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4, tx: oneshot::Sender<()>) -> io::Result<()> {
+    ///     let func = || {
+    ///         println!("after post_recv and before poll");
+    ///         tx.send(()).unwrap();
+    ///     };
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let lmr = rdma
+    ///         .receive_raw_fn(Layout::for_value(&RAW_DATA), func)
+    ///         .await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr, tx));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr, rx)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    ///
+    /// ```
+    #[inline]
+    #[cfg(feature = "exp")]
+    pub async fn receive_raw_fn<F>(&self, layout: Layout, func: F) -> io::Result<LocalMr>
+    where
+        F: FnOnce(),
+    {
+        let mut lmr = self.alloc_local_mr(layout)?;
+        let _imm = self.qp.receive_sge_fn(&[&mut lmr], func).await?;
+        Ok(lmr)
+    }
+
+    /// Receive raw data with imm and excute an fn after `submit_receive` and before `poll`
+    ///
+    /// **This is an experimental API**
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    /// use tokio::sync::oneshot;
+    ///
+    /// const RAW_DATA: [u8; 8] = [1_u8; 8];
+    /// const IMM: u32 = 1_u32;
+    ///
+    /// async fn client(addr: SocketAddrV4, rx: oneshot::Receiver<()>) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().set_raw(true).connect(addr).await?;
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::for_value(&RAW_DATA))?;
+    ///     // put data into lmr
+    ///     let _num = lmr.as_mut_slice().write(&RAW_DATA)?;
+    ///     // wait for serer to receive first
+    ///     rx.await.unwrap();
+    ///     // send the content of lmr to server
+    ///     rdma.send_raw_with_imm(&lmr, IMM).await?;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4, tx: oneshot::Sender<()>) -> io::Result<()> {
+    ///     let func = || {
+    ///         println!("after post_recv and before poll");
+    ///         tx.send(()).unwrap();
+    ///     };
+    ///     let rdma = RdmaBuilder::default().set_raw(true).listen(addr).await?;
+    ///     // receive the data sent by client and put it into an mr
+    ///     let (lmr, imm) = rdma
+    ///         .receive_raw_with_imm_fn(Layout::for_value(&RAW_DATA), func)
+    ///         .await?;
+    ///     // read data from mr
+    ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
+    ///     assert_eq!(imm, Some(IMM));
+    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     tokio::time::sleep(Duration::from_secs(1)).await;
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr, tx));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr, rx)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    ///
+    /// ```
+    #[inline]
+    #[cfg(feature = "exp")]
+    pub async fn receive_raw_with_imm_fn<F>(
+        &self,
+        layout: Layout,
+        func: F,
+    ) -> io::Result<(LocalMr, Option<u32>)>
+    where
+        F: FnOnce(),
+    {
+        let mut lmr = self.alloc_local_mr(layout)?;
+        let imm = self.qp.receive_sge_fn(&[&mut lmr], func).await?;
+        Ok((lmr, imm))
+    }
+
     /// Receive the content and stored in the returned memory region.
     ///
     /// Used with `send_with_imm`.

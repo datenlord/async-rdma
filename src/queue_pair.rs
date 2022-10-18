@@ -937,6 +937,37 @@ impl QueuePair {
             .map_err(Into::into)
     }
 
+    /// Receive raw data and excute an fn after `submit_receive` and before `poll`
+    ///
+    /// **This is an experimental API**
+    #[cfg(feature = "exp")]
+    pub(crate) async fn receive_sge_fn<'a, LW, F>(
+        self: &Arc<Self>,
+        lms: &'a [&'a mut LW],
+        func: F,
+    ) -> io::Result<Option<u32>>
+    where
+        LW: LocalMrWriteAccess,
+        F: FnOnce(),
+    {
+        let (wr_id, mut resp_rx) = self
+            .event_listener
+            .register_for_write(&get_mut_lmr_inners(lms))?;
+        let len = lms.iter().map(|lm| lm.length()).sum();
+        self.submit_receive(lms, wr_id)?;
+        func();
+        resp_rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
+            .result_with_imm()
+            .map(|(sz, imm)| {
+                assert_eq!(sz, len);
+                imm
+            })
+            .map_err(Into::into)
+    }
+
     /// read data from `rm` to `lms`
     pub(crate) async fn read_sge<LW, RR>(&self, lms: &[&mut LW], rm: &RR) -> io::Result<()>
     where

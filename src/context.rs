@@ -53,7 +53,8 @@ impl Context {
 
         let dev = match dev_name {
             Some(name) => dev_list.iter().find(|&d| d.name() == name),
-            None => dev_list.get(0),
+            // choose the most recently added rdma device as default
+            None => dev_list.get(dev_list.len().saturating_sub(1)),
         }
         .ok_or(io::ErrorKind::NotFound)?;
 

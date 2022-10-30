@@ -888,14 +888,14 @@ impl QueuePair {
         let (wr_id, mut resp_rx) = self
             .event_listener
             .register_for_read(&get_lmr_inners(lms))?;
-        let len = lms.iter().map(|lm| lm.length()).sum();
+        let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_send(lms, wr_id, imm)?;
         resp_rx
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
             .result()
-            .map(|sz| assert_eq!(sz, len))
+            .map(|sz| debug!("post size: {sz}, mr len: {len}"))
             .map_err(Into::into)
     }
 
@@ -923,7 +923,7 @@ impl QueuePair {
         let (wr_id, mut resp_rx) = self
             .event_listener
             .register_for_write(&get_mut_lmr_inners(lms))?;
-        let len = lms.iter().map(|lm| lm.length()).sum();
+        let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_receive(lms, wr_id)?;
         resp_rx
             .recv()
@@ -931,7 +931,7 @@ impl QueuePair {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
             .result_with_imm()
             .map(|(sz, imm)| {
-                assert_eq!(sz, len);
+                debug!("post size: {sz}, mr len: {len}");
                 imm
             })
             .map_err(Into::into)
@@ -953,7 +953,7 @@ impl QueuePair {
         let (wr_id, mut resp_rx) = self
             .event_listener
             .register_for_write(&get_mut_lmr_inners(lms))?;
-        let len = lms.iter().map(|lm| lm.length()).sum();
+        let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_receive(lms, wr_id)?;
         func();
         resp_rx
@@ -962,7 +962,7 @@ impl QueuePair {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
             .result_with_imm()
             .map(|(sz, imm)| {
-                assert_eq!(sz, len);
+                debug!("receivede size {sz}, lms len {len}");
                 imm
             })
             .map_err(Into::into)
@@ -984,7 +984,7 @@ impl QueuePair {
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
             .result()
-            .map(|sz| assert_eq!(sz, len))
+            .map(|sz| debug!("post size: {sz}, mr len: {len}"))
             .map_err(Into::into)
     }
 
@@ -1009,7 +1009,7 @@ impl QueuePair {
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
             .result()
-            .map(|sz| assert_eq!(sz, len))
+            .map(|sz| debug!("post size: {sz}, mr len: {len}"))
             .map_err(Into::into)
     }
 
@@ -1176,7 +1176,8 @@ where
     }
 
     fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
-        wc.result().map(|sz| assert_eq!(sz, self.len))
+        wc.result()
+            .map(|sz| debug!("post size: {sz}, mr len: {}", self.len))
     }
 }
 /// Queue pair receive operation

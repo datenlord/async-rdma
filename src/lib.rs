@@ -981,6 +981,26 @@ impl RdmaBuilder {
         let _ = self.qp_attr.rq_attr.mtu(mtu);
         self
     }
+
+    /// Set the immediate data flag in `ibv_wc` of rdma device.
+    ///
+    /// This value is `3` as default for `Soft-RoCE`, and may be `2` for other devices.
+    #[inline]
+    pub fn set_imm_flag_in_wc(self, imm_flag: u32) -> io::Result<Self> {
+        use completion_queue::{IBV_WC_WITH_IMM, INIT_IMM_FLAG};
+        if INIT_IMM_FLAG.is_completed() {
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "IBV_WC_WITH_IMM is initialized or being initialized but has not yet completed,",
+            ))
+        } else {
+            // SAFETY: only init once before using it
+            INIT_IMM_FLAG.call_once(|| unsafe {
+                IBV_WC_WITH_IMM = imm_flag;
+            });
+            Ok(self)
+        }
+    }
 }
 
 impl Debug for RdmaBuilder {

@@ -7,13 +7,16 @@ use num_traits::FromPrimitive;
 use rdma_sys::{
     ibv_cq, ibv_create_cq, ibv_destroy_cq, ibv_poll_cq, ibv_req_notify_cq, ibv_wc, ibv_wc_status,
 };
-use std::{fmt::Debug, io, mem, ptr::NonNull};
+use std::{fmt::Debug, io, mem, ptr::NonNull, sync::Once};
 use thiserror::Error;
 use tracing::error;
 
 /// Indicator that `imm_data` is valid.
 /// Relevant for Receive Work Completions.
-static IBV_WC_WITH_IMM: u32 = 3;
+pub(crate) static mut IBV_WC_WITH_IMM: u32 = 3;
+
+/// Used to init `IBV_WC_WITH_IMM` only once.
+pub(crate) static INIT_IMM_FLAG: Once = Once::new();
 
 /// Minimum number of entries CQ will support
 pub(crate) const DEFAULT_CQ_SIZE: u32 = 16_u32;
@@ -171,7 +174,8 @@ impl WorkCompletion {
     pub(crate) fn result_with_imm(&self) -> Result<(usize, Option<u32>), WCError> {
         if self.inner_wc.status == ibv_wc_status::IBV_WC_SUCCESS {
             let len: usize = self.inner_wc.byte_len.cast();
-            if self.inner_wc.wc_flags == IBV_WC_WITH_IMM {
+            // SAFETY: will only be init once.
+            if self.inner_wc.wc_flags == unsafe { IBV_WC_WITH_IMM } {
                 // use union to get imm_data after check opcode.
                 Ok((
                     len,

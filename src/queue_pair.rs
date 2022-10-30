@@ -1,5 +1,6 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
+    context::Context,
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     event_listener::{EventListener, LmrInners},
     gid::Gid,
@@ -15,7 +16,7 @@ use crate::{
 use clippy_utilities::Cast;
 use derive_builder::Builder;
 use futures::{ready, Future, FutureExt};
-use getset::{Getters, Setters};
+use getset::{Getters, MutGetters, Setters};
 use parking_lot::RwLock;
 use rdma_sys::{
     ibv_access_flags, ibv_ah_attr, ibv_cq, ibv_destroy_qp, ibv_global_route, ibv_modify_qp,
@@ -43,9 +44,9 @@ pub(crate) static MAX_SEND_WR: u32 = 10;
 /// Maximum value of `recv_wr`
 pub(crate) static MAX_RECV_WR: u32 = 10;
 /// Maximum value of `send_sge`
-pub(crate) static MAX_SEND_SGE: u32 = 10;
+pub(crate) static MAX_SEND_SGE: u32 = 5;
 /// Maximum value of `recv_sge`
-pub(crate) static MAX_RECV_SGE: u32 = 10;
+pub(crate) static MAX_RECV_SGE: u32 = 5;
 /// Maximum value of `inline_data`
 pub(crate) static MAX_INLINE_DATA: u32 = 0;
 /// Default value of `sq_sig_all`
@@ -123,12 +124,45 @@ pub(crate) struct QueuePairCap {
     max_inline_data: u32,
 }
 
+impl QueuePairCap {
+    /// Check the attributes and return error if the preset values exceed the capabilities of
+    /// rdma device.
+    pub(crate) fn check_dev_cap(&self, ctx: &Context) -> io::Result<()> {
+        let cap_check = |attr_val: u32, dev_cap: i32, attr_name: &str| -> io::Result<()> {
+            let dev_cap: u32 = dev_cap.cast();
+            if attr_val > dev_cap {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "The value of {} is: {}, which exceeds the hardware capability: {}",
+                        attr_name, attr_val, dev_cap
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+
+        let dev_attr = ctx.get_dev_attr()?;
+
+        // `dev_attr.max_sge` and `dev_attr.max_sge_rd` may be different, and you can check
+        // this by running `ibv_devinfo -d <rdma_dev_name> -v` on your terminal.
+        // check it in more detail if your dev has this feature.
+        cap_check(self.max_recv_sge, dev_attr.max_sge, "max_recv_sge")?;
+        cap_check(self.max_send_sge, dev_attr.max_sge, "max_send_sge")?;
+        cap_check(self.max_recv_wr, dev_attr.max_qp_wr, "max_recv_wr")?;
+        cap_check(self.max_send_wr, dev_attr.max_qp_wr, "max_send_wr")?;
+        // TODO: check more attributes such as `max_srq_sge` ...
+        Ok(())
+    }
+}
+
 impl_from_buidler_error_for_another!(QueuePairCapBuilderError, QueuePairInitAttrBuilderError);
 
 impl_into_io_error!(QueuePairCapBuilderError);
 
 /// Describes the requested attributes of the newly created QP
-#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[derive(Debug, Clone, Copy, MutGetters, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
 #[getset(set, get = "pub")]
 pub(crate) struct QueuePairInitAttr {
@@ -149,6 +183,7 @@ pub(crate) struct QueuePairInitAttr {
         field(type = "QueuePairCapBuilder", build = "self.qp_cap.build()?"),
         setter(custom)
     )]
+    #[getset(get_mut = "pub")]
     qp_cap: QueuePairCap,
     // TODO: add high level enum wrapper
     /// Requested Transport Service Type of this QP:
@@ -1322,4 +1357,55 @@ pub(crate) fn builders_into_attrs(
     let send_attr = send_attr_builder.build()?;
     let recv_attr = recv_attr_builder.build()?;
     Ok((recv_attr, send_attr))
+}
+
+/// Test `LocalMr` APIs with multi-pd & multi-connection
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod dev_cap_check_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    fn recv_sge_cap_overrun() {
+        let ctx = Context::open(None, 1, 1).unwrap();
+        let cap = QueuePairCapBuilder::default()
+            .max_recv_sge(u32::MAX)
+            .build()
+            .unwrap();
+        cap.check_dev_cap(&ctx).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn send_sge_cap_overrun() {
+        let ctx = Context::open(None, 1, 1).unwrap();
+        let cap = QueuePairCapBuilder::default()
+            .max_send_sge(u32::MAX)
+            .build()
+            .unwrap();
+        cap.check_dev_cap(&ctx).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn recv_wr_cap_overrun() {
+        let ctx = Context::open(None, 1, 1).unwrap();
+        let cap = QueuePairCapBuilder::default()
+            .max_recv_wr(u32::MAX)
+            .build()
+            .unwrap();
+        cap.check_dev_cap(&ctx).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn send_wr_cap_overrun() {
+        let ctx = Context::open(None, 1, 1).unwrap();
+        let cap = QueuePairCapBuilder::default()
+            .max_send_wr(u32::MAX)
+            .build()
+            .unwrap();
+        cap.check_dev_cap(&ctx).unwrap();
+    }
 }

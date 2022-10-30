@@ -6,7 +6,8 @@ use crate::{
 };
 use clippy_utilities::Cast;
 use rdma_sys::{
-    ibv_close_device, ibv_context, ibv_gid, ibv_open_device, ibv_port_attr, ibv_query_gid,
+    ibv_close_device, ibv_context, ibv_device_attr, ibv_gid, ibv_open_device, ibv_port_attr,
+    ibv_query_gid,
 };
 use std::mem::MaybeUninit;
 use std::{fmt::Debug, io, ptr::NonNull, sync::Arc};
@@ -127,6 +128,20 @@ impl Context {
     #[allow(dead_code)] // TODO: provide related pub API to choose mtu
     pub(crate) fn get_active_mtu(&self) -> u32 {
         self.inner_port_attr.active_mtu
+    }
+
+    /// Get the info about rdma dev
+    pub(crate) fn get_dev_attr(&self) -> io::Result<ibv_device_attr> {
+        let mut attr = MaybeUninit::<ibv_device_attr>::uninit();
+        // SAFETY: ffi
+        let errno =
+            unsafe { rdma_sys::ibv_query_device(self.inner_ctx.as_ptr(), attr.as_mut_ptr()) };
+        if errno != 0_i32 {
+            return Err(log_ret_last_os_err_with_note("ibv_query_device failed"));
+        }
+
+        // SAFETY: ffi init
+        Ok(unsafe { attr.assume_init() })
     }
 }
 

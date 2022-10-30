@@ -1,5 +1,6 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
+    context::Context,
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     event_listener::{EventListener, LmrInners},
     gid::Gid,
@@ -15,7 +16,7 @@ use crate::{
 use clippy_utilities::Cast;
 use derive_builder::Builder;
 use futures::{ready, Future, FutureExt};
-use getset::{Getters, Setters};
+use getset::{Getters, MutGetters, Setters};
 use parking_lot::RwLock;
 use rdma_sys::{
     ibv_access_flags, ibv_ah_attr, ibv_cq, ibv_destroy_qp, ibv_global_route, ibv_modify_qp,
@@ -36,7 +37,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, Sleep},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Maximum value of `send_wr`
 pub(crate) static MAX_SEND_WR: u32 = 10;
@@ -123,12 +124,46 @@ pub(crate) struct QueuePairCap {
     max_inline_data: u32,
 }
 
+/// Reset cap attr and warn if `source` exceeds the dev `limit`.
+macro_rules! reset_if_exceeds {
+    ($source: expr, $limit: expr) => {
+        let limit: u32 = $limit.cast();
+        if *$source > limit {
+            warn!(
+                "{} is reset from {} to {}",
+                stringify!($source),
+                $source,
+                limit
+            );
+            *$source = limit;
+        }
+    };
+}
+
+impl QueuePairCap {
+    /// Check the capabilities of rdma dev and reset attributes if the preset value exceeds
+    /// the device limit.
+    pub(crate) fn check_and_reset_to_dev_limit(&mut self, ctx: &Context) -> io::Result<()> {
+        let dev_attr = ctx.get_dev_attr()?;
+
+        // `dev_attr.max_sge` and `dev_attr.max_sge_rd` may be different, and you can check
+        // this by running `ibv_devinfo -d <rdma_dev_name> -v` on your terminal.
+        // check it in more detail if your dev has this feature.
+        reset_if_exceeds!(&mut self.max_recv_wr, dev_attr.max_qp_wr);
+        reset_if_exceeds!(&mut self.max_send_wr, dev_attr.max_qp_wr);
+        reset_if_exceeds!(&mut self.max_recv_sge, dev_attr.max_sge);
+        reset_if_exceeds!(&mut self.max_send_sge, dev_attr.max_sge);
+        // TODO: check more attributes such as `max_srq_sge` ...
+        Ok(())
+    }
+}
+
 impl_from_buidler_error_for_another!(QueuePairCapBuilderError, QueuePairInitAttrBuilderError);
 
 impl_into_io_error!(QueuePairCapBuilderError);
 
 /// Describes the requested attributes of the newly created QP
-#[derive(Debug, Clone, Copy, Getters, Setters, Builder)]
+#[derive(Debug, Clone, Copy, MutGetters, Getters, Setters, Builder)]
 #[builder(derive(Debug, Copy))]
 #[getset(set, get = "pub")]
 pub(crate) struct QueuePairInitAttr {
@@ -149,6 +184,7 @@ pub(crate) struct QueuePairInitAttr {
         field(type = "QueuePairCapBuilder", build = "self.qp_cap.build()?"),
         setter(custom)
     )]
+    #[getset(get_mut = "pub")]
     qp_cap: QueuePairCap,
     // TODO: add high level enum wrapper
     /// Requested Transport Service Type of this QP:

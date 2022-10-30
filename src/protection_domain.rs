@@ -1,8 +1,11 @@
 use crate::{
     context::Context,
     error_utilities::{log_last_os_err, log_ret_last_os_err},
-    queue_pair::QueuePairBuilder,
+    event_listener::EventListener,
+    queue_pair::{QueuePair, QueuePairBuilder},
+    QueuePairInitAttrBuilder, QueuePairState,
 };
+use parking_lot::RwLock;
 use rdma_sys::{ibv_alloc_pd, ibv_dealloc_pd, ibv_pd};
 use std::{io, ptr::NonNull, sync::Arc};
 
@@ -36,6 +39,35 @@ impl ProtectionDomain {
     /// Create a queue pair builder
     pub(crate) fn create_queue_pair_builder(self: &Arc<Self>) -> QueuePairBuilder {
         QueuePairBuilder::default().pd(Arc::clone(self)).clone()
+    }
+
+    /// Create a queue pair
+    pub(crate) fn create_qp(
+        self: &Arc<Self>,
+        event_listener: Arc<EventListener>,
+        qp_init_attr: QueuePairInitAttrBuilder,
+        init_qp: bool,
+    ) -> io::Result<QueuePair> {
+        let mut attr = qp_init_attr.build()?;
+        attr.qp_cap_mut().check_and_reset_to_dev_limit(&self.ctx)?;
+
+        // SAFETY: ffi
+        let inner_qp =
+            NonNull::new(unsafe { rdma_sys::ibv_create_qp(self.as_ptr(), &mut attr.into()) })
+                .ok_or_else(log_ret_last_os_err)?;
+
+        let mut qp = self
+            .create_queue_pair_builder()
+            .event_listener(event_listener)
+            .inner_qp(inner_qp)
+            .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
+            .build()?;
+
+        if init_qp {
+            qp.modify_to_init(*attr.access(), *attr.port_num(), *attr.pkey_index())?;
+        }
+
+        Ok(qp)
     }
 }
 

@@ -169,7 +169,6 @@ use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use derive_builder::Builder;
 use enumflags2::BitFlags;
-use error_utilities::log_ret_last_os_err;
 use event_listener::EventListener;
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
@@ -178,11 +177,10 @@ pub use memory_region::{
 };
 pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;
-use parking_lot::RwLock;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairBuilder, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr,
-    SQAttrBuilder, DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
+    QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
+    DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -193,7 +191,7 @@ use rdma_sys::{
 use rmr_manager::DEFAULT_RMR_TIMEOUT;
 #[cfg(feature = "cm")]
 use std::ptr::null_mut;
-use std::{alloc::Layout, fmt::Debug, io, ptr::NonNull, sync::Arc, time::Duration};
+use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -1055,6 +1053,8 @@ async fn tcp_listen(
 #[cfg(feature = "cm")]
 fn cm_connect_helper(rdma: &mut Rdma, node: &str, service: &str) -> io::Result<()> {
     // SAFETY: POD FFI type
+
+    use error_utilities::log_ret_last_os_err;
     let mut hints = unsafe { std::mem::zeroed::<rdma_addrinfo>() };
     let mut info: *mut rdma_addrinfo = null_mut();
     hints.ai_port_space = rdma_port_space::RDMA_PS_TCP.cast();
@@ -1201,7 +1201,7 @@ impl Rdma {
         )?);
         let ec = ctx.create_event_channel()?;
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
-        let event_listener = EventListener::new(Arc::clone(&cq));
+        let event_listener = Arc::new(EventListener::new(Arc::clone(&cq)));
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(
             Arc::<ProtectionDomain>::clone(&pd),
@@ -1209,6 +1209,7 @@ impl Rdma {
         ));
 
         let _ = qp_attr.init_attr.send_cq(cq.as_ptr()).recv_cq(cq.as_ptr());
+
         let clone_attr = CloneAttrBuilder::default()
             .pd(Arc::clone(&pd))
             .qp_init_attr(qp_attr.init_attr)
@@ -1216,29 +1217,13 @@ impl Rdma {
             .rq_attr(qp_attr.rq_attr)
             .agent_attr(agent_attr)
             .build()?;
-        // SAFETY: ffi
-        let qp_init_attr = qp_attr.init_attr.clone().build()?;
-        let inner_qp =
-            NonNull::new(unsafe { rdma_sys::ibv_create_qp(pd.as_ptr(), &mut qp_init_attr.into()) })
-                .ok_or_else(log_ret_last_os_err)?;
 
-        let mut qp = pd
-            .create_queue_pair_builder()
-            .event_listener(Arc::new(event_listener))
-            .inner_qp(inner_qp)
-            .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
-            .build()?;
-
-        qp.modify_to_init(
-            *qp_init_attr.access(),
-            *qp_init_attr.port_num(),
-            *qp_init_attr.pkey_index(),
-        )?;
+        let qp = Arc::new(pd.create_qp(event_listener, qp_attr.init_attr, true)?);
 
         Ok(Self {
             ctx,
             pd,
-            qp: Arc::new(qp),
+            qp,
             agent: None,
             allocator,
             conn_type: qp_attr.conn_type,
@@ -1327,31 +1312,15 @@ impl Rdma {
 
     /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
     fn clone(&self) -> io::Result<Self> {
-        let qp_init_attr = self.clone_attr.qp_init_attr().build()?;
-
-        // SAFETY: ffi
-        let inner_qp = NonNull::new(unsafe {
-            rdma_sys::ibv_create_qp(self.pd.as_ptr(), &mut qp_init_attr.into())
-        })
-        .ok_or_else(log_ret_last_os_err)?;
-
-        let mut qp = QueuePairBuilder::default()
-            .pd(Arc::clone(self.clone_attr.pd()))
-            .event_listener(Arc::clone(self.qp.event_listener()))
-            .inner_qp(inner_qp)
-            .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
-            .build()?;
-
-        qp.modify_to_init(
-            *qp_init_attr.access(),
-            *qp_init_attr.port_num(),
-            *qp_init_attr.pkey_index(),
-        )?;
-
+        let qp = Arc::new(self.clone_attr.pd.create_qp(
+            Arc::clone(self.qp.event_listener()),
+            self.clone_attr.qp_init_attr,
+            true,
+        )?);
         Ok(Self {
             ctx: Arc::clone(&self.ctx),
             pd: Arc::clone(self.clone_attr.pd()),
-            qp: Arc::new(qp),
+            qp,
             agent: None,
             allocator: Arc::clone(&self.allocator),
             conn_type: self.conn_type,

@@ -208,9 +208,6 @@ pub(crate) struct QueuePairInitAttr {
     /// be verified within the Primary path.
     #[builder(default = "DEFAULT_PKEY_INDEX")]
     pkey_index: u16,
-    /// The local physical port that the packets will be sent from
-    #[builder(default = "DEFAULT_PORT_NUM")]
-    port_num: u8,
 }
 
 impl_into_io_error!(QueuePairInitAttrBuilderError);
@@ -219,11 +216,6 @@ impl QueuePairInitAttrBuilder {
     /// Get sub builder's mutable reference
     pub(crate) fn qp_cap(&mut self) -> &mut QueuePairCapBuilder {
         &mut self.qp_cap
-    }
-
-    /// Get `port_num` of this buidler
-    pub(crate) fn get_port_num(&self) -> Option<u8> {
-        self.port_num
     }
 }
 
@@ -313,6 +305,11 @@ impl AddressHandlerBuilder {
     pub(crate) fn grh(&mut self) -> &mut GlobalRouteHeaderBuilder {
         &mut self.grh
     }
+
+    /// Get `port_num` of this buidler
+    pub(crate) fn get_port_num(&self) -> Option<u8> {
+        self.port_num
+    }
 }
 
 impl_into_io_error!(SQAttrBuilderError);
@@ -379,13 +376,6 @@ impl From<GlobalRouteHeader> for ibv_global_route {
 }
 
 impl_from_buidler_error_for_another!(GlobalRouteHeaderBuilderError, AddressHandlerBuilderError);
-
-impl GlobalRouteHeaderBuilder {
-    /// Get source gid index of this buidler
-    pub(crate) fn get_sgid_index(&self) -> Option<u8> {
-        self.sgid_index
-    }
-}
 
 /// The path MTU (Maximum Transfer Unit) i.e. the maximum payload size of a packet that
 /// can be transferred in the path. For UC and RC QPs, when needed, the RDMA device will
@@ -460,6 +450,7 @@ impl RQAttrBuilder {
     pub(crate) fn address_handler(&mut self) -> &mut AddressHandlerBuilder {
         &mut self.address_handler
     }
+
     /// Reset the infomation of remote end
     pub(crate) fn reset_remote_info(&mut self, remote: &QueuePairEndpoint) {
         let _ = self
@@ -468,6 +459,21 @@ impl RQAttrBuilder {
             .dest_lid(*remote.lid())
             .grh()
             .dgid(*remote.gid());
+    }
+
+    /// Get `port_num` of this buidler
+    pub(crate) fn get_port_num(&self) -> u8 {
+        self.address_handler
+            .get_port_num()
+            .unwrap_or(DEFAULT_PORT_NUM)
+    }
+
+    /// Get source gid index of this buidler
+    pub(crate) fn get_sgid_index(&self) -> u8 {
+        self.address_handler
+            .grh
+            .sgid_index
+            .unwrap_or_else(|| DEFAULT_GID_INDEX.cast())
     }
 }
 

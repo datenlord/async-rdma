@@ -180,7 +180,6 @@ use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
     QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
-    DEFAULT_GID_INDEX, DEFAULT_PORT_NUM,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -645,7 +644,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_port_num(mut self, port_num: u8) -> Self {
-        let _ = self.qp_attr.init_attr.port_num(port_num);
+        let _ = self.qp_attr.rq_attr.address_handler().port_num(port_num);
         self
     }
 
@@ -1213,14 +1212,8 @@ impl Rdma {
     ) -> io::Result<Self> {
         let ctx = Arc::new(Context::open(
             dev_attr.dev_name.as_deref(),
-            qp_attr.init_attr.get_port_num().unwrap_or(DEFAULT_PORT_NUM),
-            qp_attr
-                .rq_attr
-                .address_handler()
-                .grh()
-                .get_sgid_index()
-                .unwrap_or_else(|| DEFAULT_GID_INDEX.cast())
-                .cast(),
+            qp_attr.rq_attr.get_port_num(),
+            qp_attr.rq_attr.get_sgid_index().cast(),
         )?);
         let ec = ctx.create_event_channel()?;
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
@@ -1241,7 +1234,12 @@ impl Rdma {
             .agent_attr(agent_attr)
             .build()?;
 
-        let qp = Arc::new(pd.create_qp(event_listener, qp_attr.init_attr, true)?);
+        let qp = Arc::new(pd.create_qp(
+            event_listener,
+            qp_attr.init_attr,
+            qp_attr.rq_attr.get_port_num(),
+            true,
+        )?);
 
         Ok(Self {
             ctx,
@@ -1338,6 +1336,7 @@ impl Rdma {
         let qp = Arc::new(self.clone_attr.pd.create_qp(
             Arc::clone(self.qp.event_listener()),
             self.clone_attr.qp_init_attr,
+            self.clone_attr.rq_attr.get_port_num(),
             true,
         )?);
         Ok(Self {
@@ -3583,7 +3582,7 @@ impl Rdma {
     #[inline]
     #[must_use]
     pub fn set_new_port_num(mut self, port_num: u8) -> Self {
-        let _ = self.clone_attr.qp_init_attr.port_num(port_num);
+        let _ = self.clone_attr.rq_attr.address_handler().port_num(port_num);
         self
     }
 

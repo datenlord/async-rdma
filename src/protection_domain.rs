@@ -46,6 +46,7 @@ impl ProtectionDomain {
         self: &Arc<Self>,
         event_listener: Arc<EventListener>,
         qp_init_attr: QueuePairInitAttrBuilder,
+        port_num: u8,
         init_qp: bool,
     ) -> io::Result<QueuePair> {
         let mut attr = qp_init_attr.build()?;
@@ -64,7 +65,7 @@ impl ProtectionDomain {
             .build()?;
 
         if init_qp {
-            qp.modify_to_init(*attr.access(), *attr.port_num(), *attr.pkey_index())?;
+            qp.modify_to_init(*attr.access(), port_num, *attr.pkey_index())?;
         }
 
         Ok(qp)

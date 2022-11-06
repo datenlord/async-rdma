@@ -50,7 +50,7 @@ impl ProtectionDomain {
         init_qp: bool,
     ) -> io::Result<QueuePair> {
         let mut attr = qp_init_attr.build()?;
-        attr.qp_cap_mut().check_dev_cap(&self.ctx)?;
+        attr.qp_cap_mut().check_dev_qp_cap(&self.ctx)?;
 
         // SAFETY: ffi
         let inner_qp =

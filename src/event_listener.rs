@@ -84,7 +84,7 @@ impl EventListener {
         cc_event_time: Duration,
     ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn(async move {
-            let mut wc_buf: Vec<WorkCompletion> = Vec::with_capacity(cq.max_cqe().cast());
+            let mut wc_buf: Vec<WorkCompletion> = Vec::with_capacity((*cq.max_poll_cqe()).cast());
             let async_fd = match cq.event_channel().async_fd() {
                 Ok(fd) => fd,
                 Err(e) => {

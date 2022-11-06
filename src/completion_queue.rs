@@ -19,10 +19,10 @@ pub(crate) static mut IBV_WC_WITH_IMM: u32 = 3;
 pub(crate) static INIT_IMM_FLAG: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
 
 /// Minimum number of entries CQ will support
-pub(crate) const DEFAULT_CQ_SIZE: u32 = 16_u32;
+pub(crate) const DEFAULT_CQ_SIZE: u32 = 1024_u32;
 
 /// Default maximum number of completion queue entries (CQE) to poll at a time.
-pub(crate) static DEFAULT_MAX_CQE: i32 = 4_i32;
+pub(crate) static DEFAULT_MAX_CQE: i32 = 32_i32;
 
 /// Complete Queue Structure
 #[derive(Debug)]

@@ -169,7 +169,7 @@ use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use derive_builder::Builder;
 use enumflags2::BitFlags;
-use event_listener::EventListener;
+use event_listener::{EventListener, DEFAULT_CC_EVENT_TIMEOUT};
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
     remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
@@ -296,6 +296,14 @@ pub(crate) struct AgentInitAttr {
     max_message_length: usize,
     /// Max access permission for remote mr requests
     max_rmr_access: ibv_access_flags,
+    /// The timeout value for event listener to wait for the CC's notification.
+    ///
+    /// The listener will wait for the CC's notification to poll the related CQ until timeout.
+    /// After timeout, listener will poll the CQ to make sure no cqe there, and wait again.
+    ///
+    /// For the devices or drivers not support notification mechanism, this value will be the polling
+    /// period, and as a protective measure in other cases.
+    cc_event_timeout: Duration,
 }
 
 impl Default for AgentInitAttr {
@@ -304,6 +312,7 @@ impl Default for AgentInitAttr {
         Self {
             max_message_length: MAX_MSG_LEN,
             max_rmr_access: *DEFAULT_ACCESS,
+            cc_event_timeout: DEFAULT_CC_EVENT_TIMEOUT,
         }
     }
 }
@@ -1003,6 +1012,23 @@ impl RdmaBuilder {
             Ok(self)
         }
     }
+
+    /// Set the timeout value for event listener to wait for the notification of completion channel.
+    ///
+    /// When a completion queue entry (CQE) is placed on the CQ, a completion event will be sent to
+    /// the completion channel (CC) associated with the CQ.
+    ///
+    /// The listener will wait for the CC's notification to poll the related CQ until timeout.
+    /// After timeout, listener will poll the CQ to make sure no cqe there, and wait again.
+    ///
+    /// For the devices or drivers not support notification mechanism, this value will be the polling
+    /// period, and as a protective measure in other cases.
+    #[inline]
+    #[must_use]
+    pub fn set_cc_evnet_timeout(mut self, timeout: Duration) -> Self {
+        self.agent_attr.cc_event_timeout = timeout;
+        self
+    }
 }
 
 impl Debug for RdmaBuilder {
@@ -1217,7 +1243,10 @@ impl Rdma {
         )?);
         let ec = ctx.create_event_channel()?;
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
-        let event_listener = Arc::new(EventListener::new(Arc::clone(&cq)));
+        let event_listener = Arc::new(EventListener::new(
+            Arc::clone(&cq),
+            agent_attr.cc_event_timeout,
+        ));
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(
             Arc::<ProtectionDomain>::clone(&pd),

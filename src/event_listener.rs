@@ -30,8 +30,8 @@ pub(crate) type LmrGuards = Vec<ArcRwLockGuard>;
 /// Map holding the Request Id to `Responder`
 type ReqMap = Arc<parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>>;
 
-/// Event listener timeout, default is 1 sec
-static EVENT_LISTENER_TIMEOUT: Duration = Duration::from_secs(1);
+/// The default timeout value for event listener to wait for the CC's notification.
+pub(crate) static DEFAULT_CC_EVENT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Time to wait for being canceled.
 /// Only used in `cancel_safety` test.
@@ -47,25 +47,42 @@ pub(crate) struct EventListener {
     req_map: ReqMap,
     /// The polling thread task handle
     _poller_handle: tokio::task::JoinHandle<()>,
+    /// The timeout value for event listener to wait for the CC's notification.
+    ///
+    /// The listener will wait for the CC's notification to poll the related CQ until timeout.
+    /// After timeout, listener will poll the CQ to make sure no cqe there, and wait again.
+    ///
+    /// For the devices or drivers not support notification mechanism, this value will be the polling
+    /// period, and as a protective measure in other cases.
+    _cc_event_timeout: Duration,
 }
 
 impl EventListener {
     /// Create a `EventListner`
-    pub(crate) fn new(cq: Arc<CompletionQueue>) -> EventListener {
+    pub(crate) fn new(cq: Arc<CompletionQueue>, cc_event_timeout: Duration) -> EventListener {
         let req_map = ReqMap::default();
         let req_map_move = Arc::<
             parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>,
         >::clone(&req_map);
         Self {
             req_map,
-            _poller_handle: Self::start(Arc::<CompletionQueue>::clone(&cq), req_map_move),
+            _poller_handle: Self::start(
+                Arc::<CompletionQueue>::clone(&cq),
+                req_map_move,
+                cc_event_timeout,
+            ),
             cq,
+            _cc_event_timeout: cc_event_timeout,
         }
     }
 
     /// Start the polling task
     #[allow(clippy::unreachable)]
-    fn start(cq: Arc<CompletionQueue>, req_map: ReqMap) -> tokio::task::JoinHandle<()> {
+    fn start(
+        cq: Arc<CompletionQueue>,
+        req_map: ReqMap,
+        cc_event_time: Duration,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn(async move {
             let mut wc_buf: Vec<WorkCompletion> = Vec::with_capacity(cq.max_cqe().cast());
             let async_fd = match cq.event_channel().async_fd() {
@@ -77,7 +94,7 @@ impl EventListener {
             };
 
             loop {
-                if let Ok(readable) = timeout(EVENT_LISTENER_TIMEOUT, async_fd.readable()).await {
+                if let Ok(readable) = timeout(cc_event_time, async_fd.readable()).await {
                     match readable {
                         Ok(mut readable) => {
                             readable.clear_ready();

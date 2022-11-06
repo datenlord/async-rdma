@@ -1,7 +1,11 @@
 use crate::{
-    context::Context, error_utilities::log_ret_last_os_err, event_channel::EventChannel, id,
+    context::{check_dev_cap, Context},
+    error_utilities::log_ret_last_os_err,
+    event_channel::EventChannel,
+    id,
 };
 use clippy_utilities::Cast;
+use getset::Getters;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use rdma_sys::{
@@ -25,7 +29,7 @@ pub(crate) const DEFAULT_CQ_SIZE: u32 = 1024_u32;
 pub(crate) static DEFAULT_MAX_CQE: i32 = 32_i32;
 
 /// Complete Queue Structure
-#[derive(Debug)]
+#[derive(Debug, Getters)]
 pub(crate) struct CompletionQueue {
     /// Event Channel
     ec: EventChannel,
@@ -33,18 +37,14 @@ pub(crate) struct CompletionQueue {
     inner_cq: NonNull<ibv_cq>,
     /// Maximum number of completion queue entries (CQE) to poll at a time.
     /// The higher the concurrency, the bigger this value should be and more memory allocated at a time.
-    max_cqe: i32,
+    #[get = "pub"]
+    max_poll_cqe: i32,
 }
 
 impl CompletionQueue {
     /// Get the internal cq ptr
     pub(crate) const fn as_ptr(&self) -> *mut ibv_cq {
         self.inner_cq.as_ptr()
-    }
-
-    /// Get `max_cqe`
-    pub(crate) fn max_cqe(&self) -> i32 {
-        self.max_cqe
     }
 
     /// Create a new completion queue and bind to the event channel `ec`, `cq_size` is the buffer
@@ -59,10 +59,21 @@ impl CompletionQueue {
         ctx: &Context,
         cq_size: u32,
         ec: EventChannel,
-        max_cqe: i32,
+        max_poll_cqe: i32,
     ) -> io::Result<Self> {
+        if max_poll_cqe > cq_size.cast() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_poll_cqe should be smaller than cq_size",
+            ));
+        }
+
+        // check device cap
+        let dev_attr = ctx.dev_attr();
+        check_dev_cap(&cq_size, &dev_attr.max_cqe.cast(), "max_cqe")?;
+        // TODO: add cq number(max_cq) check
+
         // SAFETY: ffi
-        // TODO: check safety
         let inner_cq = NonNull::new(unsafe {
             ibv_create_cq(
                 ctx.as_ptr(),
@@ -76,7 +87,7 @@ impl CompletionQueue {
         Ok(Self {
             ec,
             inner_cq,
-            max_cqe,
+            max_poll_cqe,
         })
     }
 
@@ -96,12 +107,12 @@ impl CompletionQueue {
 
     /// Poll work completions from CQ up to `DEFAULT_CQ_SIZE` at a time
     pub(crate) fn poll_cq_multiple(&self, wc_buf: &mut Vec<WorkCompletion>) -> io::Result<()> {
-        if wc_buf.capacity() < self.max_cqe.cast() {
+        if wc_buf.capacity() < self.max_poll_cqe.cast() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "wc_buf is not big enough, {} required and currently {}",
-                    self.max_cqe,
+                    self.max_poll_cqe,
                     wc_buf.capacity()
                 ),
             ));
@@ -109,7 +120,7 @@ impl CompletionQueue {
         // SAFETY: ffi
         // TODO: check safety
         let cqe_num =
-            unsafe { ibv_poll_cq(self.as_ptr(), self.max_cqe, wc_buf.as_mut_ptr().cast()) };
+            unsafe { ibv_poll_cq(self.as_ptr(), self.max_poll_cqe, wc_buf.as_mut_ptr().cast()) };
         if cqe_num > 0_i32 {
             // this buffer will be used by RDMA NIC and it's len will not increase when NIC push data into it,
             // so we need set it's len manually.

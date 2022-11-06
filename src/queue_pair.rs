@@ -1,6 +1,6 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
-    context::Context,
+    context::{check_dev_cap, Context},
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     event_listener::{EventListener, LmrInners},
     gid::Gid,
@@ -127,31 +127,15 @@ pub(crate) struct QueuePairCap {
 impl QueuePairCap {
     /// Check the attributes and return error if the preset values exceed the capabilities of
     /// rdma device.
-    pub(crate) fn check_dev_cap(&self, ctx: &Context) -> io::Result<()> {
-        let cap_check = |attr_val: u32, dev_cap: i32, attr_name: &str| -> io::Result<()> {
-            let dev_cap: u32 = dev_cap.cast();
-            if attr_val > dev_cap {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "The value of {} is: {}, which exceeds the hardware capability: {}",
-                        attr_name, attr_val, dev_cap
-                    ),
-                ))
-            } else {
-                Ok(())
-            }
-        };
-
-        let dev_attr = ctx.get_dev_attr()?;
-
+    pub(crate) fn check_dev_qp_cap(&self, ctx: &Context) -> io::Result<()> {
+        let dev_attr = ctx.dev_attr();
         // `dev_attr.max_sge` and `dev_attr.max_sge_rd` may be different, and you can check
         // this by running `ibv_devinfo -d <rdma_dev_name> -v` on your terminal.
         // check it in more detail if your dev has this feature.
-        cap_check(self.max_recv_sge, dev_attr.max_sge, "max_recv_sge")?;
-        cap_check(self.max_send_sge, dev_attr.max_sge, "max_send_sge")?;
-        cap_check(self.max_recv_wr, dev_attr.max_qp_wr, "max_recv_wr")?;
-        cap_check(self.max_send_wr, dev_attr.max_qp_wr, "max_send_wr")?;
+        check_dev_cap(&self.max_recv_sge, &dev_attr.max_sge.cast(), "max_recv_sge")?;
+        check_dev_cap(&self.max_send_sge, &dev_attr.max_sge.cast(), "max_send_sge")?;
+        check_dev_cap(&self.max_recv_wr, &dev_attr.max_qp_wr.cast(), "max_recv_wr")?;
+        check_dev_cap(&self.max_send_wr, &dev_attr.max_qp_wr.cast(), "max_send_wr")?;
         // TODO: check more attributes such as `max_srq_sge` ...
         Ok(())
     }
@@ -612,7 +596,7 @@ impl QueuePair {
             // TODO: check safety
             qp_num: unsafe { (*self.as_ptr()).qp_num },
             lid: self.pd.ctx.get_lid(),
-            gid: self.pd.ctx.get_gid(),
+            gid: *self.pd.ctx.gid(),
         }
     }
 
@@ -1379,7 +1363,7 @@ mod dev_cap_check_tests {
             .max_recv_sge(u32::MAX)
             .build()
             .unwrap();
-        cap.check_dev_cap(&ctx).unwrap();
+        cap.check_dev_qp_cap(&ctx).unwrap();
     }
 
     #[test]
@@ -1390,7 +1374,7 @@ mod dev_cap_check_tests {
             .max_send_sge(u32::MAX)
             .build()
             .unwrap();
-        cap.check_dev_cap(&ctx).unwrap();
+        cap.check_dev_qp_cap(&ctx).unwrap();
     }
 
     #[test]
@@ -1401,7 +1385,7 @@ mod dev_cap_check_tests {
             .max_recv_wr(u32::MAX)
             .build()
             .unwrap();
-        cap.check_dev_cap(&ctx).unwrap();
+        cap.check_dev_qp_cap(&ctx).unwrap();
     }
 
     #[test]
@@ -1412,6 +1396,6 @@ mod dev_cap_check_tests {
             .max_send_wr(u32::MAX)
             .build()
             .unwrap();
-        cap.check_dev_cap(&ctx).unwrap();
+        cap.check_dev_qp_cap(&ctx).unwrap();
     }
 }

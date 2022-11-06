@@ -5,6 +5,7 @@ use crate::{
     protection_domain::ProtectionDomain,
 };
 use clippy_utilities::Cast;
+use getset::Getters;
 use rdma_sys::{
     ibv_close_device, ibv_context, ibv_device_attr, ibv_gid, ibv_open_device, ibv_port_attr,
     ibv_query_gid,
@@ -13,13 +14,18 @@ use std::mem::MaybeUninit;
 use std::{fmt::Debug, io, ptr::NonNull, sync::Arc};
 
 /// RDMA device context
+#[derive(Getters)]
 pub(crate) struct Context {
     /// internal ibv context
     inner_ctx: NonNull<ibv_context>,
     /// ibv port attribute
     inner_port_attr: ibv_port_attr,
     /// Gid
+    #[get = "pub"]
     gid: Gid,
+    /// Device attributes
+    #[get = "pub"]
+    dev_attr: ibv_device_attr,
 }
 
 impl Debug for Context {
@@ -71,9 +77,9 @@ impl Context {
             let mut gid = MaybeUninit::<ibv_gid>::uninit();
             let gid_index = gid_index.cast();
             // SAFETY: ffi
-            let errno =
-                unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index, gid.as_mut_ptr()) };
-            if errno != 0_i32 {
+            if unsafe { ibv_query_gid(inner_ctx.as_ptr(), port_num, gid_index, gid.as_mut_ptr()) }
+                != 0_i32
+            {
                 return Err(log_ret_last_os_err_with_note("ibv_query_gid failed"));
             }
             // SAFETY: ffi init
@@ -82,16 +88,26 @@ impl Context {
 
         // SAFETY: POD FFI type
         let mut inner_port_attr = unsafe { std::mem::zeroed() };
-        let errno = unsafe {
+        if unsafe {
             rdma_sys::___ibv_query_port(inner_ctx.as_ptr(), port_num, &mut inner_port_attr)
-        };
-        if errno != 0_i32 {
+        } != 0_i32
+        {
             return Err(log_ret_last_os_err_with_note("ibv_query_port failed"));
         }
+
+        let mut dev_attr = MaybeUninit::<ibv_device_attr>::uninit();
+        // SAFETY: ffi
+        if unsafe { rdma_sys::ibv_query_device(inner_ctx.as_ptr(), dev_attr.as_mut_ptr()) } != 0_i32
+        {
+            return Err(log_ret_last_os_err_with_note("ibv_query_device failed"));
+        }
+
         Ok(Context {
             inner_ctx,
             inner_port_attr,
             gid,
+            // SAFETY: ffi init
+            dev_attr: unsafe { dev_attr.assume_init() },
         })
     }
 
@@ -114,10 +130,6 @@ impl Context {
     pub(crate) fn create_protection_domain(self: &Arc<Self>) -> io::Result<ProtectionDomain> {
         ProtectionDomain::create(self)
     }
-    /// Get port Lid
-    pub(crate) fn get_gid(&self) -> Gid {
-        self.gid
-    }
 
     /// Get port Lid
     pub(crate) fn get_lid(&self) -> u16 {
@@ -129,19 +141,24 @@ impl Context {
     pub(crate) fn get_active_mtu(&self) -> u32 {
         self.inner_port_attr.active_mtu
     }
+}
 
-    /// Get the info about rdma dev
-    pub(crate) fn get_dev_attr(&self) -> io::Result<ibv_device_attr> {
-        let mut attr = MaybeUninit::<ibv_device_attr>::uninit();
-        // SAFETY: ffi
-        let errno =
-            unsafe { rdma_sys::ibv_query_device(self.inner_ctx.as_ptr(), attr.as_mut_ptr()) };
-        if errno != 0_i32 {
-            return Err(log_ret_last_os_err_with_note("ibv_query_device failed"));
-        }
-
-        // SAFETY: ffi init
-        Ok(unsafe { attr.assume_init() })
+/// Check if the device capability meets the requirement of `attr_val`.
+pub(crate) fn check_dev_cap<T: PartialOrd + std::fmt::Display>(
+    attr_val: &T,
+    dev_cap: &T,
+    attr_name: &str,
+) -> io::Result<()> {
+    if attr_val > dev_cap {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "The value of {} is: {}, which exceeds the hardware capability: {}",
+                attr_name, attr_val, dev_cap
+            ),
+        ))
+    } else {
+        Ok(())
     }
 }
 

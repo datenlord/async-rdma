@@ -169,7 +169,8 @@ use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
 use derive_builder::Builder;
 use enumflags2::BitFlags;
-use event_listener::{EventListener, DEFAULT_CC_EVENT_TIMEOUT};
+use event_listener::{EventListener, PollingTriggerInput, DEFAULT_CC_EVENT_TIMEOUT};
+pub use event_listener::{ManualTrigger, PollingTriggerType};
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
     remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
@@ -194,7 +195,7 @@ use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::Mutex,
+    sync::{mpsc, Mutex},
 };
 use tracing::debug;
 
@@ -304,6 +305,8 @@ pub(crate) struct AgentInitAttr {
     /// For the devices or drivers not support notification mechanism, this value will be the polling
     /// period, and as a protective measure in other cases.
     cc_event_timeout: Duration,
+    /// The type of the `PollingTrigger`
+    pt_type: PollingTriggerType,
 }
 
 impl Default for AgentInitAttr {
@@ -313,6 +316,7 @@ impl Default for AgentInitAttr {
             max_message_length: MAX_MSG_LEN,
             max_rmr_access: *DEFAULT_ACCESS,
             cc_event_timeout: DEFAULT_CC_EVENT_TIMEOUT,
+            pt_type: PollingTriggerType::default(),
         }
     }
 }
@@ -1029,6 +1033,21 @@ impl RdmaBuilder {
         self.agent_attr.cc_event_timeout = timeout;
         self
     }
+
+    /// Set the polling trigger type of cq. Used with `Rdma.poll()` and `Rmda.get_manual_trigger()`.
+    ///
+    /// When a completion queue entry (CQE) is placed on the CQ, a completion event will be sent to
+    /// the completion channel (CC) associated with the CQ.
+    ///
+    /// As default(`PollingTriggerType::AsyncFd`), the listener will wait for the CC's notification to
+    /// poll the related CQ. If you want to ignore the notification and poll by yourself, you can input
+    /// `pt_type` as `PollingTriggerType::Channel` and call `Rdma.poll()` to poll the CQ.
+    #[inline]
+    #[must_use]
+    pub fn set_polling_trigger(mut self, pt_type: PollingTriggerType) -> Self {
+        self.agent_attr.pt_type = pt_type;
+        self
+    }
 }
 
 impl Debug for RdmaBuilder {
@@ -1225,6 +1244,8 @@ pub struct Rdma {
     raw: bool,
     /// Attributes for creating new `Rdma`s through `clone`
     clone_attr: CloneAttr,
+    /// The tx end of polling trigger
+    trigger_tx: Option<mpsc::Sender<()>>,
 }
 
 impl Rdma {
@@ -1243,10 +1264,21 @@ impl Rdma {
         )?);
         let ec = ctx.create_event_channel()?;
         let cq = Arc::new(ctx.create_completion_queue(cq_attr.cq_size, ec, cq_attr.max_cqe)?);
+
+        let (pt_input, trigger_tx) = match agent_attr.pt_type {
+            PollingTriggerType::Automatic => (PollingTriggerInput::AsyncFd(Arc::clone(&cq)), None),
+            PollingTriggerType::Manual => {
+                let (tx, rx) = mpsc::channel(2);
+                (PollingTriggerInput::Channel(rx), Some(tx))
+            }
+        };
+
         let event_listener = Arc::new(EventListener::new(
             Arc::clone(&cq),
             agent_attr.cc_event_timeout,
+            pt_input,
         ));
+
         let pd = Arc::new(ctx.create_protection_domain()?);
         let allocator = Arc::new(MrAllocator::new(
             Arc::<ProtectionDomain>::clone(&pd),
@@ -1279,6 +1311,7 @@ impl Rdma {
             conn_type: qp_attr.conn_type,
             raw: qp_attr.raw,
             clone_attr,
+            trigger_tx,
         })
     }
 
@@ -1377,6 +1410,7 @@ impl Rdma {
             conn_type: self.conn_type,
             raw: self.raw,
             clone_attr: self.clone_attr.clone(),
+            trigger_tx: self.trigger_tx.clone(),
         })
     }
 
@@ -3769,6 +3803,171 @@ impl Rdma {
         let recv_attr = self.clone_attr.rq_attr.build()?;
         let send_attr = self.clone_attr.sq_attr.build()?;
         Ok((recv_attr, send_attr))
+    }
+
+    /// Get the tx end of polling trigger
+    fn get_poll_trigger_tx(&self) -> io::Result<&mpsc::Sender<()>> {
+        self.trigger_tx
+            .as_ref()
+            .ok_or_else(|| match *self.qp.event_listener().pt_type() {
+                PollingTriggerType::Automatic => io::Error::new(
+                    io::ErrorKind::Other,
+                    "this method can only used with PollingTriggerType::Manual",
+                ),
+                PollingTriggerType::Manual => io::Error::new(
+                    io::ErrorKind::Other,
+                    "this is a bug, trigger_tx is not initialized",
+                ),
+            })
+    }
+
+    /// User driven poll. Used with `RdmaBuilder.set_polling_trigger()`.
+    /// See also `Rdma.get_manual_trigger()`.
+    ///
+    /// If you want to control CQ polling by yourself manually, you can set `PollingTriggerType::Manual`
+    /// using `RdmaBuilder.set_polling_trigger()`. Then all async RDMA operations will not complete
+    /// until you poll.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use minstant::Instant;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     sync::Arc,
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     const POLLING_INTERVAL: Duration = Duration::from_millis(100);
+    ///     let rdma = Arc::new(RdmaBuilder::default()
+    ///         .set_polling_trigger(async_rdma::PollingTriggerType::Manual)
+    ///         .set_cc_evnet_timeout(Duration::from_secs(10))
+    ///         .connect(addr)
+    ///         .await
+    ///         .unwrap());
+    ///
+    ///     let rdma_trigger = rdma.clone();
+    ///     // polling task
+    ///     let _trigger_handle = tokio::spawn(async move {
+    ///         loop {
+    ///             tokio::time::sleep(POLLING_INTERVAL).await;
+    ///             rdma_trigger.poll().await.unwrap();
+    ///         }
+    ///     });
+    ///
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    ///     let instant = Instant::now();
+    ///     rdma.send(&lmr).await?;
+    ///     assert!(instant.elapsed() >= POLLING_INTERVAL);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let lmr = rdma.receive().await?;
+    ///     let data = *lmr.as_slice();
+    ///     assert_eq!(data, [1_u8; 8]);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    ///
+    /// ```
+    #[inline]
+    pub async fn poll(&self) -> io::Result<()> {
+        self.get_poll_trigger_tx()?.send(()).await.map_err(|_e| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "this is a bug, receiver is closed",
+            )
+        })
+    }
+
+    /// Get tx end of channel polling trigger.
+    ///
+    /// You can send a `()` message through tx like to trigger a polling like `Rdma.poll()`.
+    /// This API is more convenient and flexible than `Rdma.poll()`, becasue you can clone more than
+    /// one tx and send them to other threads or tasks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, RdmaBuilder};
+    /// use minstant::Instant;
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     io::{self, Write},
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration,
+    /// };
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     const POLLING_INTERVAL: Duration = Duration::from_millis(100);
+    ///     let rdma = RdmaBuilder::default()
+    ///         .set_polling_trigger(async_rdma::PollingTriggerType::Manual)
+    ///         .set_cc_evnet_timeout(Duration::from_secs(10))
+    ///         .connect(addr)
+    ///         .await
+    ///         .unwrap();
+    ///
+    ///     let trigger = rdma.get_manual_trigger().unwrap();
+    ///     // polling task
+    ///     let _trigger_handle = tokio::spawn(async move {
+    ///         loop {
+    ///             tokio::time::sleep(POLLING_INTERVAL).await;
+    ///             trigger.pull().await.unwrap();
+    ///         }
+    ///     });
+    ///
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    ///     let instant = Instant::now();
+    ///     rdma.send(&lmr).await?;
+    ///     assert!(instant.elapsed() >= POLLING_INTERVAL);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = RdmaBuilder::default().listen(addr).await?;
+    ///     let lmr = rdma.receive().await?;
+    ///     let data = *lmr.as_slice();
+    ///     assert_eq!(data, [1_u8; 8]);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    ///
+    /// ```
+    #[inline]
+    pub fn get_manual_trigger(&self) -> io::Result<ManualTrigger> {
+        Ok(ManualTrigger(self.get_poll_trigger_tx()?.clone()))
     }
 }
 

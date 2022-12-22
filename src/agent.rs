@@ -1,4 +1,6 @@
+use crate::context::Context;
 use crate::hashmap_extension::HashMapExtension;
+use crate::ibv_event_listener::IbvEventListener;
 use crate::queue_pair::MAX_RECV_WR;
 use crate::rmr_manager::RemoteMrManager;
 use crate::RemoteMrReadAccess;
@@ -13,6 +15,7 @@ use crate::{
     queue_pair::QueuePair,
 };
 use clippy_utilities::Cast;
+use getset::Getters;
 use rdma_sys::ibv_access_flags;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,7 +46,7 @@ static RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) static MAX_MSG_LEN: usize = 512;
 
 /// An agent for handling the dirty rdma request and async events
-#[derive(Debug)]
+#[derive(Debug, Getters)]
 pub(crate) struct Agent {
     /// The agent inner implementation, which may be shared in many MRs
     inner: Arc<AgentInner>,
@@ -60,6 +63,9 @@ pub(crate) struct Agent {
     /// Agent thread resource
     #[allow(dead_code)]
     agent_thread: Arc<AgentThread>,
+    /// Context async event listener
+    #[get = "pub"]
+    async_listener: IbvEventListener,
 }
 
 impl Drop for Agent {
@@ -77,6 +83,7 @@ impl Agent {
         allocator: Arc<MrAllocator>,
         max_sr_data_len: usize,
         max_rmr_access: ibv_access_flags,
+        ctx: Arc<Context>,
     ) -> io::Result<Self> {
         let response_waits = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let rmr_manager = RemoteMrManager::new(Arc::clone(qp.pd()), max_rmr_access);
@@ -103,7 +110,7 @@ impl Agent {
             imm_send,
             max_sr_data_len,
         )?;
-
+        let async_listener = IbvEventListener::new(ctx);
         Ok(Self {
             inner,
             local_mr_recv,
@@ -112,6 +119,7 @@ impl Agent {
             imm_recv,
             handles,
             agent_thread,
+            async_listener,
         })
     }
 

@@ -49,7 +49,7 @@ pub(crate) struct EventListener {
     /// Request map from request id to responder
     req_map: ReqMap,
     /// The polling thread task handle
-    _poller_handle: tokio::task::JoinHandle<io::Result<()>>,
+    poller_handle: tokio::task::JoinHandle<io::Result<()>>,
     /// The timeout value for event listener to wait for the CC's notification.
     ///
     /// The listener will wait for the CC's notification to poll the related CQ until timeout.
@@ -63,6 +63,12 @@ pub(crate) struct EventListener {
     pt_type: PollingTriggerType,
 }
 
+impl Drop for EventListener {
+    fn drop(&mut self) {
+        self.poller_handle.abort();
+    }
+}
+
 impl EventListener {
     /// Create a `EventListner`
     pub(crate) fn new(
@@ -74,7 +80,7 @@ impl EventListener {
         let req_map_move = Arc::<
             parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>,
         >::clone(&req_map);
-        let (handle, pt_type) = match pt_input {
+        let (poller_handle, pt_type) = match pt_input {
             PollingTriggerInput::AsyncFd(inner_cq) => (
                 Self::start::<AsyncFdTrigger>(
                     Arc::clone(&cq),
@@ -97,7 +103,7 @@ impl EventListener {
         Self {
             req_map,
             // TODO: handle polling task error
-            _poller_handle: handle,
+            poller_handle,
             cq,
             _cc_event_timeout: cc_event_timeout,
             pt_type,
@@ -112,7 +118,7 @@ impl EventListener {
         cc_event_time: Duration,
         polling_trigger_input: PollingTriggerInput,
     ) -> tokio::task::JoinHandle<io::Result<()>> {
-        tokio::task::spawn(async move {
+        tokio::spawn(async move {
             let mut wc_buf: Vec<WorkCompletion> = Vec::with_capacity((*cq.max_poll_cqe()).cast());
             let mut trigger = T::new(polling_trigger_input)?;
 

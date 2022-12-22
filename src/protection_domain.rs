@@ -1,7 +1,7 @@
 use crate::{
     context::Context,
+    cq_event_listener::EventListener,
     error_utilities::{log_last_os_err, log_ret_last_os_err},
-    event_listener::EventListener,
     queue_pair::{QueuePair, QueuePairBuilder},
     QueuePairInitAttrBuilder, QueuePairState,
 };

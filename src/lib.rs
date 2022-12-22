@@ -130,16 +130,18 @@ pub mod device;
 
 /// Access of `QP` and `MR`
 mod access;
+/// The event channel that notifies the completion or error of a request
+mod cq_event_channel;
+/// The driver to poll the completion queue
+mod cq_event_listener;
 /// Error handling utilities
 mod error_utilities;
-/// The event channel that notifies the completion or error of a request
-mod event_channel;
-/// The driver to poll the completion queue
-mod event_listener;
 /// Gid for device
 mod gid;
 /// `HashMap` extension
 mod hashmap_extension;
+/// Ibv async event listener
+mod ibv_event_listener;
 /// id utils
 mod id;
 /// Lock utilities
@@ -167,10 +169,11 @@ use agent::{Agent, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
+use cq_event_listener::{EventListener, PollingTriggerInput, DEFAULT_CC_EVENT_TIMEOUT};
+pub use cq_event_listener::{ManualTrigger, PollingTriggerType};
 use derive_builder::Builder;
 use enumflags2::BitFlags;
-use event_listener::{EventListener, PollingTriggerInput, DEFAULT_CC_EVENT_TIMEOUT};
-pub use event_listener::{ManualTrigger, PollingTriggerType};
+pub use ibv_event_listener::IbvEventType;
 pub use memory_region::{
     local::{LocalMr, LocalMrReadAccess, LocalMrWriteAccess},
     remote::{RemoteMr, RemoteMrReadAccess, RemoteMrWriteAccess},
@@ -636,6 +639,14 @@ impl RdmaBuilder {
     #[must_use]
     pub fn set_cq_size(mut self, cq_size: u32) -> Self {
         self.cq_attr.cq_size = cq_size;
+        self
+    }
+
+    /// Set the max number of CQE in a polling.
+    #[inline]
+    #[must_use]
+    pub fn set_max_cqe(mut self, max_ceq: i32) -> Self {
+        self.cq_attr.max_cqe = max_ceq;
         self
     }
 
@@ -1439,6 +1450,7 @@ impl Rdma {
                 Arc::<MrAllocator>::clone(&self.allocator),
                 max_message_length,
                 max_rmr_access,
+                Arc::clone(&self.ctx),
             )?);
             self.agent = Some(agent);
             // wait for the remote agent to prepare
@@ -3968,6 +3980,79 @@ impl Rdma {
     #[inline]
     pub fn get_manual_trigger(&self) -> io::Result<ManualTrigger> {
         Ok(ManualTrigger(self.get_poll_trigger_tx()?.clone()))
+    }
+
+    /// Get the last ibv async event type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    ///
+    /// use async_rdma::{RdmaBuilder, IbvEventType};
+    /// use portpicker::pick_unused_port;
+    /// use std::{
+    ///     alloc::Layout,
+    ///     net::{Ipv4Addr, SocketAddrV4},
+    ///     time::Duration, sync::Arc, io,
+    /// };
+    /// const POLLING_INTERVAL: Duration = Duration::from_secs(2);
+    ///
+    /// async fn client(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Arc::new(RdmaBuilder::default()
+    ///         .set_polling_trigger(async_rdma::PollingTriggerType::Manual)
+    ///         .set_cc_evnet_timeout(POLLING_INTERVAL)
+    ///         .set_cq_size(1)
+    ///         .set_max_cqe(1)
+    ///         .connect(addr)
+    ///         .await
+    ///         .unwrap());
+    ///
+    ///     // waiting for rdma send requests
+    ///     tokio::time::sleep(POLLING_INTERVAL).await;
+    ///     //  cq is full
+    ///     assert_eq!(rdma.get_last_ibv_event_type().unwrap().unwrap(),IbvEventType::IBV_EVENT_CQ_ERR);
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn server(addr: SocketAddrV4) -> io::Result<()> {
+    ///     let rdma = Arc::new(RdmaBuilder::default().listen(addr).await?);
+    ///     let layout = Layout::new::<[u8; 8]>();
+    ///     let mut handles = vec![];
+    ///
+    ///     for _ in 0..10{
+    ///         let rdma_move = rdma.clone();
+    ///         let lmr = rdma_move.alloc_local_mr(layout)?;
+    ///         handles.push(tokio::spawn(async move {let _ = rdma_move.send(&lmr).await;}));
+    ///     }
+    ///     tokio::time::sleep(POLLING_INTERVAL).await;
+    ///     for handle in handles{
+    ///         handle.abort();
+    ///     }
+    ///     Ok(())
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), pick_unused_port().unwrap());
+    ///     std::thread::spawn(move || server(addr));
+    ///     tokio::time::sleep(Duration::from_secs(3)).await;
+    ///     client(addr)
+    ///         .await
+    ///         .map_err(|err| println!("{}", err))
+    ///         .unwrap();
+    /// }
+    ///
+    /// ```
+    #[inline]
+    pub fn get_last_ibv_event_type(&self) -> io::Result<Option<IbvEventType>> {
+        Ok(*self
+            .agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .async_listener()
+            .last_event_type()
+            .lock())
     }
 }
 

@@ -1,8 +1,8 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
     context::{check_dev_cap, Context},
+    cq_event_listener::{EventListener, LmrInners},
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
-    event_listener::{EventListener, LmrInners},
     gid::Gid,
     impl_from_buidler_error_for_another, impl_into_io_error,
     memory_region::{

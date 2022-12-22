@@ -1,18 +1,21 @@
 use crate::device::DeviceList;
 use crate::error_utilities::{log_last_os_err, log_ret, log_ret_last_os_err_with_note};
 use crate::{
-    completion_queue::CompletionQueue, event_channel::EventChannel, gid::Gid,
+    completion_queue::CompletionQueue, cq_event_channel::EventChannel, gid::Gid,
     protection_domain::ProtectionDomain,
 };
 use clippy_utilities::Cast;
 use getset::Getters;
+use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
 use rdma_sys::{
     ibv_close_device, ibv_context, ibv_device_attr, ibv_gid, ibv_open_device, ibv_port_attr,
     ibv_query_gid,
 };
 use std::mem::MaybeUninit;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::prelude::RawFd;
 use std::{fmt::Debug, io, ptr::NonNull, sync::Arc};
-
+use tokio::io::unix::AsyncFd;
 /// RDMA device context
 #[derive(Getters)]
 pub(crate) struct Context {
@@ -140,6 +143,24 @@ impl Context {
     #[allow(dead_code)] // TODO: provide related pub API to choose mtu
     pub(crate) fn get_active_mtu(&self) -> u32 {
         self.inner_port_attr.active_mtu
+    }
+
+    /// Get the async event handle for this ctx.
+    pub(crate) fn get_async_fd(&self) -> io::Result<AsyncFd<RawFd>> {
+        // SAFETY: async_fd will be initialized by rdma driver
+        let fd = unsafe { (*self.as_ptr()).async_fd };
+        // SAFETY: ffi
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        // SAFETY: ffi
+        let ret = unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) };
+        if ret < 0_i32 {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Error, failed to change file descriptor of async event queue",
+            ))
+        } else {
+            AsyncFd::new(fd.as_raw_fd())
+        }
     }
 }
 

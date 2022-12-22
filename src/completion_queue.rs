@@ -1,7 +1,7 @@
 use crate::{
     context::{check_dev_cap, Context},
+    cq_event_channel::EventChannel,
     error_utilities::log_ret_last_os_err,
-    event_channel::EventChannel,
     id,
 };
 use clippy_utilities::Cast;

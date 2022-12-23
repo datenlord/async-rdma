@@ -43,7 +43,7 @@ static DELAY_FOR_CANCEL_SAFETY_TEST: Duration = Duration::from_secs(1);
 
 /// The event listener that polls the completion queue events
 #[derive(Debug, Getters)]
-pub(crate) struct EventListener {
+pub(crate) struct CQEventListener {
     /// The completion queue
     pub(crate) cq: Arc<CompletionQueue>,
     /// Request map from request id to responder
@@ -63,19 +63,19 @@ pub(crate) struct EventListener {
     pt_type: PollingTriggerType,
 }
 
-impl Drop for EventListener {
+impl Drop for CQEventListener {
     fn drop(&mut self) {
         self.poller_handle.abort();
     }
 }
 
-impl EventListener {
+impl CQEventListener {
     /// Create a `EventListner`
     pub(crate) fn new(
         cq: Arc<CompletionQueue>,
         cc_event_timeout: Duration,
         pt_input: PollingTriggerInput,
-    ) -> EventListener {
+    ) -> CQEventListener {
         let req_map = ReqMap::default();
         let req_map_move = Arc::<
             parking_lot::Mutex<HashMap<WorkRequestId, (Responder, LmrInners, LmrGuards)>>,

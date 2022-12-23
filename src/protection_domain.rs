@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    cq_event_listener::EventListener,
+    cq_event_listener::CQEventListener,
     error_utilities::{log_last_os_err, log_ret_last_os_err},
     queue_pair::{QueuePair, QueuePairBuilder},
     QueuePairInitAttrBuilder, QueuePairState,
@@ -44,7 +44,7 @@ impl ProtectionDomain {
     /// Create a queue pair
     pub(crate) fn create_qp(
         self: &Arc<Self>,
-        event_listener: Arc<EventListener>,
+        cq_event_listener: Arc<CQEventListener>,
         qp_init_attr: QueuePairInitAttrBuilder,
         port_num: u8,
         init_qp: bool,
@@ -59,7 +59,7 @@ impl ProtectionDomain {
 
         let mut qp = self
             .create_queue_pair_builder()
-            .event_listener(event_listener)
+            .cq_event_listener(cq_event_listener)
             .inner_qp(inner_qp)
             .cur_state(Arc::new(RwLock::new(QueuePairState::Unknown)))
             .build()?;

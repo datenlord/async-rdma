@@ -169,7 +169,7 @@ use agent::{Agent, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
-use cq_event_listener::{EventListener, PollingTriggerInput, DEFAULT_CC_EVENT_TIMEOUT};
+use cq_event_listener::{CQEventListener, PollingTriggerInput, DEFAULT_CC_EVENT_TIMEOUT};
 pub use cq_event_listener::{ManualTrigger, PollingTriggerType};
 use derive_builder::Builder;
 use enumflags2::BitFlags;
@@ -1175,10 +1175,10 @@ fn cm_connect_helper(rdma: &mut Rdma, node: &str, service: &str) -> io::Result<(
         (*id).qp = rdma.qp.as_ptr();
         (*id).pd = rdma.pd.as_ptr();
         (*id).verbs = rdma.ctx.as_ptr();
-        (*id).recv_cq_channel = rdma.qp.event_listener().cq.event_channel().as_ptr();
-        (*id).recv_cq_channel = rdma.qp.event_listener().cq.event_channel().as_ptr();
-        (*id).recv_cq = rdma.qp.event_listener().cq.as_ptr();
-        (*id).send_cq = rdma.qp.event_listener().cq.as_ptr();
+        (*id).recv_cq_channel = rdma.qp.cq_event_listener().cq.event_channel().as_ptr();
+        (*id).recv_cq_channel = rdma.qp.cq_event_listener().cq.event_channel().as_ptr();
+        (*id).recv_cq = rdma.qp.cq_event_listener().cq.as_ptr();
+        (*id).send_cq = rdma.qp.cq_event_listener().cq.as_ptr();
         debug!(
             "cm_id: {:?},{:?},{:?},{:?},{:?},{:?},{:?}",
             (*id).qp,
@@ -1284,7 +1284,7 @@ impl Rdma {
             }
         };
 
-        let event_listener = Arc::new(EventListener::new(
+        let cq_event_listener = Arc::new(CQEventListener::new(
             Arc::clone(&cq),
             agent_attr.cc_event_timeout,
             pt_input,
@@ -1307,7 +1307,7 @@ impl Rdma {
             .build()?;
 
         let qp = Arc::new(pd.create_qp(
-            event_listener,
+            cq_event_listener,
             qp_attr.init_attr,
             qp_attr.rq_attr.get_port_num(),
             true,
@@ -1404,10 +1404,10 @@ impl Rdma {
         }
     }
 
-    /// Create a new `Rdma` that has the same `mr_allocator` and `event_listener` as parent.
+    /// Create a new `Rdma` that has the same `mr_allocator` and `cq_event_listener` as parent.
     fn clone(&self) -> io::Result<Self> {
         let qp = Arc::new(self.clone_attr.pd.create_qp(
-            Arc::clone(self.qp.event_listener()),
+            Arc::clone(self.qp.cq_event_listener()),
             self.clone_attr.qp_init_attr,
             self.clone_attr.rq_attr.get_port_num(),
             true,
@@ -3821,7 +3821,7 @@ impl Rdma {
     fn get_poll_trigger_tx(&self) -> io::Result<&mpsc::Sender<()>> {
         self.trigger_tx
             .as_ref()
-            .ok_or_else(|| match *self.qp.event_listener().pt_type() {
+            .ok_or_else(|| match *self.qp.cq_event_listener().pt_type() {
                 PollingTriggerType::Automatic => io::Error::new(
                     io::ErrorKind::Other,
                     "this method can only used with PollingTriggerType::Manual",
@@ -4050,7 +4050,7 @@ impl Rdma {
             .agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
-            .async_listener()
+            .ibv_event_listener()
             .last_event_type()
             .lock())
     }

@@ -65,7 +65,7 @@ pub(crate) struct Agent {
     agent_thread: Arc<AgentThread>,
     /// Context async event listener
     #[get = "pub"]
-    async_listener: IbvEventListener,
+    ibv_event_listener: IbvEventListener,
 }
 
 impl Drop for Agent {
@@ -110,7 +110,7 @@ impl Agent {
             imm_send,
             max_sr_data_len,
         )?;
-        let async_listener = IbvEventListener::new(ctx);
+        let ibv_event_listener = IbvEventListener::new(ctx);
         Ok(Self {
             inner,
             local_mr_recv,
@@ -119,7 +119,7 @@ impl Agent {
             imm_recv,
             handles,
             agent_thread,
-            async_listener,
+            ibv_event_listener,
         })
     }
 

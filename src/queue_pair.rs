@@ -1,7 +1,7 @@
 use crate::{
     completion_queue::{WCError, WorkCompletion, WorkRequestId},
     context::{check_dev_cap, Context},
-    cq_event_listener::{EventListener, LmrInners},
+    cq_event_listener::{CQEventListener, LmrInners},
     error_utilities::{log_last_os_err, log_ret_last_os_err, log_ret_last_os_err_with_note},
     gid::Gid,
     impl_from_buidler_error_for_another, impl_into_io_error,
@@ -540,8 +540,8 @@ impl From<u32> for QueuePairState {
 pub(crate) struct QueuePair {
     /// protection domain it belongs to
     pd: Arc<ProtectionDomain>,
-    /// event listener
-    event_listener: Arc<EventListener>,
+    /// cq event listener
+    cq_event_listener: Arc<CQEventListener>,
     /// internal `ibv_qp` pointer
     inner_qp: NonNull<ibv_qp>,
     /// Assume that this is the current QP state. This is useful if it is known
@@ -721,7 +721,7 @@ impl QueuePair {
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut send_attr = SendWr::new_send(lms, wr_id, imm);
-        self.event_listener.cq.req_notify(false)?;
+        self.cq_event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
                 "post_send addr {}, len {}, lkey {} wrid: {}",
@@ -756,7 +756,7 @@ impl QueuePair {
     {
         let mut recv_attr = RecvWr::new_recv(lms, wr_id);
         let mut bad_wr = std::ptr::null_mut::<ibv_recv_wr>();
-        self.event_listener.cq.req_notify(false)?;
+        self.cq_event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
                 "post_recv addr {}, len {}, lkey {} wrid: {}",
@@ -792,7 +792,7 @@ impl QueuePair {
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut send_attr = SendWr::new_read(lms, wr_id, rm);
-        self.event_listener.cq.req_notify(false)?;
+        self.cq_event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
                 "post_send addr {}, len {}, lkey {} wrid: {}",
@@ -834,7 +834,7 @@ impl QueuePair {
     {
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
         let mut send_attr = SendWr::new_write(lms, wr_id, rm, imm);
-        self.event_listener.cq.req_notify(false)?;
+        self.cq_event_listener.cq.req_notify(false)?;
         for lm in lms {
             debug!(
                 "post_send addr {}, len {}, lkey_unchecked {} wrid: {}",
@@ -877,7 +877,7 @@ impl QueuePair {
     {
         let mut cas_wr = SendWr::new_cas(old_value, new_value, buf, rm, wr_id);
         let mut bad_wr = std::ptr::null_mut::<ibv_send_wr>();
-        self.event_listener.cq.req_notify(false)?;
+        self.cq_event_listener.cq.req_notify(false)?;
 
         // SAFETY: ffi
         let errno = unsafe { ibv_post_send(self.as_ptr(), cas_wr.as_mut(), &mut bad_wr) };
@@ -911,7 +911,7 @@ impl QueuePair {
         LR: LocalMrReadAccess,
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_read(&get_lmr_inners(lms))?;
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_send(lms, wr_id, imm)?;
@@ -946,14 +946,14 @@ impl QueuePair {
         LW: LocalMrWriteAccess,
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_write(&get_mut_lmr_inners(lms))?;
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_receive(lms, wr_id)?;
         resp_rx
             .recv()
             .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cq_event_listener is dropped"))?
             .result_with_imm()
             .map(|(sz, imm)| {
                 debug!("post size: {sz}, mr len: {len}");
@@ -976,7 +976,7 @@ impl QueuePair {
         F: FnOnce(),
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_write(&get_mut_lmr_inners(lms))?;
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_receive(lms, wr_id)?;
@@ -984,7 +984,7 @@ impl QueuePair {
         resp_rx
             .recv()
             .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "event_listener is dropped"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cq_event_listener is dropped"))?
             .result_with_imm()
             .map(|(sz, imm)| {
                 debug!("receivede size {sz}, lms len {len}");
@@ -1000,7 +1000,7 @@ impl QueuePair {
         RR: RemoteMrReadAccess,
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_write(&get_mut_lmr_inners(lms))?;
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_read(lms, rm, wr_id)?;
@@ -1025,7 +1025,7 @@ impl QueuePair {
         RW: RemoteMrWriteAccess,
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_read(&get_lmr_inners(lms))?;
         let len: usize = lms.iter().map(|lm| lm.length()).sum();
         self.submit_write(lms, rm, wr_id, imm)?;
@@ -1053,7 +1053,7 @@ impl QueuePair {
         RW: RemoteMrWriteAccess,
     {
         let (wr_id, mut resp_rx) = self
-            .event_listener
+            .cq_event_listener
             .register_for_read(&get_lmr_inners(&[buf]))?;
         self.submit_cas(old_value, new_value, buf, rm, wr_id)?;
         resp_rx
@@ -1290,7 +1290,7 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
         let s = self.get_mut();
         match s.state {
             QueuePairOpsState::Init(ref inners) => {
-                let (wr_id, recv) = s.qp.event_listener.register_for_write(inners)?;
+                let (wr_id, recv) = s.qp.cq_event_listener.register_for_write(inners)?;
                 s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
                 Pin::new(s).poll(cx)
             }

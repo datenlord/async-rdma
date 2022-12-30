@@ -732,7 +732,7 @@ impl RdmaBuilder {
     #[inline]
     #[must_use]
     pub fn set_mr_access(mut self, flags: BitFlags<AccessFlag>) -> Self {
-        let _ = self.qp_attr.init_attr.access(flags_into_ibv_access(flags));
+        self.mr_attr.access = flags_into_ibv_access(flags);
         self
     }
 

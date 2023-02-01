@@ -1,5 +1,49 @@
 # ChangeLog
 
+## 0.5.0
+
+  In this release, we add some APIs to enable users to control more properties of devices, 
+  connections and the async-rdma background framework.
+
+  We tested async-rdma on some hardware RDMA devices(only Soft-RoCE before), and found that
+  the default configuration cannot meet all hardware requirements. Some hardware needs special 
+  configuration, so we have added richer set interfaces.
+
+  We provide support for listening IBV async events. When the IBV async event occurs, it 
+  will be recorded. We will add more functions besides recording in the future.
+
+### New features
+
+* Add `IbvEventListener` to monitor ibv async events. Rename the original `event_xxx.rs` to 
+  `cq_event_xxx.rs` to distinguish cq event from ibv event.
+* Add manual cq polling trigger. Add `PollingTrigger` trait to enable multiple implementations 
+  of trigger. Implement channel based manual polling trigger and add related APIs.
+* Add API `set_cc_evnet_timeout`. To set the timeout value for event listener to wait for the 
+  notification of completion channel.
+* Add API to set imm flag in wc. The value of immediate data flag may be different on rdma devices. 
+  Users can change this flag by this API to adapt their devices.
+* Add experimental feature and recv with `fn` APIs.
+* Add set APIs for attributes of queue pair.
+* Add APIs to get the state of qp.
+* Add `atomic_cas` API and tests.
+* Add `ibv_connect` API for `RdmaBuilder` and `Rdma`. pub use `Gid` for `ibv_conenct`. You can connect 
+  to remote end by raw qp info no matter how you get it.
+* Enable users to create `RemoteMr` manually.
+
+### Optimizations and refactors
+
+* Increase default cq size. The cq may be full before next polling if the cq size is too little.
+* Add qp init attributes check.
+* Add `cq_size` and `max_poll_cqe` check.
+* Adapt new `cm_connect` API logic.
+* Replace `self` with `&self` in `ibv_connect`. Make it easier to use without the need of clone.
+* Refactor attributes structs of qp. Implement builder pattern for attributes structs by `derive Builder`.
+  to reduce hand write codes and make the structs clearer.
+
+### Bug fixes
+
+* Replace assertion with debug msg. The length of mr is not always equal to `wc.byte_len`.
+
 ## 0.4.0
 
   In this release, we add some APIs to make it easier to establish connections and 

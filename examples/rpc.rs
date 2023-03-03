@@ -13,13 +13,13 @@ use tokio::net::ToSocketAddrs;
 
 #[derive(Clone, Debug)]
 enum Request {
-    Echo { msg: String },
+    Add { arg1: u32, arg2: u32 },
     Sync,
 }
 
 #[derive(Clone, Debug)]
 enum Response {
-    Echo { msg: String },
+    Add { res: u32 },
     Sync,
 }
 
@@ -108,25 +108,25 @@ impl Server {
                 .unwrap();
         }
     }
-    /// Process `Echo` rpc
-    fn echo(msg: String) -> Response {
-        Response::Echo { msg }
+    /// Process `Add` rpc
+    fn add(arg1: &u32, arg2: &u32) -> Response {
+        Response::Add { res: *arg1 + *arg2 }
     }
 
     /// Process request and return the response
     fn process_request(req: &Request) -> Response {
         match req {
-            Request::Echo { msg } => Self::echo(msg.to_string()),
+            Request::Add { arg1, arg2 } => Self::add(arg1, arg2),
             Request::Sync => Response::Sync,
         }
     }
 }
 
-fn transmute_lmr_to_string(lmr: &LocalMr) -> String {
+fn transmute_lmr_to_response(lmr: &LocalMr) -> Response {
     unsafe {
         let resp = &*(*lmr.as_ptr() as *const Response);
         match resp {
-            Response::Echo { msg } => msg.to_string(),
+            Response::Add { res } => Response::Add { res: *res },
             _ => panic!("invalid input : {:?}", resp),
         }
     }
@@ -148,12 +148,12 @@ impl Client {
         Client { rdma_stub }
     }
 
-    /// Echo rpc request method powered by rdma 'send' and 'receive'
+    /// Add rpc request method powered by rdma 'send' and 'receive'
     ///
-    /// Send 'msg' to rpc server and then receive the same content from server.
+    /// Send 'args' to rpc server and then receive the result from server.
     ///
     /// Show the usage of rdma 'send' and 'receive'
-    async fn echo_req_sr(&self, msg: String) -> String {
+    async fn handle_req_sr(&self, req: Request) -> Response {
         // allocate a local memory region according to the `layout`
         let mut lmr_req = self
             .rdma_stub
@@ -161,7 +161,7 @@ impl Client {
             .map_err(|err| println!("{}", &err))
             .unwrap();
         //write data to lmr
-        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
+        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = req };
         // send request to server by rdma `send`
         self.rdma_stub
             .send(&lmr_req)
@@ -172,20 +172,20 @@ impl Client {
         self.rdma_stub
             .receive()
             .await
-            .map(|lmr_resp| transmute_lmr_to_string(&lmr_resp))
+            .map(|lmr_resp| transmute_lmr_to_response(&lmr_resp))
             .map_err(|err| println!("{}", &err))
             .unwrap()
     }
 
-    /// Echo rpc request method powered by rdma 'read' and 'write'
+    /// Add rpc request method powered by rdma 'read' and 'write'
     ///
-    /// Send 'msg' to rpc server and then receive the same content from server.
+    /// Send 'args' to rpc server and then receive the result from server.
     ///
     /// Show the usage of rdma 'read' and 'write'
     ///
     /// Server can't aware of rdma `read` or `write`, so we need sync with server
     /// Before `read` and after `write`.
-    async fn echo_req_wr(&self, msg: String) -> String {
+    async fn handle_req_wr(&self, req: Request) -> Response {
         // allocate a local memory region according to the `layout`
         let mut lmr_req = self
             .rdma_stub
@@ -193,7 +193,7 @@ impl Client {
             .map_err(|err| println!("{}", &err))
             .unwrap();
         // put data into lmr
-        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = Request::Echo { msg } };
+        unsafe { *(*lmr_req.as_mut_ptr() as *mut Request) = req };
         // request a remote mr located in the server
         let mut rmr_req = self
             .rdma_stub
@@ -235,7 +235,7 @@ impl Client {
             // convert memory region to 'String' or anything else you need in other scenarios.
             .map_err(|err| println!("{}", &err))
             .unwrap();
-        transmute_lmr_to_string(&lmr_resp)
+        transmute_lmr_to_response(&lmr_resp)
     }
 
     /// Server can't aware of rdma `read` or `write`, so we need sync with server
@@ -265,13 +265,13 @@ async fn main() {
     println!("rpc server started");
     //sleep for a second to wait for the server to start
     tokio::time::sleep(Duration::new(1, 0)).await;
-    let msg_hello = String::from("hello");
-    let msg_world = String::from("world");
+    let request = Request::Add { arg1: 1, arg2: 1 };
     let client = Client::new("localhost:5555").await;
-    println!("request: {}", msg_hello);
-    let res = client.echo_req_sr(msg_hello).await;
-    println!("response: {}", res);
-    println!("request: {}", msg_world);
-    let res = client.echo_req_wr(msg_world).await;
-    println!("response: {}", res);
+    println!("request: {:?}", request);
+    let res = client.handle_req_sr(request).await;
+    println!("response: {:?}", res);
+    let request = Request::Add { arg1: 2, arg2: 2 };
+    println!("request: {:?}", request);
+    let res = client.handle_req_wr(request).await;
+    println!("response: {:?}", res);
 }

@@ -37,7 +37,7 @@ mod send_with_imm {
         // compared to the above, using `receive` is a better choice.
         let lmr = rdma.receive().await?;
         unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-        // wait for the agent thread to send all reponses to the remote.
+        // wait for the agent thread to send all responses to the remote.
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(())
     }
@@ -72,7 +72,7 @@ mod write_with_imm {
         let lmr = rdma.receive_local_mr().await?;
         // assert the content of lmr, which was `write` by client
         unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-        // wait for the agent thread to send all reponses to the remote.
+        // wait for the agent thread to send all responses to the remote.
         tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(())
     }

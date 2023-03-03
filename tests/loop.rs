@@ -18,7 +18,7 @@ async fn server(rdma: Rdma) -> io::Result<()> {
     for handle in handles {
         handle.await.unwrap();
     }
-    // wait for the agent thread to send all reponses to the remote.
+    // wait for the agent thread to send all responses to the remote.
     tokio::time::sleep(Duration::from_secs(3)).await;
     Ok(())
 }

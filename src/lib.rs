@@ -1648,7 +1648,7 @@ impl Rdma {
     ///             *(*(*lmr.as_ptr() as *const Data)).0
     ///         )
     ///     };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -1784,7 +1784,7 @@ impl Rdma {
     ///     let lmr = rdma.receive_raw(Layout::for_value(&RAW_DATA)).await?;
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -1849,7 +1849,7 @@ impl Rdma {
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
     ///     assert_eq!(imm, Some(IMM));
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -1924,7 +1924,7 @@ impl Rdma {
     ///     // compared to the above, using `receive` is a better choice.
     ///     let lmr = rdma.receive().await?;
     ///     unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -1993,7 +1993,7 @@ impl Rdma {
     ///             *(*(*lmr.as_ptr() as *const Data)).0
     ///         )
     ///     };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2051,7 +2051,7 @@ impl Rdma {
     ///     let lmr = rdma.receive_raw(Layout::for_value(&RAW_DATA)).await?;
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2115,7 +2115,7 @@ impl Rdma {
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
     ///     assert_eq!(imm, Some(IMM));
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2182,7 +2182,7 @@ impl Rdma {
     ///         .await?;
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2257,7 +2257,7 @@ impl Rdma {
     ///     // read data from mr
     ///     assert_eq!(*lmr.as_slice(), RAW_DATA);
     ///     assert_eq!(imm, Some(IMM));
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2341,7 +2341,7 @@ impl Rdma {
     ///     // compared to the above, using `receive` is a better choice.
     ///     let lmr = rdma.receive().await?;
     ///     unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2410,7 +2410,7 @@ impl Rdma {
     ///     let lmr = rdma.receive_local_mr().await?;
     ///     // assert the content of lmr, which was `write` by client
     ///     unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -2620,7 +2620,7 @@ impl Rdma {
     ///     let lmr = rdma.receive_local_mr().await?;
     ///     // assert the content of lmr, which was `write` by client
     ///     unsafe { assert_eq!(MSG.to_string(), *(*(*lmr.as_ptr() as *const Data)).0) };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -3195,7 +3195,7 @@ impl Rdma {
     ///     // receive the metadata of rmr sent by client
     ///     let _rmr = rdma.receive_remote_mr().await?;
     ///     // do something with lmr like getting data from it.
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -3258,7 +3258,7 @@ impl Rdma {
     ///     let rmr = rdma.receive_remote_mr().await?;
     ///     assert!(!rmr.timeout_check());
     ///     // do something with lmr like getting data from it.
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -3329,7 +3329,7 @@ impl Rdma {
     ///     // receive the metadata of the lmr that had been requested by client
     ///     let _lmr = rdma.receive_local_mr().await?;
     ///     // do something with lmr like getting data from it.
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -3412,7 +3412,7 @@ impl Rdma {
     ///         *(*(*lmr.as_ptr() as *const Data)).0
     ///     )
     ///     };
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }
@@ -3589,7 +3589,7 @@ impl Rdma {
     ///     let new_rdma = rdma.listen().await?;
     ///     // receive the metadata of the lmr that had been requested by client
     ///     let _lmr = new_rdma.receive_local_mr().await?;
-    ///     // wait for the agent thread to send all reponses to the remote.
+    ///     // wait for the agent thread to send all responses to the remote.
     ///     tokio::time::sleep(Duration::from_secs(1)).await;
     ///     Ok(())
     /// }

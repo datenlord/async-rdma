@@ -369,6 +369,10 @@ impl ManualTrigger {
     ///         .await
     ///         .unwrap();
     ///
+    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+    ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    ///     let instant = Instant::now();
+    ///
     ///     let trigger = rdma.get_manual_trigger().unwrap();
     ///     // polling task
     ///     let _trigger_handle = tokio::spawn(async move {
@@ -378,9 +382,6 @@ impl ManualTrigger {
     ///         }
     ///     });
     ///
-    ///     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
-    ///     let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
-    ///     let instant = Instant::now();
     ///     rdma.send(&lmr).await?;
     ///     assert!(instant.elapsed() >= POLLING_INTERVAL);
     ///     Ok(())

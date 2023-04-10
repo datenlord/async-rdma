@@ -49,7 +49,7 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
-        println!("usage : cargo run --example client <server_ip> <port>");
+        println!("usage : cargo run --example cm_client <server_ip> <port>");
         println!("input : {:?}", args);
         exit(-1);
     }

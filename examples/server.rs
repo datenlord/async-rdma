@@ -11,7 +11,7 @@
 
 use async_rdma::{LocalMrReadAccess, Rdma, RdmaBuilder};
 use clippy_utilities::Cast;
-use std::{alloc::Layout, io};
+use std::{alloc::Layout, env, io, process::exit};
 
 /// receive data from client
 async fn receive_data_from_client(rdma: &Rdma) -> io::Result<()> {
@@ -86,10 +86,18 @@ async fn receive_mr_after_being_written_by_cas(rdma: &Rdma) -> io::Result<()> {
 #[tokio::main]
 async fn main() {
     println!("server start");
-    let mut rdma = RdmaBuilder::default()
-        .listen("localhost:5555")
-        .await
-        .unwrap();
+
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        println!("usage : cargo run --example server <server_ip> <port>");
+        println!("input : {:?}", args);
+        exit(-1);
+    }
+    let ip = args.get(1).unwrap().as_str();
+    let port = args.get(2).unwrap().as_str();
+    let addr = format!("{}:{}", ip, port);
+
+    let mut rdma = RdmaBuilder::default().listen(addr).await.unwrap();
     println!("accepted");
     receive_data_from_client(&rdma).await.unwrap();
     receive_data_with_imm_from_client(&rdma).await.unwrap();

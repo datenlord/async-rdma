@@ -12,7 +12,9 @@
 use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, Rdma, RdmaBuilder};
 use std::{
     alloc::Layout,
+    env,
     io::{self, Write},
+    process::exit,
 };
 
 /// send data to serer
@@ -114,8 +116,18 @@ async fn request_then_write_cas(rdma: &Rdma) -> io::Result<()> {
 #[tokio::main]
 async fn main() {
     println!("client start");
-    let addr = "localhost:5555";
-    let mut rdma = RdmaBuilder::default().connect(addr).await.unwrap();
+
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        println!("usage : cargo run --example client <server_ip> <port>");
+        println!("input : {:?}", args);
+        exit(-1);
+    }
+    let ip = args.get(1).unwrap().as_str();
+    let port = args.get(2).unwrap().as_str();
+    let addr = format!("{}:{}", ip, port);
+
+    let mut rdma = RdmaBuilder::default().connect(addr.clone()).await.unwrap();
     println!("connected");
     send_data_to_server(&rdma).await.unwrap();
     send_data_with_imm_to_server(&rdma).await.unwrap();
@@ -127,7 +139,7 @@ async fn main() {
 
     // create new `Rdma`s (connections) that has the same `mr_allocator` and `event_listener` as parent
     for _ in 0..3 {
-        let rdma = rdma.new_connect(addr).await.unwrap();
+        let rdma = rdma.new_connect(addr.clone()).await.unwrap();
         println!("connected");
         send_data_to_server(&rdma).await.unwrap();
         send_data_with_imm_to_server(&rdma).await.unwrap();

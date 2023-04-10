@@ -27,6 +27,9 @@ HOST_IP=`ifconfig $ETH_DEV | grep 'inet ' | awk '{print $2}'`
 SRV_PORT=9527
 MSG_CNT=10
 
+EXAMPLE_IP='localhost'
+EXAMPLE_PORT=`sudo netstat -tlnp | awk '$4 ~ /.*:([0-9]+)/ {print $4}' | awk -F: '{print $2}' \
+    | sort -n | awk '{++a[$1]} END {for(i=1024; i<65536; i++) if(a[i]==0) {print i; exit}}'`
 
 # Setup softiwarp device
 sudo rdma link add $SIW_DEV type siw netdev $ETH_DEV
@@ -65,9 +68,9 @@ sudo env "PATH=$PATH" bash -c "
     cargo test --features="cm raw"
     cargo test --package async-rdma --test cancel_safety --features cancel_safety_test
     cargo run --example rpc
-    timeout 3 target/debug/examples/server &
+    timeout 3 target/debug/examples/server $EXAMPLE_IP $EXAMPLE_PORT &
     sleep 1
-    target/debug/examples/client
+    target/debug/examples/client $EXAMPLE_IP $EXAMPLE_PORT
     sleep 1
     cargo run --example cm_server &
     sleep 1

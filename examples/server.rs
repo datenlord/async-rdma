@@ -29,7 +29,14 @@ async fn receive_data_with_imm_from_client(rdma: &Rdma) -> io::Result<()> {
     let (lmr, imm) = rdma.receive_with_imm().await?;
     let data = *lmr.as_slice();
     println!("{:?}", data);
-    assert_eq!(data, [imm.unwrap().cast(); 8]);
+    assert_eq!(
+        data,
+        [imm.expect(
+            "The value of immediate data flag may be different on RDMA devices.\
+            And you can change this flag by this API `set_imm_flag_in_wc` to adapt your devices."
+        )
+        .cast(); 8]
+    );
     Ok(())
 }
 

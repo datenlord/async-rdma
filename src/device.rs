@@ -7,7 +7,6 @@ use rdma_sys::{ibv_get_device_guid, ibv_get_device_name};
 
 use std::ffi::CStr;
 use std::io;
-use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
@@ -181,35 +180,36 @@ impl fmt::Debug for Guid {
 }
 
 /// Encodes a guid to a hex string and process it
-fn guid_to_hex<R>(guid: Guid, case: hex_simd::AsciiCase, f: impl FnOnce(&str) -> R) -> R {
+fn guid_to_hex<R>(guid: Guid, uppercase: bool, f: impl FnOnce(&str) -> R) -> R {
     let src: &[u8; 8] = guid.as_bytes();
-    let mut buf: MaybeUninit<[u8; 16]> = MaybeUninit::uninit();
-    let ans = {
-        // SAFETY: uninit project
-        let bytes = unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), 16) };
-        let dst = hex_simd::OutBuf::from_uninit_mut(bytes);
-        let result = hex_simd::encode_as_str(src, dst, case);
-        // SAFETY: the encoding never fails
-        unsafe { result.unwrap_unchecked() }
+    let mut buf: [u8; 16] = [0; 16];
+    // SAFETY: The buf is two times of src, which is required by hex::encode_to_slice.
+    // Therefore, the unwrap_unchecked on hex::encode_to_slice is safe.
+    // After the hex encoding, the bytes in buf are valid UTF-8, because hex::encode_to_slice
+    // only produces bytes in the ASCII range (0x00 - 0x7F), which are valid UTF-8.
+    // Therefore, the unwrap_unchecked on std::str::from_utf8 is also safe.
+    let ans = unsafe {
+        hex::encode_to_slice(src, &mut buf).unwrap_unchecked();
+        if uppercase {
+            std::str::from_utf8(&buf).unwrap_unchecked().to_uppercase()
+        } else {
+            std::str::from_utf8(&buf).unwrap_unchecked().to_lowercase()
+        }
     };
-    f(ans)
+    f(&ans)
 }
 
 impl fmt::LowerHex for Guid {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        guid_to_hex(*self, hex_simd::AsciiCase::Lower, |s| {
-            <str as fmt::Display>::fmt(s, f)
-        })
+        guid_to_hex(*self, false, |s| <str as fmt::Display>::fmt(s, f))
     }
 }
 
 impl fmt::UpperHex for Guid {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        guid_to_hex(*self, hex_simd::AsciiCase::Upper, |s| {
-            <str as fmt::Display>::fmt(s, f)
-        })
+        guid_to_hex(*self, true, |s| <str as fmt::Display>::fmt(s, f))
     }
 }
 

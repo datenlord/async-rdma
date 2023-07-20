@@ -114,6 +114,13 @@ cd async-rdma
 cargo run --example rpc
 ```
 
+if run rpc example failed, you can try run it with sudo permission.
+
+```shell
+cargo build --example rpc
+sudo ./target/debug/examples/rpc
+```
+
 ## Example
 
 A simple example: client request a remote memory region and put data into this remote

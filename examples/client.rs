@@ -32,8 +32,13 @@ async fn send_data_to_server(rdma: &Rdma) -> io::Result<()> {
 async fn send_data_with_imm_to_server(rdma: &Rdma) -> io::Result<()> {
     // alloc 8 bytes local memory
     let mut lmr = rdma.alloc_local_mr(Layout::new::<[u8; 8]>())?;
-    // write data into lmr
-    let _num = lmr.as_mut_slice().write(&[1_u8; 8])?;
+    {
+        // use cursor to append data to lmr
+        // use this in a scope to unlock lmr automatically
+        let mut mr_cursor = lmr.as_mut_slice_cursor();
+        let _num = mr_cursor.write(&[1_u8; 4])?;
+        let _num = mr_cursor.write(&[1_u8; 4])?;
+    }
     // send data and imm to the remote end
     rdma.send_with_imm(&lmr, 1_u32).await?;
     Ok(())

@@ -9,4 +9,12 @@
 # So we disable `tcache` by default.
 # If you want to enable `tcache` and make sure safety by yourself, change 
 # `JEMALLOC_SYS_WITH_MALLOC_CONF` from `tcache:false` to `tcache:true`.
-JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false"
+
+# If `retain` is true, retain unused virtual memory for later reuse rather than discarding it by calling 
+# munmap(2) or equivalent (see stats.retained for related details). It also makes jemalloc use mmap(2) or 
+# equivalent in a more greedy way, mapping larger chunks in one go. This option is disabled by default.
+# Quoted from: https://jemalloc.net/jemalloc.3.html
+# Retain sometimes leads to issues with using already deallocated MR, so it is set to false by default. 
+# If we need to enable this feature, we will need to reconsider the retain logic of jemalloc and ensure 
+# that MR is re-registered and the metadata is re-inserted in `EXTENT_TOKEN_MAP` before being reused.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,retain:false"

@@ -12,6 +12,7 @@ use sealed::sealed;
 use std::{
     alloc::{dealloc, Layout},
     fmt::Debug,
+    io::Cursor,
     ops::Range,
     slice,
     sync::Arc,
@@ -86,6 +87,37 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
                 // SAFETY: memory of this mr should have been initialized
                 return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts(ptr, self.length())
+                }));
+            },
+        )
+    }
+
+    /// Get the memory region as slice until it is readable warppered with cursor
+    /// user can use cursor to read or write data without maintaining the index manually
+    ///
+    /// If this mr is being used in RDMA ops, the thread may be blocked
+    #[inline]
+    #[allow(clippy::as_conversions)]
+    fn as_slice_cursor(&self) -> MappedRwLockReadGuard<Cursor<&[u8]>> {
+        // SAFETY: memory of this mr should have been initialized
+        MappedRwLockReadGuard::map(self.as_ptr(), |ptr| unsafe {
+            Cursor::new(slice::from_raw_parts(ptr, self.length()))
+        })
+    }
+
+    /// Try to get the memory region as slice warppered with cursor
+    /// user can use cursor to read or write data without maintaining the index manually
+    ///
+    /// Return `None` if this mr is being used in RDMA ops without blocking thread
+    #[allow(clippy::as_conversions)]
+    #[inline]
+    fn try_as_slice_cursor(&self) -> Option<MappedRwLockReadGuard<Cursor<&[u8]>>> {
+        self.try_as_ptr().map_or_else(
+            || None,
+            |guard| {
+                // SAFETY: memory of this mr should have been initialized
+                return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
+                    Cursor::new(slice::from_raw_parts(ptr, self.length()))
                 }));
             },
         )
@@ -270,6 +302,38 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
                 // SAFETY: memory of this mr should have been initialized
                 return Some(MappedRwLockWriteGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts_mut(ptr, self.length())
+                }));
+            },
+        )
+    }
+
+    /// Try to get the memory region as mutable slice warppered with cursor
+    /// user can use cursor to read or write data without maintaining the index manually
+    ///
+    /// If this mr is being used in RDMA ops, the thread may be blocked
+    #[inline]
+    #[allow(clippy::as_conversions)]
+    fn as_mut_slice_cursor(&mut self) -> MappedRwLockWriteGuard<Cursor<&mut [u8]>> {
+        let len = self.length();
+        // SAFETY: memory of this mr should have been initialized
+        MappedRwLockWriteGuard::map(self.as_mut_ptr(), |ptr| unsafe {
+            Cursor::new(slice::from_raw_parts_mut(ptr, len))
+        })
+    }
+
+    /// Try to get the memory region as mutable slice warppered with cursor
+    /// user can use cursor to read or write data without maintaining the index manually
+    ///
+    /// Return `None` if this mr is being used in RDMA ops without blocking thread
+    #[inline]
+    #[allow(clippy::as_conversions)]
+    fn try_as_mut_slice_cursor(&mut self) -> Option<MappedRwLockWriteGuard<Cursor<&mut [u8]>>> {
+        self.try_as_mut_ptr().map_or_else(
+            || None,
+            |guard| {
+                // SAFETY: memory of this mr should have been initialized
+                return Some(MappedRwLockWriteGuard::map(guard, |ptr| unsafe {
+                    Cursor::new(slice::from_raw_parts_mut(ptr, self.length()))
                 }));
             },
         )

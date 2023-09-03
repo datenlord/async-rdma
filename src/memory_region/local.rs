@@ -12,7 +12,6 @@ use sealed::sealed;
 use std::{
     alloc::{dealloc, Layout},
     fmt::Debug,
-    io::Cursor,
     ops::Range,
     slice,
     sync::Arc,
@@ -87,37 +86,6 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
                 // SAFETY: memory of this mr should have been initialized
                 return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
                     slice::from_raw_parts(ptr, self.length())
-                }));
-            },
-        )
-    }
-
-    /// Get the memory region as slice until it is readable warppered with cursor
-    /// user can use cursor to read or write data without maintaining the index manually
-    ///
-    /// If this mr is being used in RDMA ops, the thread may be blocked
-    #[inline]
-    #[allow(clippy::as_conversions)]
-    fn as_slice_cursor(&self) -> MappedRwLockReadGuard<Cursor<&[u8]>> {
-        // SAFETY: memory of this mr should have been initialized
-        MappedRwLockReadGuard::map(self.as_ptr(), |ptr| unsafe {
-            Cursor::new(slice::from_raw_parts(ptr, self.length()))
-        })
-    }
-
-    /// Try to get the memory region as slice warppered with cursor
-    /// user can use cursor to read or write data without maintaining the index manually
-    ///
-    /// Return `None` if this mr is being used in RDMA ops without blocking thread
-    #[allow(clippy::as_conversions)]
-    #[inline]
-    fn try_as_slice_cursor(&self) -> Option<MappedRwLockReadGuard<Cursor<&[u8]>>> {
-        self.try_as_ptr().map_or_else(
-            || None,
-            |guard| {
-                // SAFETY: memory of this mr should have been initialized
-                return Some(MappedRwLockReadGuard::map(guard, |ptr| unsafe {
-                    Cursor::new(slice::from_raw_parts(ptr, self.length()))
                 }));
             },
         )
@@ -307,38 +275,6 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
         )
     }
 
-    /// Try to get the memory region as mutable slice warppered with cursor
-    /// user can use cursor to read or write data without maintaining the index manually
-    ///
-    /// If this mr is being used in RDMA ops, the thread may be blocked
-    #[inline]
-    #[allow(clippy::as_conversions)]
-    fn as_mut_slice_cursor(&mut self) -> MappedRwLockWriteGuard<Cursor<&mut [u8]>> {
-        let len = self.length();
-        // SAFETY: memory of this mr should have been initialized
-        MappedRwLockWriteGuard::map(self.as_mut_ptr(), |ptr| unsafe {
-            Cursor::new(slice::from_raw_parts_mut(ptr, len))
-        })
-    }
-
-    /// Try to get the memory region as mutable slice warppered with cursor
-    /// user can use cursor to read or write data without maintaining the index manually
-    ///
-    /// Return `None` if this mr is being used in RDMA ops without blocking thread
-    #[inline]
-    #[allow(clippy::as_conversions)]
-    fn try_as_mut_slice_cursor(&mut self) -> Option<MappedRwLockWriteGuard<Cursor<&mut [u8]>>> {
-        self.try_as_mut_ptr().map_or_else(
-            || None,
-            |guard| {
-                // SAFETY: memory of this mr should have been initialized
-                return Some(MappedRwLockWriteGuard::map(guard, |ptr| unsafe {
-                    Cursor::new(slice::from_raw_parts_mut(ptr, self.length()))
-                }));
-            },
-        )
-    }
-
     /// Get the memory region as mut slice without lock
     ///
     /// # Safety
@@ -512,6 +448,56 @@ impl LocalMr {
             self.addr = self.addr.wrapping_add(i.start);
             self.len = i.end.wrapping_sub(i.start);
             Some(self)
+        }
+    }
+
+    /// Splits the bytes into two at the given index.
+    ///
+    /// Afterwards `self` contains elements `[at, len)`, and the returned
+    /// `Bytes` contains elements `[0, at)`.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// ```
+	///     #[tokio::test]
+    ///		async fn test_lmr_split() -> io::Result<()> {
+    /// 		let rdma = RdmaBuilder::default()
+    /// 			.set_port_num(1)
+    /// 			.set_gid_index(1)
+    /// 			.build()?;
+    /// 		let layout = Layout::new::<[u8; 4096]>();
+    /// 		let mut lmr = rdma.alloc_local_mr(layout)?;
+    /// 		let start_addr = lmr.addr();
+    /// 		let lmr_half = lmr.split_to(2048);
+    /// 		assert!(lmr_half.is_some());
+    /// 		let lmr_half = lmr_half.unwrap();
+    /// 		assert_eq!(lmr_half.length(), 2048);
+    /// 		assert_eq!(lmr_half.addr(), start_addr);
+    /// 		let lmr_overbound = lmr.split_to(2049);
+    /// 		assert!(lmr_overbound.is_none());
+	/// 		Ok(())
+	///     }		
+    /// ```
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    pub fn split_to(&mut self, at: usize) -> Option<Self> {
+        // SAFETY: `self` is checked to be valid and in bounds above.
+        if at > self.length() {
+            None
+        } else {
+            let old_addr = self.addr;
+            self.addr = self.addr.wrapping_add(at);
+            self.len = self.len.wrapping_sub(at);
+            Some(Self {
+                inner: self.inner.clone(),
+                addr: old_addr,
+                len: at,
+            })
         }
     }
 

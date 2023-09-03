@@ -900,6 +900,20 @@ impl QueuePair {
         QueuePairOps::new(Arc::<Self>::clone(self), send, get_lmr_inners(lms))
     }
 
+    /// submit send request of local memory regions, without waiting for completion
+    pub(crate) fn submit_send_sge<LR>(
+        self: &Arc<Self>,
+        lms: Vec<LR>,
+        imm: Option<u32>,
+    ) -> QueuePairOpsSubmit<QPSendOwn<LR>>
+    where
+        LR: LocalMrReadAccess + Unpin,
+    {
+        let inners = get_lmr_inners(&(lms.iter().map(|lm| lm).collect::<Vec<_>>()));
+        let send = QPSendOwn::new(lms, imm);
+        QueuePairOpsSubmit::new(Arc::<Self>::clone(self), send, inners)
+    }
+
     /// Send raw data
     #[cfg(feature = "raw")]
     pub(crate) async fn send_sge_raw<'a, LR>(
@@ -1205,6 +1219,59 @@ where
             .map(|sz| debug!("post size: {sz}, mr len: {}", self.len))
     }
 }
+
+/// Queue pair send operation
+#[derive(Debug)]
+pub(crate) struct QPSendOwn<LR>
+where
+    LR: LocalMrReadAccess,
+{
+    /// local memory regions
+    lms: Vec<LR>,
+    /// length of data to send
+    len: usize,
+    /// Optionally, an immediate 4 byte value may be transmitted with the data buffer.
+    imm: Option<u32>,
+}
+
+impl<LR> QPSendOwn<LR>
+where
+    LR: LocalMrReadAccess,
+{
+    /// Create a new send operation from `lms`
+    fn new(lms: Vec<LR>, imm: Option<u32>) -> Self
+    where
+        LR: LocalMrReadAccess,
+    {
+        Self {
+            len: lms.iter().map(|lm| lm.length()).sum(),
+            lms,
+            imm,
+        }
+    }
+}
+
+impl<LR> QueuePairOp for QPSendOwn<LR>
+where
+    LR: LocalMrReadAccess,
+{
+    type Output = ();
+
+    fn submit(&self, qp: &QueuePair, wr_id: WorkRequestId) -> io::Result<()> {
+        let lr_ref = self.lms.iter().map(|lm| lm).collect::<Vec<_>>();
+        qp.submit_send(&lr_ref, wr_id, self.imm)
+    }
+
+    fn should_resubmit(&self, e: &io::Error) -> bool {
+        matches!(e.kind(), io::ErrorKind::OutOfMemory)
+    }
+
+    fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
+        wc.result()
+            .map(|sz| debug!("post size: {sz}, mr len: {}", self.len))
+    }
+}
+
 /// Queue pair receive operation
 #[derive(Debug)]
 pub(crate) struct QPRecv<'lm, LW>
@@ -1241,6 +1308,32 @@ where
 
     fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
         wc.result_with_imm()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct QueuePairOpsInflight<Op: QueuePairOp> {
+    /// the operation
+    op: Op,
+    /// the work completion receiver
+    wc_rx: tokio::sync::mpsc::Receiver<WorkCompletion>,
+}
+
+impl<Op: QueuePairOp> QueuePairOpsInflight<Op> {
+    /// Create a new queue pair operation inflight
+    fn new(op: Op, wc_rx: tokio::sync::mpsc::Receiver<WorkCompletion>) -> Self {
+        Self { op, wc_rx }
+    }
+
+    /// Get the operation result
+    pub(crate) async fn result(&mut self) -> io::Result<Op::Output> {
+        match self.wc_rx.recv().await {
+            Some(wc) => self.op.result(wc).map_err(Into::into),
+            None => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Wc receiver unexpect closed",
+            )),
+        }
     }
 }
 
@@ -1328,6 +1421,75 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
                     )),
                 })
             }
+        }
+    }
+}
+
+/// Queue pair operation wrapper, return after libv_post_send
+#[derive(Debug)]
+pub(crate) struct QueuePairOpsSubmit<Op: QueuePairOp + Unpin> {
+    /// the internal queue pair
+    qp: Arc<QueuePair>,
+    /// operation state
+    state: QueuePairOpsState,
+    /// the operation
+    op: Option<Op>,
+}
+
+impl<Op: QueuePairOp + Unpin> QueuePairOpsSubmit<Op> {
+    /// Create a new queue QueuePairOpsSubmit wrapper
+    fn new(qp: Arc<QueuePair>, op: Op, inners: LmrInners) -> Self {
+        Self {
+            qp,
+            state: QueuePairOpsState::Init(inners),
+            op: Some(op),
+        }
+    }
+}
+
+impl<Op: QueuePairOp + Unpin> Future for QueuePairOpsSubmit<Op> {
+    type Output = io::Result<QueuePairOpsInflight<Op>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let s = self.get_mut();
+        match s.state {
+            QueuePairOpsState::Init(ref inners) => {
+                let (wr_id, recv) = s.qp.cq_event_listener.register_for_write(inners)?;
+                s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::Submit(wr_id, ref mut recv) => {
+                let op = s.op.as_mut().unwrap();
+                if let Err(e) = op.submit(&s.qp, wr_id) {
+                    if op.should_resubmit(&e) {
+                        let sleep = Box::pin(sleep(RESUBMIT_DELAY));
+                        s.state = QueuePairOpsState::PendingToResubmit(sleep, wr_id, recv.take());
+                    } else {
+                        tracing::error!("failed to submit the operation");
+                        // TODO: deregister wrid
+                        return Poll::Ready(Err(e));
+                    }
+                } else {
+                    match recv.take().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::Other, "Bug in queue pair op poll")
+                    }) {
+                        Ok(recv) => {
+                            return Poll::Ready(Ok(QueuePairOpsInflight::new(
+                                s.op.take().unwrap(),
+                                recv,
+                            )));
+                        }
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::PendingToResubmit(ref mut sleep, wr_id, ref mut recv) => {
+                ready!(sleep.poll_unpin(cx));
+                s.state = QueuePairOpsState::Submit(wr_id, recv.take());
+                Pin::new(s).poll(cx)
+            }
+            QueuePairOpsState::Submitted(_) => unreachable!(),
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::context::Context;
 use crate::hashmap_extension::HashMapExtension;
 use crate::ibv_event_listener::IbvEventListener;
-use crate::queue_pair::MAX_RECV_WR;
+use crate::queue_pair::{QPSendOwn, QueuePairOp, QueuePairOpsInflight, MAX_RECV_WR};
 use crate::rmr_manager::RemoteMrManager;
 use crate::RemoteMrReadAccess;
 use crate::{
@@ -247,6 +247,34 @@ impl Agent {
             start = end;
         }
         Ok(())
+    }
+
+    /// Send the content in the `lm` to the other side
+    pub(crate) async fn submit_send_data(
+        &self,
+        lms: Vec<LocalMr>,
+        imm: Option<u32>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        let lm_len = lms.iter().map(|lm| lm.length()).sum::<usize>();
+        assert!(lm_len <= self.max_msg_len());
+        let kind = RequestKind::SendData(SendDataRequest { len: lm_len });
+        let req_submitted = self
+            .inner
+            // SAFETY: The input range is always valid
+            .submit_send_request_append_data(kind, lms, imm)
+            .await?;
+        Ok(req_submitted)
+    }
+
+    pub(crate) async fn split_to_parts(&self, mut lm: LocalMr) -> Vec<LocalMr> {
+        let mut lm_len = lm.length();
+        let mut parts = Vec::new();
+        while lm_len > 0 {
+            let end = self.max_msg_len().min(lm_len);
+            parts.push(lm.split_to(end).unwrap());
+            lm_len -= end;
+        }
+        parts
     }
 
     /// Receive content sent from the other side and stored in the `LocalMr`
@@ -689,6 +717,45 @@ impl AgentInner {
         }
     }
 
+    /// submit a send request with data appended
+    async fn submit_send_request_append_data(
+        &self,
+        kind: RequestKind,
+        data: Vec<LocalMr>,
+        imm: Option<u32>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        let data_len: usize = data.iter().map(|l| l.length()).sum();
+        assert!(data_len <= self.max_sr_data_len);
+        let (tx, mut rx) = channel(2);
+        let req_id = self
+            .response_waits
+            .lock()
+            .insert_until_success(tx, AgentRequestId::new);
+        let req = Request {
+            request_id: req_id,
+            kind,
+        };
+        // SAFETY: ?
+        // TODO: check safety
+        let mut header_buf = self
+            .allocator
+            // alignment 1 is always correct
+            .alloc_zeroed_default(unsafe {
+                &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
+            })?;
+        // SAFETY: the mr is writeable here without cancel safety issue
+        let cursor = Cursor::new(unsafe { header_buf.as_mut_slice_unchecked() });
+        let message = Message::Request(req);
+        // FIXME: serialize udpate
+        bincode::serialize_into(cursor, &message)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // SAFETY: The input range is always valid
+        let mut lmrs = vec![header_buf];
+        lmrs.extend(data);
+        let inflight = self.qp.submit_send_sge(lmrs, imm).await?;
+        Ok(RequestSubmitted::new(inflight, rx))
+    }
+
     /// Send a response to the other side
     async fn send_response(&self, response: Response) -> io::Result<()> {
         // SAFETY: ?
@@ -968,4 +1035,21 @@ enum Message {
     Request(Request),
     /// Response
     Response(Response),
+}
+
+#[derive(Debug)]
+pub(crate) struct RequestSubmitted<Op: QueuePairOp> {
+    /// the operation of the request
+    inflight: QueuePairOpsInflight<Op>,
+    /// receiver for the response of the request
+    rx: Receiver<Result<ResponseKind, io::Error>>,
+}
+
+impl<Op: QueuePairOp> RequestSubmitted<Op> {
+    fn new(
+        inflight: QueuePairOpsInflight<Op>,
+        rx: Receiver<Result<ResponseKind, io::Error>>,
+    ) -> Self {
+        Self { inflight, rx }
+    }
 }

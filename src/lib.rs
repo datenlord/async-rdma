@@ -166,7 +166,7 @@ mod work_request;
 
 use access::flags_into_ibv_access;
 pub use access::AccessFlag;
-use agent::{Agent, MAX_MSG_LEN};
+use agent::{Agent, RequestSubmitted, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
@@ -184,7 +184,8 @@ pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
+    QPSend, QPSendOwn, QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr,
+    SQAttrBuilder,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -195,7 +196,14 @@ use rdma_sys::{
 use rmr_manager::DEFAULT_RMR_TIMEOUT;
 #[cfg(feature = "cm")]
 use std::ptr::null_mut;
-use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
+use std::{
+    alloc::Layout,
+    collections::{BTreeMap, VecDeque},
+    fmt::Debug,
+    io,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -1669,6 +1677,21 @@ impl Rdma {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
             .send_data(lm, None)
+            .await
+    }
+
+    /// submit send of the `lm`
+    ///
+    /// Used with `receive`.
+    #[inline]
+    async fn submit_send(
+        &self,
+        lm: Vec<LocalMr>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .submit_send_data(lm, None)
             .await
     }
 

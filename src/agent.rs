@@ -917,7 +917,7 @@ struct AllocMRRequest {
 
 /// Response to the alloc MR request
 #[derive(Debug, Serialize, Deserialize)]
-struct AllocMRResponse {
+pub(crate) struct AllocMRResponse {
     /// The token to access the MR
     token: MrToken,
 }
@@ -931,7 +931,7 @@ struct ReleaseMRRequest {
 
 /// Response to the release MR request
 #[derive(Debug, Serialize, Deserialize)]
-struct ReleaseMRResponse {
+pub(crate) struct ReleaseMRResponse {
     /// The status of the operation
     status: usize,
 }
@@ -954,7 +954,7 @@ struct SendMRRequest {
 
 /// Response to the request of sending MR
 #[derive(Debug, Serialize, Deserialize)]
-struct SendMRResponse {
+pub(crate) struct SendMRResponse {
     /// The kinds of Response to the request of sending MR
     kind: SendMRResponseKind,
 }
@@ -978,9 +978,9 @@ struct SendDataRequest {
 
 /// Response to the request of sending data
 #[derive(Debug, Serialize, Deserialize)]
-struct SendDataResponse {
+pub(crate) struct SendDataResponse {
     /// response status
-    status: usize,
+    pub(crate) status: usize,
 }
 
 /// Request type enumeration
@@ -1008,7 +1008,7 @@ struct Request {
 /// Response type enumeration
 #[derive(Serialize, Deserialize, Debug)]
 #[allow(variant_size_differences)]
-enum ResponseKind {
+pub(crate) enum ResponseKind {
     /// Allocate MR
     AllocMR(AllocMRResponse),
     /// Release MR
@@ -1051,5 +1051,19 @@ impl<Op: QueuePairOp> RequestSubmitted<Op> {
         rx: Receiver<Result<ResponseKind, io::Error>>,
     ) -> Self {
         Self { inflight, rx }
+    }
+
+    /// Wait for the response of the request
+    pub(crate) async fn response(mut self) -> io::Result<ResponseKind> {
+        let _ = self.inflight.result().await?;
+        match tokio::time::timeout(RESPONSE_TIMEOUT, self.rx.recv()).await {
+            Ok(resp) => {
+                resp.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout for waiting for a response.",
+            )),
+        }
     }
 }

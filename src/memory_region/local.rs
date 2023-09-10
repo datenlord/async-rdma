@@ -527,28 +527,29 @@ impl LocalMr {
     /// # Examples
     ///
     /// ```
-	///     #[tokio::test]
-    ///		async fn test_lmr_split() -> io::Result<()> {
-    /// 		let rdma = RdmaBuilder::default()
-    /// 			.set_port_num(1)
-    /// 			.set_gid_index(1)
-    /// 			.build()?;
-    /// 		let layout = Layout::new::<[u8; 4096]>();
-    /// 		let mut lmr = rdma.alloc_local_mr(layout)?;
-    /// 		let start_addr = lmr.addr();
-    /// 		let lmr_half = lmr.split_to(2048);
-    /// 		assert!(lmr_half.is_some());
-    /// 		let lmr_half = lmr_half.unwrap();
-    /// 		assert_eq!(lmr_half.length(), 2048);
-    /// 		assert_eq!(lmr_half.addr(), start_addr);
-    /// 		let lmr_overbound = lmr.split_to(2049);
-    /// 		assert!(lmr_overbound.is_none());
-	/// 		Ok(())
-	///     }		
+    ///     #[tokio::test]
+    ///     async fn test_lmr_split() -> io::Result<()> {
+    ///         let rdma = RdmaBuilder::default()
+    ///             .set_port_num(1)
+    ///             .set_gid_index(1)
+    ///             .build()?;
+    ///         let layout = Layout::new::<[u8; 4096]>();
+    ///         let mut lmr = rdma.alloc_local_mr(layout)?;
+    ///         let start_addr = lmr.addr();
+    ///         let lmr_half = lmr.split_to(2048);
+    ///         assert!(lmr_half.is_some());
+    ///         let lmr_half = lmr_half.unwrap();
+    ///         assert_eq!(lmr_half.length(), 2048);
+    ///         assert_eq!(lmr_half.addr(), start_addr);
+    ///         let lmr_overbound = lmr.split_to(2049);
+    ///         assert!(lmr_overbound.is_none());
+    ///         Ok(())
+    ///     }
     /// ```
     /// # Panics
     ///
     /// Panics if `at > len`.
+    #[inline]
     pub fn split_to(&mut self, at: usize) -> Option<Self> {
         // SAFETY: `self` is checked to be valid and in bounds above.
         if at > self.length() {

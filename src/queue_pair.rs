@@ -1312,6 +1312,7 @@ where
 }
 
 #[derive(Debug)]
+/// Queue pair operation submitted in wq, waitting for wc
 pub(crate) struct QueuePairOpsInflight<Op: QueuePairOp> {
     /// the operation
     op: Op,
@@ -1425,7 +1426,7 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
     }
 }
 
-/// Queue pair operation wrapper, return after libv_post_send
+/// Queue pair operation wrapper, return after `libv_post_send`
 #[derive(Debug)]
 pub(crate) struct QueuePairOpsSubmit<Op: QueuePairOp + Unpin> {
     /// the internal queue pair
@@ -1437,7 +1438,7 @@ pub(crate) struct QueuePairOpsSubmit<Op: QueuePairOp + Unpin> {
 }
 
 impl<Op: QueuePairOp + Unpin> QueuePairOpsSubmit<Op> {
-    /// Create a new queue QueuePairOpsSubmit wrapper
+    /// Create a new queue `QueuePairOpsSubmit` wrapper
     fn new(qp: Arc<QueuePair>, op: Op, inners: LmrInners) -> Self {
         Self {
             qp,

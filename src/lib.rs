@@ -1675,6 +1675,7 @@ impl Rdma {
     /// submit send of the `lm`
     ///
     /// Used with `receive`.
+    #[allow(unused)]
     #[inline]
     async fn submit_send(
         &self,
@@ -1696,6 +1697,7 @@ impl Rdma {
         lm: Vec<LocalMr>,
         imm: u32,
     ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        debug!("submit send seq_id {:?}", imm);
         self.agent
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
@@ -4088,7 +4090,7 @@ impl Rdma {
     }
 }
 
-/// The wrapper of a RDMA RC connection, with convient methods to write and read.
+/// The wrapper of a RDMA RC connection, with convient methods to write and read and order guarantee.
 /// TODO how to close stream
 #[derive(Debug)]
 pub struct RCStream {
@@ -4107,19 +4109,13 @@ pub struct RCStream {
 }
 
 impl RCStream {
-    /// Create a new RCStream with Rdma
+    /// Create a new `RCStream` with Rdma
+    #[must_use]
     pub fn new(inner: Rdma) -> Self {
         let (inflights_tx, mut inflights_rx) = mpsc::channel(1024);
         let _ = tokio::spawn(async move {
-            loop {
-                match inflights_rx.recv().await {
-                    Some(inflight) => {
-                        let _ = Self::handle_send_wc(inflight).await;
-                    }
-                    None => {
-                        break;
-                    }
-                }
+            while let Some(inflight) = inflights_rx.recv().await {
+                let _ = Self::handle_send_wc(inflight).await;
             }
         });
         RCStream {
@@ -4132,15 +4128,7 @@ impl RCStream {
         }
     }
 
-    /// Get the next sequence number, if the current sequence number is u32::MAX, return 0
-    fn next_seq(seq: u32) -> u32 {
-        if seq == u32::MAX {
-            0
-        } else {
-            seq + 1
-        }
-    }
-
+    /// handle the send wc, and check `ResponseKind`
     async fn handle_send_wc(inflight: RequestSubmitted<QPSendOwn<LocalMr>>) -> io::Result<()> {
         let resp = inflight.response().await?;
         if let ResponseKind::SendData(send_data_resp) = resp {
@@ -4165,26 +4153,30 @@ impl RCStream {
         Ok(())
     }
 
-    /// Send a LocalMr to the remote peer.
+    /// Send a `LocalMr` whose size is less than `max_message_length` to the remote peer.
+    pub async fn send_lmr_segment(&mut self, lmr_segment: LocalMr) -> io::Result<()> {
+        let inflight = self
+            .inner
+            .submit_send_with_imm(vec![lmr_segment], self.send_seq)
+            .await?;
+        self.send_seq = self.send_seq.wrapping_add(1);
+        match self.inflights_tx.send(inflight).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "inflight queue is full",
+            )),
+        }
+    }
+
+    /// Send a `LocalMr` to the remote peer.
     pub async fn send_lmr(&mut self, mut lmr: LocalMr) -> io::Result<()> {
         while lmr.length() > self.inner.clone_attr.agent_attr.max_message_length {
+            // split to multiple lmr segments
             let lmr_segment = lmr.split_to(self.inner.clone_attr.agent_attr.max_message_length);
-
-            let inflight = self
-                .inner
-                .submit_send_with_imm(vec![lmr_segment.unwrap()], self.send_seq)
-                .await?;
-            self.send_seq = Self::next_seq(self.send_seq);
-            match self.inflights_tx.send(inflight).await {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "inflight queue is full",
-                    ))
-                }
-            }
+            self.send_lmr_segment(lmr_segment.unwrap()).await?;
         }
+        self.send_lmr_segment(lmr).await?;
         Ok(())
     }
 
@@ -4194,11 +4186,13 @@ impl RCStream {
             match self.recv_buf.remove(&self.recv_seq) {
                 Some(lmr) => {
                     self.read_buf = Some(lmr);
-                    self.recv_seq = Self::next_seq(self.recv_seq);
+                    self.recv_seq = self.recv_seq.wrapping_add(1);
                     break;
                 }
                 None => {
+                    // if next lmr is not in recv_buf, wait for next recv and check again
                     let (lmr, seq) = self.inner.receive_with_imm().await?;
+                    debug!("recieve seq: {:?}", seq);
                     match self.recv_buf.insert(seq.unwrap(), lmr) {
                         Some(_) => {
                             return Err(io::Error::new(
@@ -4214,7 +4208,7 @@ impl RCStream {
         Ok(())
     }
 
-    /// recieve LocalMrs whose total size equal to the given size
+    /// recieve `LocalMrs` whose total size equal to the given size
     /// TODO how to read eof?
     pub async fn recieve_lmr(&mut self, mut fill_size: usize) -> io::Result<Vec<LocalMr>> {
         let mut ret_lmr = vec![];
@@ -4234,6 +4228,19 @@ impl RCStream {
             }
         }
         Ok(ret_lmr)
+    }
+
+    /// Allocate a local memory region
+    /// The parameter `layout` can be obtained by `Layout::new::<Data>()`.
+    pub fn alloc_local_mr(&mut self, layout: Layout) -> io::Result<LocalMr> {
+        self.inner.alloc_local_mr(layout)
+    }
+}
+
+impl From<Rdma> for RCStream {
+    /// Create a `RCStream` from a Rdma
+    fn from(rdma: Rdma) -> Self {
+        Self::new(rdma)
     }
 }
 

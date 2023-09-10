@@ -266,17 +266,6 @@ impl Agent {
         Ok(req_submitted)
     }
 
-    pub(crate) async fn split_to_parts(&self, mut lm: LocalMr) -> Vec<LocalMr> {
-        let mut lm_len = lm.length();
-        let mut parts = Vec::new();
-        while lm_len > 0 {
-            let end = self.max_msg_len().min(lm_len);
-            parts.push(lm.split_to(end).unwrap());
-            lm_len -= end;
-        }
-        parts
-    }
-
     /// Receive content sent from the other side and stored in the `LocalMr`
     pub(crate) async fn receive_data(&self) -> io::Result<(LocalMr, Option<u32>)> {
         let (lmr, len, imm) = self
@@ -726,7 +715,7 @@ impl AgentInner {
     ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
         let data_len: usize = data.iter().map(|l| l.length()).sum();
         assert!(data_len <= self.max_sr_data_len);
-        let (tx, mut rx) = channel(2);
+        let (tx, rx) = channel(2);
         let req_id = self
             .response_waits
             .lock()
@@ -1037,6 +1026,7 @@ enum Message {
     Response(Response),
 }
 
+/// Queue pair operation submitted in wq, waitting for wc & response
 #[derive(Debug)]
 pub(crate) struct RequestSubmitted<Op: QueuePairOp> {
     /// the operation of the request
@@ -1046,6 +1036,7 @@ pub(crate) struct RequestSubmitted<Op: QueuePairOp> {
 }
 
 impl<Op: QueuePairOp> RequestSubmitted<Op> {
+    /// Create a new `RequestSubmitted`
     fn new(
         inflight: QueuePairOpsInflight<Op>,
         rx: Receiver<Result<ResponseKind, io::Error>>,

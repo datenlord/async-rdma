@@ -3,14 +3,15 @@
 //!
 //! You can try this example by running:
 //!
-//!     cargo run --example server
+//!     cargo run --example server <server_ip> <port>
 //!
 //! And start client in another terminal by running:
 //!
-//!     cargo run --example client
+//!     cargo run --example client <server_ip> <port>
 
-use async_rdma::{LocalMrReadAccess, Rdma, RdmaBuilder};
+use async_rdma::{LocalMrReadAccess, LocalMrWriteAccess, MrAccess, RCStream, Rdma, RdmaBuilder};
 use clippy_utilities::Cast;
+use std::io::Write;
 use std::{alloc::Layout, env, io, process::exit};
 
 /// receive data from client
@@ -90,6 +91,35 @@ async fn receive_mr_after_being_written_by_cas(rdma: &Rdma) -> io::Result<()> {
     Ok(())
 }
 
+async fn rcstream_send(stream: &mut RCStream) -> io::Result<()> {
+    for i in 0..10 {
+        // alloc 8 bytes local memory
+        let mut lmr = stream.alloc_local_mr(Layout::new::<[u8; 8]>())?;
+        // write data into lmr
+        let _num = lmr.as_mut_slice().write(&[i as u8; 8])?;
+        // send data in mr to the remote end
+        stream.send_lmr(lmr).await?;
+        println!("stream send datagram {} ", i);
+    }
+    Ok(())
+}
+
+async fn rcstream_recv(stream: &mut RCStream) -> io::Result<()> {
+    for i in 0..10 {
+        // recieve data from the remote end
+        let mut lmr_vec = stream.recieve_lmr(8).await?;
+        println!("stream recieve datagram {}", i);
+        // check the length of the recieved data
+        assert!(lmr_vec.len() == 1);
+        let lmr = lmr_vec.pop().unwrap();
+        assert!(lmr.length() == 8);
+        let buff = *(lmr.as_slice());
+        // check the data
+        assert_eq!(buff, [i as u8; 8]);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     println!("server start");
@@ -129,5 +159,8 @@ async fn main() {
             .unwrap();
         receive_mr_after_being_written_by_cas(&rdma).await.unwrap();
     }
+    let mut stream: RCStream = rdma.into();
+    rcstream_recv(&mut stream).await.unwrap();
+    rcstream_send(&mut stream).await.unwrap();
     println!("server done");
 }

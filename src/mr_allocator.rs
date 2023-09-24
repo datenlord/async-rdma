@@ -19,7 +19,9 @@ use std::{
     ptr,
     sync::Arc,
 };
-use tikv_jemalloc_sys::{self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_ZERO};
+use tikv_jemalloc_sys::{
+    self, extent_hooks_t, MALLOCX_ALIGN, MALLOCX_ARENA, MALLOCX_TCACHE_NONE, MALLOCX_ZERO,
+};
 use tracing::{debug, error};
 
 /// Get default extent hooks from arena0
@@ -299,7 +301,12 @@ impl MrAllocator {
 ///
 /// This func is safe when `zeroed == true`, otherwise newly allocated memory is uninitialized.
 unsafe fn alloc_from_je(arena_ind: u32, layout: &Layout, flag: i32) -> Option<*mut u8> {
-    let flags = (MALLOCX_ALIGN(layout.align()) | MALLOCX_ARENA(arena_ind.cast()) | flag).cast();
+    // set align 、 arena_id and flags for this allocation, and disable tcache for lookup_raw_mr check
+    let flags = (MALLOCX_ALIGN(layout.align())
+        | MALLOCX_ARENA(arena_ind.cast())
+        | MALLOCX_TCACHE_NONE()
+        | flag)
+        .cast();
     debug!(
         "alloc mr from je, arena_ind: {:?}, layout: {:?}, flags: {:?}",
         arena_ind, layout, flags

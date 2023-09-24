@@ -1153,6 +1153,9 @@ pub(crate) trait QueuePairOp {
 
     /// get the request result of the work completion
     fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError>;
+
+    /// is this op's memory region will use to be written with data? For example, send will return false, recv will return true.
+    fn is_write() -> bool;
 }
 
 /// Queue pair send operation
@@ -1204,6 +1207,10 @@ where
         wc.result()
             .map(|sz| debug!("post size: {sz}, mr len: {}", self.len))
     }
+
+    fn is_write() -> bool {
+        false
+    }
 }
 /// Queue pair receive operation
 #[derive(Debug)]
@@ -1241,6 +1248,10 @@ where
 
     fn result(&self, wc: WorkCompletion) -> Result<Self::Output, WCError> {
         wc.result_with_imm()
+    }
+
+    fn is_write() -> bool {
+        true
     }
 }
 
@@ -1290,7 +1301,7 @@ impl<Op: QueuePairOp + Unpin> Future for QueuePairOps<Op> {
         let s = self.get_mut();
         match s.state {
             QueuePairOpsState::Init(ref inners) => {
-                let (wr_id, recv) = s.qp.cq_event_listener.register_for_write(inners)?;
+                let (wr_id, recv) = s.qp.cq_event_listener.register(inners, Op::is_write())?;
                 s.state = QueuePairOpsState::Submit(wr_id, Some(recv));
                 Pin::new(s).poll(cx)
             }

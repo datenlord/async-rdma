@@ -145,7 +145,7 @@ impl AsRef<ibv_send_wr> for SendWr {
     }
 }
 
-impl<'lm> AsMut<ibv_send_wr> for SendWr {
+impl AsMut<ibv_send_wr> for SendWr {
     fn as_mut(&mut self) -> &mut ibv_send_wr {
         &mut self.inner
     }

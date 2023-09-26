@@ -620,7 +620,7 @@ fn remove_item(addr: *mut c_void) {
 #[allow(clippy::as_conversions)]
 #[allow(clippy::unreachable)]
 fn remove_item_after_lock(map: &mut MutexGuard<BTreeMap<usize, Item>>, addr: *mut c_void) {
-    map.remove(&(addr as _)).map_or_else(
+    map.remove(&(addr as usize)).map_or_else(
         || {
             unreachable!(
                 "can not get item from EXTENT_TOKEN_MAP. addr : {}",

@@ -60,7 +60,7 @@ pub unsafe trait LocalMrReadAccess: MrAccess {
     #[inline]
     #[allow(clippy::as_conversions)]
     fn as_ptr_unchecked(&self) -> *const u8 {
-        self.addr() as _
+        self.addr() as *const u8
     }
 
     /// Get the memory region as slice until it is readable
@@ -274,7 +274,7 @@ pub unsafe trait LocalMrWriteAccess: MrAccess + LocalMrReadAccess {
     #[allow(clippy::as_conversions)]
     fn as_mut_ptr_unchecked(&mut self) -> *mut u8 {
         // const pointer to mut pointer is safe
-        self.as_ptr_unchecked() as _
+        self.as_ptr_unchecked() as *mut u8
     }
 
     /// Get the memory region as mutable slice until it is writeable
@@ -556,13 +556,13 @@ impl Drop for LocalMrInner {
         match self.strategy {
             crate::MRManageStrategy::Jemalloc => {
                 // SAFETY: ffi
-                unsafe { tikv_jemalloc_sys::free(self.addr as _) }
+                unsafe { tikv_jemalloc_sys::free(self.addr as *mut libc::c_void) }
             }
             crate::MRManageStrategy::Raw => {
                 // SAFETY: The ptr is allocated via this allocator, and the layout is the same layout
                 // that was used to allocate that block of memory.
                 unsafe {
-                    dealloc(self.addr as _, self.layout);
+                    dealloc(self.addr as *mut u8, self.layout);
                 }
             }
         }

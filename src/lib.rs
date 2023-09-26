@@ -96,7 +96,7 @@
     warnings, // treat all wanings as errors
 
     clippy::all,
-    clippy::restriction,
+    // clippy::restriction,
     clippy::pedantic,
     // clippy::nursery, // It's still under development
     clippy::cargo,

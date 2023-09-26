@@ -5,7 +5,7 @@ on:
   schedule: [cron: "0 */24 * * *"]
 
 env:
-  CI_RUST_TOOLCHAIN: 1.61.0
+  CI_RUST_TOOLCHAIN: 1.63.0
 
 jobs:
   soft-roce-env:

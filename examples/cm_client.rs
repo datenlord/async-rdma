@@ -30,7 +30,7 @@ async fn run(node: &str, service: &str) {
         .alloc_local_mr(Layout::new::<[u8; BUF_SIZE]>())
         .unwrap();
     let _ = lmr.as_mut_slice().write(&[BUF_FILLER; BUF_SIZE]).unwrap();
-    let _ = rdma.send_raw(&lmr).await.unwrap();
+    rdma.send_raw(&lmr).await.unwrap();
     println!("send {:?}", *lmr.as_slice());
 
     // recv raw data from server

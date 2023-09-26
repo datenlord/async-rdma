@@ -337,21 +337,17 @@ impl AgentThread {
 
     /// The main agent function that handles messages sent from the other side
     async fn main(self: Arc<Self>) -> io::Result<()> {
-        // SAFETY: ?
-        // TODO: check safety
         let mut header_buf = self
             .inner
             .allocator
-            // alignment 1 is always correct
+            // SAFETY: alignment 1 is always correct
             .alloc_zeroed_default(unsafe {
                 &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
             })?;
-        // SAFETY: ?
-        // TODO: check safety
         let mut data_buf = self
             .inner
             .allocator
-            // alignment 1 is always correct
+            // SAFETY: alignment 1 is always correct
             .alloc_zeroed_default(unsafe {
                 &Layout::from_size_align_unchecked(self.max_sr_data_len, 1)
             })?;

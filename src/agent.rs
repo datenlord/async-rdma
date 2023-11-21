@@ -1,7 +1,7 @@
 use crate::context::Context;
 use crate::hashmap_extension::HashMapExtension;
 use crate::ibv_event_listener::IbvEventListener;
-use crate::queue_pair::MAX_RECV_WR;
+use crate::queue_pair::{QPSendOwn, QueuePairOp, QueuePairOpsInflight, MAX_RECV_WR};
 use crate::rmr_manager::RemoteMrManager;
 use crate::RemoteMrReadAccess;
 use crate::{
@@ -247,6 +247,23 @@ impl Agent {
             start = end;
         }
         Ok(())
+    }
+
+    /// Send the content in the `lm` to the other side
+    pub(crate) async fn submit_send_data(
+        &self,
+        lms: Vec<LocalMr>,
+        imm: Option<u32>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        let lm_len = lms.iter().map(|lm| lm.length()).sum::<usize>();
+        assert!(lm_len <= self.max_msg_len());
+        let kind = RequestKind::SendData(SendDataRequest { len: lm_len });
+        let req_submitted = self
+            .inner
+            // SAFETY: The input range is always valid
+            .submit_send_request_append_data(kind, lms, imm)
+            .await?;
+        Ok(req_submitted)
     }
 
     /// Receive content sent from the other side and stored in the `LocalMr`
@@ -685,6 +702,45 @@ impl AgentInner {
         }
     }
 
+    /// submit a send request with data appended
+    async fn submit_send_request_append_data(
+        &self,
+        kind: RequestKind,
+        data: Vec<LocalMr>,
+        imm: Option<u32>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        let data_len: usize = data.iter().map(|l| l.length()).sum();
+        assert!(data_len <= self.max_sr_data_len);
+        let (tx, rx) = channel(2);
+        let req_id = self
+            .response_waits
+            .lock()
+            .insert_until_success(tx, AgentRequestId::new);
+        let req = Request {
+            request_id: req_id,
+            kind,
+        };
+        // SAFETY: ?
+        // TODO: check safety
+        let mut header_buf = self
+            .allocator
+            // alignment 1 is always correct
+            .alloc_zeroed_default(unsafe {
+                &Layout::from_size_align_unchecked(*REQUEST_HEADER_MAX_LEN, 1)
+            })?;
+        // SAFETY: the mr is writeable here without cancel safety issue
+        let cursor = Cursor::new(unsafe { header_buf.as_mut_slice_unchecked() });
+        let message = Message::Request(req);
+        // FIXME: serialize udpate
+        bincode::serialize_into(cursor, &message)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // SAFETY: The input range is always valid
+        let mut lmrs = vec![header_buf];
+        lmrs.extend(data);
+        let inflight = self.qp.submit_send_sge(lmrs, imm).await?;
+        Ok(RequestSubmitted::new(inflight, rx))
+    }
+
     /// Send a response to the other side
     async fn send_response(&self, response: Response) -> io::Result<()> {
         // SAFETY: ?
@@ -846,7 +902,7 @@ struct AllocMRRequest {
 
 /// Response to the alloc MR request
 #[derive(Debug, Serialize, Deserialize)]
-struct AllocMRResponse {
+pub(crate) struct AllocMRResponse {
     /// The token to access the MR
     token: MrToken,
 }
@@ -860,7 +916,7 @@ struct ReleaseMRRequest {
 
 /// Response to the release MR request
 #[derive(Debug, Serialize, Deserialize)]
-struct ReleaseMRResponse {
+pub(crate) struct ReleaseMRResponse {
     /// The status of the operation
     status: usize,
 }
@@ -883,7 +939,7 @@ struct SendMRRequest {
 
 /// Response to the request of sending MR
 #[derive(Debug, Serialize, Deserialize)]
-struct SendMRResponse {
+pub(crate) struct SendMRResponse {
     /// The kinds of Response to the request of sending MR
     kind: SendMRResponseKind,
 }
@@ -907,9 +963,9 @@ struct SendDataRequest {
 
 /// Response to the request of sending data
 #[derive(Debug, Serialize, Deserialize)]
-struct SendDataResponse {
+pub(crate) struct SendDataResponse {
     /// response status
-    status: usize,
+    pub(crate) status: usize,
 }
 
 /// Request type enumeration
@@ -937,7 +993,7 @@ struct Request {
 /// Response type enumeration
 #[derive(Serialize, Deserialize, Debug)]
 #[allow(variant_size_differences)]
-enum ResponseKind {
+pub(crate) enum ResponseKind {
     /// Allocate MR
     AllocMR(AllocMRResponse),
     /// Release MR
@@ -964,4 +1020,37 @@ enum Message {
     Request(Request),
     /// Response
     Response(Response),
+}
+
+/// Queue pair operation submitted in wq, waitting for wc & response
+#[derive(Debug)]
+pub(crate) struct RequestSubmitted<Op: QueuePairOp> {
+    /// the operation of the request
+    inflight: QueuePairOpsInflight<Op>,
+    /// receiver for the response of the request
+    rx: Receiver<Result<ResponseKind, io::Error>>,
+}
+
+impl<Op: QueuePairOp> RequestSubmitted<Op> {
+    /// Create a new `RequestSubmitted`
+    fn new(
+        inflight: QueuePairOpsInflight<Op>,
+        rx: Receiver<Result<ResponseKind, io::Error>>,
+    ) -> Self {
+        Self { inflight, rx }
+    }
+
+    /// Wait for the response of the request
+    pub(crate) async fn response(mut self) -> io::Result<ResponseKind> {
+        let _ = self.inflight.result().await?;
+        match tokio::time::timeout(RESPONSE_TIMEOUT, self.rx.recv()).await {
+            Ok(resp) => {
+                resp.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "agent is dropped"))?
+            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout for waiting for a response.",
+            )),
+        }
+    }
 }

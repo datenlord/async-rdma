@@ -166,7 +166,7 @@ mod work_request;
 
 use access::flags_into_ibv_access;
 pub use access::AccessFlag;
-use agent::{Agent, MAX_MSG_LEN};
+use agent::{Agent, RequestSubmitted, ResponseKind, MAX_MSG_LEN};
 use clippy_utilities::Cast;
 use completion_queue::{DEFAULT_CQ_SIZE, DEFAULT_MAX_CQE};
 use context::Context;
@@ -184,7 +184,7 @@ pub use mr_allocator::MRManageStrategy;
 use mr_allocator::MrAllocator;
 use protection_domain::ProtectionDomain;
 use queue_pair::{
-    QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
+    QPSendOwn, QueuePair, QueuePairInitAttrBuilder, RQAttr, RQAttrBuilder, SQAttr, SQAttrBuilder,
 };
 use rdma_sys::ibv_access_flags;
 #[cfg(feature = "cm")]
@@ -195,7 +195,7 @@ use rdma_sys::{
 use rmr_manager::DEFAULT_RMR_TIMEOUT;
 #[cfg(feature = "cm")]
 use std::ptr::null_mut;
-use std::{alloc::Layout, fmt::Debug, io, sync::Arc, time::Duration};
+use std::{alloc::Layout, collections::BTreeMap, fmt::Debug, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -1669,6 +1669,39 @@ impl Rdma {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
             .send_data(lm, None)
+            .await
+    }
+
+    /// submit send of the `lm`
+    ///
+    /// Used with `receive`.
+    #[allow(unused)]
+    #[inline]
+    async fn submit_send(
+        &self,
+        lm: Vec<LocalMr>,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .submit_send_data(lm, None)
+            .await
+    }
+
+    /// submit send of the `lm` with imm
+    ///
+    /// Used with `receive_with_imm`.
+    #[inline]
+    async fn submit_send_with_imm(
+        &self,
+        lm: Vec<LocalMr>,
+        imm: u32,
+    ) -> io::Result<RequestSubmitted<QPSendOwn<LocalMr>>> {
+        debug!("submit send seq_id {:?}", imm);
+        self.agent
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Agent is not ready"))?
+            .submit_send_data(lm, Some(imm))
             .await
     }
 
@@ -4054,6 +4087,160 @@ impl Rdma {
             .ibv_event_listener()
             .last_event_type()
             .lock())
+    }
+}
+
+/// The wrapper of a RDMA RC connection, with convient methods to write and read and order guarantee.
+/// TODO how to close stream
+#[derive(Debug)]
+pub struct RCStream {
+    /// inner rdma transport
+    inner: Rdma,
+    /// current send sequence number
+    send_seq: u32,
+    /// current recv sequence number
+    recv_seq: u32,
+    /// current lmr to read
+    read_buf: Option<LocalMr>,
+    /// received lmr buffer, rdma will recv data from many AgentThread, which may cause out of order
+    recv_buf: BTreeMap<u32, LocalMr>,
+    /// sender of inflight requests, anthor task will wait for the completion of the request
+    inflights_tx: mpsc::Sender<RequestSubmitted<QPSendOwn<LocalMr>>>,
+}
+
+impl RCStream {
+    /// Create a new `RCStream` with Rdma
+    #[must_use]
+    pub fn new(inner: Rdma) -> Self {
+        let (inflights_tx, mut inflights_rx) = mpsc::channel(1024);
+        let _ = tokio::spawn(async move {
+            while let Some(inflight) = inflights_rx.recv().await {
+                let _ = Self::handle_send_wc(inflight).await;
+            }
+        });
+        RCStream {
+            inner,
+            send_seq: 0,
+            recv_seq: 0,
+            read_buf: None,
+            recv_buf: BTreeMap::new(),
+            inflights_tx,
+        }
+    }
+
+    /// handle the send wc, and check `ResponseKind`
+    async fn handle_send_wc(inflight: RequestSubmitted<QPSendOwn<LocalMr>>) -> io::Result<()> {
+        let resp = inflight.response().await?;
+        if let ResponseKind::SendData(send_data_resp) = resp {
+            if send_data_resp.status > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "send data failed, response status is {}",
+                        send_data_resp.status
+                    ),
+                ));
+            }
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "send data failed, due to unexpected response type {:?}",
+                    resp
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Send a `LocalMr` whose size is less than `max_message_length` to the remote peer.
+    pub async fn send_lmr_segment(&mut self, lmr_segment: LocalMr) -> io::Result<()> {
+        let inflight = self
+            .inner
+            .submit_send_with_imm(vec![lmr_segment], self.send_seq)
+            .await?;
+        self.send_seq = self.send_seq.wrapping_add(1);
+        match self.inflights_tx.send(inflight).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "inflight queue is full",
+            )),
+        }
+    }
+
+    /// Send a `LocalMr` to the remote peer.
+    pub async fn send_lmr(&mut self, mut lmr: LocalMr) -> io::Result<()> {
+        while lmr.length() > self.inner.clone_attr.agent_attr.max_message_length {
+            // split to multiple lmr segments
+            let lmr_segment = lmr.split_to(self.inner.clone_attr.agent_attr.max_message_length);
+            self.send_lmr_segment(lmr_segment.unwrap()).await?;
+        }
+        self.send_lmr_segment(lmr).await?;
+        Ok(())
+    }
+
+    /// wait for next data lmr
+    async fn read_next_lmr(&mut self) -> io::Result<()> {
+        loop {
+            match self.recv_buf.remove(&self.recv_seq) {
+                Some(lmr) => {
+                    self.read_buf = Some(lmr);
+                    self.recv_seq = self.recv_seq.wrapping_add(1);
+                    break;
+                }
+                None => {
+                    // if next lmr is not in recv_buf, wait for next recv and check again
+                    let (lmr, seq) = self.inner.receive_with_imm().await?;
+                    debug!("recieve seq: {:?}", seq);
+                    match self.recv_buf.insert(seq.unwrap(), lmr) {
+                        Some(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                "recv_buf can not contain duplicated seq",
+                            ))
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// recieve `LocalMrs` whose total size equal to the given size
+    /// TODO how to read eof?
+    pub async fn recieve_lmr(&mut self, mut fill_size: usize) -> io::Result<Vec<LocalMr>> {
+        let mut ret_lmr = vec![];
+        while fill_size > 0 {
+            if let Some(mut lmr) = self.read_buf.take() {
+                if lmr.length() > fill_size {
+                    let readed = lmr.split_to(fill_size);
+                    self.read_buf = Some(lmr);
+                    ret_lmr.push(readed.unwrap());
+                    fill_size = 0;
+                } else {
+                    fill_size -= lmr.length();
+                    ret_lmr.push(lmr);
+                }
+            } else {
+                self.read_next_lmr().await?;
+            }
+        }
+        Ok(ret_lmr)
+    }
+
+    /// Allocate a local memory region
+    /// The parameter `layout` can be obtained by `Layout::new::<Data>()`.
+    pub fn alloc_local_mr(&mut self, layout: Layout) -> io::Result<LocalMr> {
+        self.inner.alloc_local_mr(layout)
+    }
+}
+
+impl From<Rdma> for RCStream {
+    /// Create a `RCStream` from a Rdma
+    fn from(rdma: Rdma) -> Self {
+        Self::new(rdma)
     }
 }
 
